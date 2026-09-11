@@ -25,8 +25,31 @@ export interface ChatSession {
   updatedAt: string;
 }
 
-/** 内嵌浏览器区域可订阅的事件名 */
-export type BrowserEvent = 'open' | 'show' | 'hide' | 'focus';
+/** 内嵌浏览器区域可订阅的事件名（state：第 4 步状态机广播，payload 为 TaskState 的 JSON） */
+export type BrowserEvent = 'open' | 'show' | 'hide' | 'focus' | 'state';
+
+// ---------------------------------------------------------------------------
+// 第 4 步：任务状态机
+//
+// 权威状态只有一个：主进程 electron/driver.ts 里的 phase；
+// 渲染层的横幅 / 状态行只是它的镜像（通过 'state' 事件广播同步）。
+// 约束不变：不接大模型——"决定下一步"是基于 read_page 快照的规则判断，
+// 且永远不重放暂停前的步骤（恢复时先读用户当前真实页面，再决定）。
+// ---------------------------------------------------------------------------
+
+/** 状态机：idle 待命 → running 驾驶中 ⇄ paused 用户接管 → done / failed 终止 */
+export type TaskPhase = 'idle' | 'running' | 'paused' | 'done' | 'failed';
+
+/** 主进程广播 / getTaskState 返回的状态快照 */
+export interface TaskState {
+  phase: TaskPhase;
+  /** 人可读的进度或失败原因，直接展示在界面上 */
+  detail: string;
+  /** 本次运行段已执行的步数（调试用） */
+  step: number;
+  /** 自动 click / type 当前是否被拒（主进程 paused 门的镜像，调试区据此如实显示） */
+  blocked: boolean;
+}
 
 // ---------------------------------------------------------------------------
 // 第 3 步：本地驾驶（遥控器先通，不接 AI）
@@ -118,6 +141,19 @@ export interface WorkbenchBridge {
   pauseDriving: () => Promise<boolean>;
   /** 恢复驾驶：允许再次自动 click / type */
   resumeDriving: () => Promise<boolean>;
+
+  // ---- 第 4 步：任务状态机（idle | running | paused | done | failed）----
+  /** 启动任务：主进程先 read_page 读当前真实页面，再决定下一步；running/paused 中调用不产生副作用 */
+  startTask: () => Promise<TaskState>;
+  /** 暂停：立即停止自动 click/type，内嵌页交还用户手点（running 时中断任务循环） */
+  pauseTask: () => Promise<TaskState>;
+  /** 继续：先 read_page 读用户当前真实页面再决定下一步，禁止重放暂停前的步骤 */
+  resumeTask: () => Promise<TaskState>;
+  /** 复位：任意状态回到 idle，用于从 done / failed 重新开始 */
+  resetTask: () => Promise<TaskState>;
+  /** 读取主进程权威状态（渲染进程挂载时初始同步用） */
+  getTaskState: () => Promise<TaskState>;
+
   /** 订阅主进程转发过来的 UI 指令，返回取消订阅函数 */
   on: (event: BrowserEvent, callback: (payload?: string) => void) => () => void;
 }

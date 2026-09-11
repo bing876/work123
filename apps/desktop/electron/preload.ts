@@ -32,6 +32,13 @@ const bridge: WorkbenchBridge = {
   pauseDriving: () => ipcRenderer.invoke('workbench:pause-driving', true),
   resumeDriving: () => ipcRenderer.invoke('workbench:pause-driving', false),
 
+  // ---- 第 4 步：任务状态机（权威状态在主进程，这里只发指令 / 取镜像）----
+  startTask: () => ipcRenderer.invoke('workbench:task:start'),
+  pauseTask: () => ipcRenderer.invoke('workbench:task:pause'),
+  resumeTask: () => ipcRenderer.invoke('workbench:task:resume'),
+  resetTask: () => ipcRenderer.invoke('workbench:task:reset'),
+  getTaskState: () => ipcRenderer.invoke('workbench:task:state'),
+
   /**
    * 简易订阅：把主进程发来的 'workbench:browser:*' 转成回调。
    * 返回取消订阅函数（contextBridge 会把函数代理过去）。

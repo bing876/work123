@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { BrowserAction, DriveResult } from '@ai-workbench/shared';
+import type { BrowserAction, DriveResult, TaskPhase, TaskState } from '@ai-workbench/shared';
 
 /**
  * 第 2 步（内嵌版）「脸和门」：
@@ -10,11 +10,26 @@ import type { BrowserAction, DriveResult } from '@ai-workbench/shared';
  *   - 右栏底部加一块**很丑的调试区**，用几个按钮证明程序能驾驶这块内嵌页
  *   - 驾驶走 preload → 主进程 → 内嵌 webview 的 webContents（CDP），不接大模型
  *   - 调试区刻意不做美化，UI 统一留给前端会话
+ *
+ * 第 4 步「任务状态机」：
+ *   - idle | running | paused | done | failed 的**权威状态在主进程 driver.ts**，
+ *     这里只订阅它的 'state' 广播做镜像（大字横幅 / 状态行）
+ *   - 「暂停 / 我来操作」、以及**左侧聊天发一句话**，都让主进程立刻停止自动 click/type
+ *   - 「继续」= 主进程先 read_page 读你当前的真实页面再决定下一步（不重放暂停前步骤）
+ *   - 不接大模型、不新开窗口、不加标签页、不动右栏宽度与整体 UI
  */
 
 type Role = 'user' | 'assistant';
 type Message = { id: number; role: Role; text: string };
-type Controller = 'ai' | 'user';
+
+/** 状态机 → 展示文案（主进程是唯一事实源，这里只是翻译） */
+const PHASE_LABEL: Record<TaskPhase, string> = {
+  idle: 'idle · 待命',
+  running: 'running · AI 驾驶中',
+  paused: 'paused · 你接管中',
+  done: 'done · 任务完成',
+  failed: 'failed · 任务失败',
+};
 
 /** 写死的开场白，让界面一打开就有内容 */
 const SEED_MESSAGES: Message[] = [
@@ -22,6 +37,7 @@ const SEED_MESSAGES: Message[] = [
   { id: 2, role: 'user', text: '先不用接 AI，我要看见工作台。' },
   { id: 3, role: 'assistant', text: '好的，我把工作台浏览器放到右边这一栏。' },
   { id: 4, role: 'assistant', text: '第 3 步：调试区那几个按钮可以直接驾驶右边这块内嵌页。' },
+  { id: 5, role: 'assistant', text: '第 4 步：现在是状态机 idle/running/paused/done/failed——点「开始任务」，随时「暂停」或发一句话接管，「继续」会先读你停留的页面。' },
 ];
 
 /** 工作台浏览器的默认落地页 */
@@ -59,8 +75,17 @@ function formatResult(res: DriveResult): string {
 export default function App() {
   /** 头像右上角红点，可手动开关 */
   const [hasUnread, setHasUnread] = useState(true);
-  /** 当前谁在控制：只影响右侧大字文案 + 浏览器区域能不能点 */
-  const [controller, setController] = useState<Controller>('ai');
+  /**
+   * 第 4 步：任务状态机的镜像。
+   * 权威状态在主进程（driver.ts），挂载时取一次 + 之后靠 'state' 广播同步；
+   * 大字横幅「AI 正在控制 / 你正在控制」由它推导，不再用本地 state 猜测。
+   */
+  const [task, setTask] = useState<TaskState>({
+    phase: 'idle',
+    detail: '等待主进程同步…',
+    step: 0,
+    blocked: false,
+  });
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Message[]>(SEED_MESSAGES);
   /** 第 1 步的 IPC 自检，留着当回归哨兵 */
@@ -73,9 +98,7 @@ export default function App() {
   const [browserUrl, setBrowserUrl] = useState(DEFAULT_BROWSER_URL);
   const webviewRef = useRef<HTMLElement | null>(null);
 
-  // ---- 第 3 步调试区状态（全部只在内存里） ----
-  /** 驾驶是否已暂停（暂停后 click / type 不会自动执行） */
-  const [drivingPaused, setDrivingPaused] = useState(false);
+  // ---- 第 3 步调试区状态（全部只在内存里；暂停语义已并入第 4 步状态机） ----
   /** 最近一次驾驶结果，直接摊在主窗口上 */
   const [driveOutput, setDriveOutput] = useState('还没执行过动作。点上面的按钮试试。');
   /** screenshot 动作的产物（内存里的 data URL，不入库） */
@@ -95,10 +118,24 @@ export default function App() {
       .catch(() => setBridgeInfo('preload 桥调用失败'));
   }, []);
 
-  // 订阅主进程转发过来的 UI 指令（open / show / hide / focus）
+  // 订阅主进程转发过来的 UI 指令（open / show / hide / focus / state）
   useEffect(() => {
     const bridge = window.workbench;
     if (!bridge) return;
+
+    // 第 4 步：状态机镜像 = 初始拉取一次 + 订阅广播（主进程是权威，这里只跟随）
+    bridge
+      .getTaskState()
+      .then(setTask)
+      .catch(() => setTask((s) => ({ ...s, detail: '读取主进程状态失败（preload 桥异常）' })));
+    const offState = bridge.on('state', (payload) => {
+      if (!payload) return;
+      try {
+        setTask(JSON.parse(payload) as TaskState);
+      } catch {
+        /* 坏负载忽略，等下一次广播 */
+      }
+    });
 
     const offOpen = bridge.on('open', (url) => {
       if (url) setBrowserUrl(url);
@@ -122,12 +159,15 @@ export default function App() {
       offShow();
       offHide();
       offFocus();
+      offState();
     };
   }, []);
 
+  // running 才是「AI 正在控制」；idle / paused / done / failed 一律把控制权写给你
+  const aiInControl = task.phase === 'running';
   const bannerText = useMemo(
-    () => (controller === 'ai' ? 'AI 正在控制' : '你正在控制'),
-    [controller],
+    () => (aiInControl ? 'AI 正在控制' : '你正在控制'),
+    [aiInControl],
   );
 
   /**
@@ -135,8 +175,8 @@ export default function App() {
    *
    * "AI 正在控制"只表示执行器可自动 click/type；不能把 webview 元素本身设为
    * pointer-events:none。那会让 Chromium 的命中测试直接跳过 guest，造成暂停/我来操作
-   * 后用户仍点不进网页的假死。真正的自动驾驶开关在主进程 driver.ts 的 paused 状态，
-   * 不是靠 CSS 吃掉鼠标。
+   * 后用户仍点不进网页的假死。真正的自动驾驶开关在主进程 driver.ts 的状态机
+   * （paused 标志 + phase），不是靠 CSS 吃掉鼠标。
    */
   const pointerEvents = 'auto';
 
@@ -147,6 +187,18 @@ export default function App() {
     setMessages((prev) => prev.concat({ id: Date.now(), role: 'user', text: value }));
     setInput('');
     setHasUnread(false);
+    // 第 4 步：running 时发一句话 = 用户接管 → 立刻让主进程暂停（权威横幅随后由广播改回「你正在控制」）。
+    // 只在确认 running 时通知，空闲时发消息不产生任何驾驶副作用。
+    if (aiInControl) {
+      setMessages((prev) =>
+        prev.concat({
+          id: Date.now() + 1,
+          role: 'assistant',
+          text: '收到你的消息，已立刻暂停自动 click/type（状态机 → paused）。想让我接着做就点「继续」：我会先 read_page 读你停留的真实页面，再决定下一步，不重放之前的步骤。',
+        }),
+      );
+      void window.workbench?.pauseTask();
+    }
   };
 
   // 打开 / 查看浏览器：先本地显示，再走 IPC 通知主进程（不等回包，避免闪一下）
@@ -215,14 +267,27 @@ export default function App() {
     }
   };
 
+  // ---- 第 4 步：状态机按钮。本地不记账，一切以下方 'state' 广播回来的 task 为准 ----
+
+  /** 开始 / 重新执行 demo 任务：先保证内嵌页可见（复用第 2/3 步的显示逻辑，不做新外壳） */
+  const onStartTask = () => {
+    setBrowserMounted(true);
+    setBrowserVisible(true);
+    void window.workbench?.startTask();
+  };
+
   const onPauseDriving = () => {
-    setController('user');
-    void window.workbench?.pauseDriving().then((value) => setDrivingPaused(value));
+    // 「暂停 / 我来操作」= 主进程状态机 running→paused：立刻停自动 click/type，页面交还用户手点
+    void window.workbench?.pauseTask();
   };
 
   const onResumeDriving = () => {
-    setController('ai');
-    void window.workbench?.resumeDriving().then((value) => setDrivingPaused(value));
+    // 「继续」= 主进程先 read_page 读当前真实页面再决定下一步（driver.runLoop 第一步就是读页）
+    void window.workbench?.resumeTask();
+  };
+
+  const onResetTask = () => {
+    void window.workbench?.resetTask();
   };
 
   return (
@@ -277,8 +342,14 @@ export default function App() {
       {/* 右侧：控制文案 + 任务卡片 + 调试区 + 内嵌工作台浏览器 */}
       <aside className="right">
         <div className="banner">{bannerText}</div>
+        <div className="small" style={{ textAlign: 'center', marginTop: -8 }}>
+          状态机 {PHASE_LABEL[task.phase]}（步 {task.step}）· {task.detail}
+        </div>
 
         <div className="controls">
+          <button className="btn" type="button" onClick={onStartTask}>
+            开始任务
+          </button>
           <button className="btn" type="button" onClick={onPauseDriving}>
             暂停
           </button>
@@ -287,6 +358,9 @@ export default function App() {
           </button>
           <button className="btn" type="button" onClick={onPauseDriving}>
             我来操作
+          </button>
+          <button className="btn" type="button" onClick={onResetTask}>
+            复位任务
           </button>
         </div>
 
@@ -365,7 +439,8 @@ export default function App() {
             </button>
           </div>
           <div className="small debug__state">
-            驾驶状态：{drivingPaused ? '已暂停（click / type 不会自动执行）' : '驾驶中'}
+            状态机：{PHASE_LABEL[task.phase]}（主进程权威）· 单发自动 click / type{' '}
+            {task.blocked ? '已被拒——页面已交还给你手点' : '放行中'}
           </div>
           <pre className="debug__out">{driveOutput}</pre>
           {shot && <img className="debug__shot" src={shot} alt="内嵌页截图" />}

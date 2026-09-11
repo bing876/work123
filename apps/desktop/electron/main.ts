@@ -1,6 +1,15 @@
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import path from 'node:path';
-import { drive, setDrivingPaused } from './driver';
+import {
+  drive,
+  setDrivingPaused,
+  setTaskListener,
+  getTaskState,
+  startTask,
+  pauseTask,
+  resumeTask,
+  resetTask,
+} from './driver';
 import type { BrowserAction } from '@ai-workbench/shared';
 
 /**
@@ -155,7 +164,26 @@ ipcMain.handle('workbench:read-page', (_event, targetWebContentsId?: number) =>
 );
 
 // 暂停 / 恢复驾驶：暂停后 click / type 会被执行器拒绝，页面交还给用户手动点
+// （第 4 步起与状态机同进同退：setDrivingPaused 内部就是 applyPaused）
 ipcMain.handle('workbench:pause-driving', (_event, value: boolean) => setDrivingPaused(value));
+
+// ---------------------------------------------------------------------------
+// 第 4 步：任务状态机（idle | running | paused | done | failed）
+//
+// 权威状态在主进程 driver.ts；这里只做两件事：
+//   1. 收渲染层的四个指令（start / pause / resume / reset）+ 一个初始读取；
+//   2. 状态一变就广播 'workbench:browser:state'，渲染层横幅「AI 正在控制 / 你正在控制」
+//      只是镜像——按钮与聊天框谁按下的都不影响"以主进程为准"这一条。
+// ---------------------------------------------------------------------------
+setTaskListener((state) => {
+  sendToMainWindow('workbench:browser:state', JSON.stringify(state));
+});
+
+ipcMain.handle('workbench:task:start', () => startTask());
+ipcMain.handle('workbench:task:pause', () => pauseTask());
+ipcMain.handle('workbench:task:resume', () => resumeTask());
+ipcMain.handle('workbench:task:reset', () => resetTask());
+ipcMain.handle('workbench:task:state', () => getTaskState());
 
 // 单实例锁：重复启动时聚焦已有窗口，而不是再开一个
 const gotTheLock = app.requestSingleInstanceLock();

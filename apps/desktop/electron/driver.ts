@@ -4,6 +4,8 @@ import type {
   BrowserActionType,
   DriveResult,
   PageSnapshot,
+  TaskPhase,
+  TaskState,
 } from '@ai-workbench/shared';
 
 /**
@@ -19,13 +21,89 @@ import type {
  *   - 渲染进程不 require('electron')，所有能力只从 preload 的 window.workbench.* 进来
  *
  * 执行器形态：传入一个动作 → 在内嵌页执行 → 返回 { ok, pageSnapshot }。
+ *
+ * 第 4 步：在"单发动作"之上加一层**任务状态机**（idle | running | paused | done | failed）。
+ * 权威状态只有主进程这一份；渲染层的横幅（「AI 正在控制 / 你正在控制」）通过 'state' 广播做镜像。
+ * 明确**不接大模型**：恢复运行时的"下一步"是基于 read_page 快照的规则判断（planNext），
+ * 并且每一步执行前都复查状态机 —— 暂停后不会再发出任何一次自动 click / type，也永远
+ * 不重放暂停前的步骤（恢复 = 先读用户当前真实页面，再据此决定）。
  */
 
-/** 暂停开关：为 true 时 click / type 一律不执行，把页面交还给用户 */
+/** 暂停开关（第 3 步语义保留）：为 true 时调试区的 click / type 一律拒绝执行，把页面交还给用户 */
 let paused = false;
 
-export function setDrivingPaused(value: boolean): boolean {
+/** 被暂停拦截的动作（其余动作如 open_url / scroll / read_page 仍然允许） */
+const PAUSED_BLOCKED: ReadonlySet<BrowserActionType> = new Set<BrowserActionType>(['click', 'type']);
+
+type Target = Electron.WebContents;
+
+// ---------------------------------------------------------------------------
+// 第 4 步：状态机
+// ---------------------------------------------------------------------------
+
+let phase: TaskPhase = 'idle';
+let phaseDetail = 'idle · 待命（任务：在百度搜索「AI 工作台」并进入结果页）';
+let phaseStep = 0;
+
+/** 循环令牌：每次开始 / 暂停都自增；循环只在令牌与状态都仍有效时才继续下一步 */
+let loopToken = 0;
+
+/** 主进程注册的状态监听（main.ts 用于向渲染层广播） */
+let stateListener: ((s: TaskState) => void) | null = null;
+
+export function setTaskListener(fn: ((s: TaskState) => void) | null): void {
+  stateListener = fn;
+}
+
+function broadcast(): void {
+  stateListener?.(getTaskState());
+}
+
+export function getTaskState(): TaskState {
+  return { phase, detail: phaseDetail, step: phaseStep, blocked: paused };
+}
+
+function setPhase(next: TaskPhase, detail: string, step = phaseStep): void {
+  phase = next;
+  phaseDetail = detail;
+  phaseStep = step;
+  broadcast();
+}
+
+/** 任务步骤中途被用户接管时抛出：它不算失败，只是本步作废 */
+class TaskAborted extends Error {
+  constructor() {
+    super('任务步骤被中止（用户已接管）');
+    this.name = 'TaskAborted';
+  }
+}
+
+const trunc = (s: string, n = 28): string => (s.length > n ? `${s.slice(0, n)}…` : s);
+
+/**
+ * 统一的暂停 / 恢复入口：
+ * - 暂停 = 置起 paused 标志（挡住调试区的自动 click/type）+ running 的任务循环立即停；
+ * - 恢复 = 解除标志；若任务处于 paused，则重启循环（循环第一步就是 read_page，天然满足
+ *   "先读用户当前真实页面再决定下一步"）。
+ */
+function applyPaused(value: boolean): void {
   paused = value;
+  if (value) {
+    loopToken += 1; // 让在途循环在下一个检查点退出
+    if (phase === 'running') {
+      setPhase('paused', '已暂停 — 自动 click/type 已停止，内嵌页可手点（点「继续」先读你停留的页面）');
+    } else {
+      setPhase(phase, '已暂停 — 自动 click/type 被拒绝（当前不在任务运行中，无其它副作用）');
+    }
+  } else if (phase === 'paused') {
+    void beginRun('继续驾驶 — 先 read_page 读你当前的真实页面，再决定下一步（不重放暂停前的步骤）');
+  } else {
+    setPhase(phase, '自动 click/type 已解除限制');
+  }
+}
+
+export function setDrivingPaused(value: boolean): boolean {
+  applyPaused(value);
   return paused;
 }
 
@@ -33,10 +111,147 @@ export function isDrivingPaused(): boolean {
   return paused;
 }
 
-type Target = Electron.WebContents;
+/** 启动任务：只从 idle / done / failed 进入 running；running / paused 中调用不重复启动 */
+export function startTask(): TaskState {
+  if (phase === 'running') {
+    setPhase('running', '任务已在运行中，无需重复启动');
+    return getTaskState();
+  }
+  if (phase === 'paused') {
+    setPhase('paused', '当前是暂停态 — 请点「继续」（会先读你当前的真实页面，再决定下一步）');
+    return getTaskState();
+  }
+  paused = false;
+  return beginRun('启动任务 — 先 read_page 读当前真实页面，再决定下一步');
+}
 
-/** 被暂停拦截的动作（其余动作如 open_url / scroll / read_page 仍然允许） */
-const PAUSED_BLOCKED: ReadonlySet<BrowserActionType> = new Set<BrowserActionType>(['click', 'type']);
+export function pauseTask(): TaskState {
+  applyPaused(true);
+  return getTaskState();
+}
+
+export function resumeTask(): TaskState {
+  if (phase === 'paused') {
+    applyPaused(false); // 解除 paused 门 + 重启循环（循环第一步就是 read_page）
+  } else {
+    // 非 paused 态点「继续」：不做其它事，但必须解除 paused 门
+    // （idle 下按过「暂停」的用户，再按「继续」应恢复单发 click/type 放行）
+    paused = false;
+    setPhase(phase, `当前不是暂停态（${phase}），无需「继续」；已解除 click/type 限制，要开始任务请点「开始任务」`);
+  }
+  return getTaskState();
+}
+
+export function resetTask(): TaskState {
+  loopToken += 1;
+  paused = false;
+  setPhase('idle', '已复位到 idle（done / failed 之后回到这里，再点「开始任务」）', 0);
+  return getTaskState();
+}
+
+/** 进入 running 并在后台跑循环；同步返回初始状态（循环结果由 'state' 广播） */
+function beginRun(detail: string): TaskState {
+  const token = ++loopToken;
+  setPhase('running', detail, 0);
+  void runLoop(token);
+  return getTaskState();
+}
+
+/** 第 4 步 demo 任务的规则常量（与第 3 步调试区一致，不接 AI、选择器写成逗号列表降级） */
+const TASK_QUERY = 'AI 工作台';
+const TASK_URL = 'https://www.baidu.com';
+const TASK_INPUT = '#kw, textarea#chat-textarea';
+const TASK_SUBMIT = '#su, button#chat-submit-button';
+
+const MAX_TASK_STEPS = 10;
+
+type Decision =
+  | { kind: 'go'; action: BrowserAction; note: string }
+  | { kind: 'goal'; reason: string }
+  | { kind: 'stuck'; reason: string };
+
+/**
+ * 规则式"决定下一步"（明确不是 AI）：只依据 read_page 快照判断还差哪一步。
+ * 因为决策完全基于**当前真实页面**，所以天然不会重放暂停前的步骤——
+ * 用户手点改了什么，恢复后看到的就是什么。
+ */
+export function planNext(s: PageSnapshot): Decision {
+  const url = (s.url || '').toLowerCase();
+  if (!url.startsWith('http')) {
+    return { kind: 'stuck', reason: `内嵌页当前不是 http(s) 页面（${url || '空白页'}），请先「打开工作台浏览器」` };
+  }
+  if (/baidu\.com\/s([?#]|$)/.test(url) || /_百度搜索\s*$/.test(s.title || '')) {
+    return { kind: 'goal', reason: `已进入搜索结果页「${trunc(s.title)}」` };
+  }
+  if (!/baidu\.com/.test(url)) {
+    return { kind: 'go', action: { action: 'open_url', url: TASK_URL }, note: `打开 ${TASK_URL}` };
+  }
+  const typed = (s.inputs || []).some((i) => i.includes(`value=${TASK_QUERY}`));
+  if (!typed) {
+    return { kind: 'go', action: { action: 'type', target: TASK_INPUT, text: TASK_QUERY }, note: `在搜索框输入「${TASK_QUERY}」` };
+  }
+  return { kind: 'go', action: { action: 'click', target: TASK_SUBMIT }, note: '点击搜索按钮提交' };
+}
+
+/** 执行任务的一步：复用第 3 步的执行原语，但把失败抛出来（由循环转成 failed） */
+async function runStep(action: BrowserAction, shouldAbort: () => boolean): Promise<void> {
+  const wc = resolveTarget(undefined);
+  if (!shouldAbort()) throw new TaskAborted();
+  switch (action.action) {
+    case 'open_url':
+      await navigate(wc, action.url);
+      return;
+    case 'click': {
+      const hit = await clickTarget(wc, action.target, shouldAbort);
+      if (!hit) throw new Error(`点击失败：没找到元素「${action.target}」`);
+      return;
+    }
+    case 'type': {
+      const r = await typeInto(wc, action.target, action.text, Boolean(action.submit), shouldAbort);
+      if (!r.ok) throw new Error(r.reason);
+      return;
+    }
+    case 'scroll':
+      await scrollPage(wc, action.direction);
+      return;
+    case 'read_page':
+      // 快照已在外层读过，这一步只作为显式"读页"步存在（本任务里由循环内部完成）
+      return;
+    default:
+      throw new Error(`任务不支持动作：${String((action as { action: string }).action)}`);
+  }
+}
+
+async function runLoop(token: number): Promise<void> {
+  const alive = (): boolean => token === loopToken && phase === 'running';
+  try {
+    for (let step = 1; step <= MAX_TASK_STEPS; step += 1) {
+      if (!alive()) return;
+      const wc = resolveTarget(undefined);
+      // 每一步都先读用户当前真实页面（恢复后的第一次决策同样走这里）
+      const snap = await readSnapshot(wc);
+      if (!alive()) return;
+      setPhase('running', `步 ${step}：读页「${trunc(snap.title || snap.url)}」`, step);
+      const d = planNext(snap);
+      if (d.kind === 'goal') {
+        setPhase('done', `任务完成 — ${d.reason}`, step);
+        return;
+      }
+      if (d.kind === 'stuck') {
+        setPhase('failed', `任务失败 — ${d.reason}`, step);
+        return;
+      }
+      setPhase('running', `步 ${step}：${d.note}`, step);
+      // 步内每个会动鼠标键盘的原语都会复查 alive；步后也复查，暂停后绝不进入下一步
+      await runStep(d.action, alive);
+      if (!alive()) return;
+    }
+    setPhase('failed', `任务失败 — 超过步数上限（第 ${MAX_TASK_STEPS} 步仍在进行），已停止`, MAX_TASK_STEPS);
+  } catch (err) {
+    if (err instanceof TaskAborted) return; // 用户接管的正常中止，保持 paused 显示
+    setPhase('failed', `任务失败 — ${(err as Error).message}`, phaseStep);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // 找到要驾驶的那块内嵌页
@@ -253,7 +468,12 @@ async function navigate(wc: Target, url: string): Promise<void> {
 async function clickTarget(
   wc: Target,
   target: string,
+  /** 第 4 步：任务循环传入的存活检查；每个鼠标动作发出前复查，暂停即中止本步 */
+  shouldAbort?: () => boolean,
 ): Promise<{ label: string; method: string; hittable: boolean } | null> {
+  const tick = (): void => {
+    if (shouldAbort && !shouldAbort()) throw new TaskAborted();
+  };
   const hit = await evaluate<{
     x: number;
     y: number;
@@ -288,6 +508,7 @@ async function clickTarget(
   if (!hit) return null;
 
   if (hit.hittable) {
+    tick();
     const dbg = ensureAttached(wc);
     await dbg.sendCommand('Input.dispatchMouseEvent', {
       type: 'mouseMoved', x: hit.x, y: hit.y, button: 'none', clickCount: 0,
@@ -303,6 +524,7 @@ async function clickTarget(
   }
 
   // 元素不在视口内（或被别的东西盖住）：真实鼠标点不到，退化为页面侧 click()
+  tick();
   const done = await evaluate<boolean>(
     wc,
     pageScript(`(() => {
@@ -334,7 +556,12 @@ async function typeInto(
   target: string,
   value: string,
   submit: boolean,
+  /** 第 4 步：任务循环传入的存活检查；每个键盘/写入动作发出前复查，暂停即中止本步 */
+  shouldAbort?: () => boolean,
 ): Promise<{ ok: true; label: string; method: string } | { ok: false; reason: string }> {
+  const tick = (): void => {
+    if (shouldAbort && !shouldAbort()) throw new TaskAborted();
+  };
   const found = await evaluate<{ tag: string; label: string; x: number; y: number } | null>(
     wc,
     pageScript(`(() => {
@@ -368,6 +595,7 @@ async function typeInto(
 
   /** 先补一次真实鼠标点击：不少站点（含百度的新版搜索框）靠 mousedown/focus 处理器才真正激活输入框 */
   if (found.x > 0 && found.y > 0) {
+    tick();
     await dbg.sendCommand('Input.dispatchMouseEvent', {
       type: 'mousePressed', x: found.x, y: found.y, button: 'left', clickCount: 1,
     });
@@ -392,12 +620,14 @@ async function typeInto(
   let method = 'none';
 
   // 1) CDP 真实输入：正常桌面环境下最接近真人操作
+  tick();
   await dbg.sendCommand('Input.insertText', { text: value });
   await sleep(250);
   if (await written()) method = 'cdp-insertText';
 
   // 2) 页面侧 execCommand：仍走 Chromium 编辑管线，beforeinput / input 事件都正常
   if (method === 'none') {
+    tick();
     await evaluate(
       wc,
       pageScript(`(() => {
@@ -413,6 +643,7 @@ async function typeInto(
 
   // 3) 原生 setter + InputEvent：对 React 受控组件最稳的兜底
   if (method === 'none') {
+    tick();
     await evaluate(
       wc,
       pageScript(`(() => {
@@ -447,6 +678,7 @@ async function typeInto(
 
   if (submit) {
     const beforeUrl = wc.getURL();
+    tick();
 
     // 1) CDP 真实回车键（正常桌面环境下有效；本机键盘注入会静默失效）
     await dbg.sendCommand('Input.dispatchKeyEvent', {
@@ -532,11 +764,14 @@ async function captureScreenshot(wc: Target): Promise<string> {
 export async function drive(action: BrowserAction, targetWebContentsId?: number): Promise<DriveResult> {
   const actionName = action.action;
 
+  // 第 3 步语义保留：paused 标志挡住调试区/外来的自动 click / type。
+  // 第 4 步起 paused 与状态机同进同退（「暂停」按钮走 pauseTask → applyPaused），
+  // 所以任务 running 时该门恒开、paused 时恒关。
   if (paused && PAUSED_BLOCKED.has(actionName)) {
     return {
       ok: false,
       action: actionName,
-      error: `驾驶已暂停，「${actionName}」不会自动执行；你可以在内嵌页上自己点。`,
+      error: `驾驶已暂停（状态机：${phase}），「${actionName}」不会自动执行；你可以在内嵌页上自己点。`,
     };
   }
 
