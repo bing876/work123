@@ -1,0 +1,313 @@
+:root {
+  --bg: #fafafa;
+  --panel: #ffffff;
+  --sidebar: #ffffff;
+  --border: #eeeeee;
+  --text: #222222;
+  --text-weak: #666666;
+  --accent: #2f6fed;
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Arial, 'Microsoft YaHei', sans-serif;
+  font-size: 14px;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* ---------- 三栏布局：联系人 | 聊天 | 控制 + 任务 ---------- */
+.app {
+  display: flex;
+  height: 100%;
+}
+
+/* ---------- 左栏 ---------- */
+.sidebar {
+  width: 220px;
+  flex: 0 0 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-right: 1px solid var(--border);
+  background: var(--sidebar);
+}
+
+.contact {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border-radius: 8px;
+  position: relative;
+}
+
+.avatar {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  border-radius: 50%;
+  background: #d9d9d9;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #6b6b6b;
+  font-weight: 700;
+}
+
+.avatar__face {
+  font-size: 15px;
+}
+
+.red-dot {
+  position: absolute;
+  right: -1px;
+  top: -1px;
+  width: 10px;
+  height: 10px;
+  background: #ff3b30;
+  border: 2px solid #fff;
+  border-radius: 50%;
+}
+
+.contact__name {
+  font-weight: 700;
+}
+
+.sidebar__footer {
+  margin-top: auto;
+  padding: 8px;
+  font-size: 12px;
+  color: var(--text-weak);
+  word-break: break-all;
+}
+
+/* ---------- 中栏：聊天 ---------- */
+.middle {
+  flex: 1 1 auto;
+  min-width: 260px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.chat {
+  flex: 1;
+  padding: 12px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.msg {
+  max-width: 70%;
+  padding: 8px 10px;
+  border-radius: 10px;
+  line-height: 1.35;
+  font-size: 14px;
+}
+
+.msg.assistant {
+  align-self: flex-start;
+  background: #fff;
+  border: 1px solid var(--border);
+}
+
+.msg.user {
+  align-self: flex-end;
+  background: #dcf3ff;
+  border: 1px solid #cde8fb;
+}
+
+.inputBar {
+  display: flex;
+  gap: 8px;
+  padding: 10px;
+  border-top: 1px solid var(--border);
+  background: #fff;
+}
+
+.inputBar input {
+  flex: 1;
+  padding: 8px 10px;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  outline: none;
+  font: inherit;
+  color: var(--text);
+}
+
+.inputBar input:focus {
+  border-color: var(--accent);
+}
+
+.inputBar button {
+  padding: 8px 12px;
+  border: 1px solid #ccc;
+  background: #fff;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+  color: var(--text);
+}
+
+/* ---------- 右栏：控制 + 任务 + 内嵌浏览器 ---------- */
+.right {
+  /* 浏览器区域需要占满这一栏；基准宽度取视口一半，窗口变窄时允许收缩 */
+  flex: 0 1 50vw;
+  min-width: 340px;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: #fff;
+  position: relative;
+}
+
+.banner {
+  text-align: center;
+  padding: 14px 10px;
+  font-size: 18px;
+  font-weight: 800;
+  border-bottom: 1px dashed var(--border);
+}
+
+.controls {
+  display: flex;
+  gap: 8px;
+  padding: 10px;
+  flex-wrap: wrap;
+}
+
+.btn {
+  padding: 6px 10px;
+  border: 1px solid #ccc;
+  background: #fff;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+  color: var(--text);
+}
+
+.btn:hover {
+  background: #f6f7f9;
+}
+
+.card {
+  margin: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.card h4 {
+  margin: 0 0 8px 0;
+}
+
+.small {
+  color: var(--text-weak);
+  font-size: 12px;
+}
+
+.status-running {
+  color: #0a7;
+  font-weight: 700;
+}
+
+.buttons-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+/* ---------- 内嵌工作台浏览器区域 ---------- */
+.browserArea {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px dashed var(--border);
+  background: #fff;
+}
+
+/*
+ * <webview> 是自定义元素，默认没有尺寸，必须显式给满。
+ * 注意：不要在这里写 display —— Electron 的 <webview> 内部靠 flex 才能把 guest
+ * 视图撑开；一旦被覆盖成 display:block，guest 会卡在默认的 150px 高（实测）。
+ * 显隐由组件里的内联 style 用 display:flex / none 控制。
+ */
+.browserArea__view {
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.browserArea__empty {
+  padding: 16px;
+  color: #666;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* ---------- 第 3 步调试区（故意很朴素，只为证明驾驶通了） ---------- */
+.debug {
+  margin: 10px;
+  padding: 10px;
+  border: 1px dashed #f0a020;
+  border-radius: 8px;
+  background: #fffdf5;
+}
+
+.debug__title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #a06a00;
+  margin-bottom: 8px;
+}
+
+.debug__state {
+  margin-top: 6px;
+}
+
+.debug__out {
+  margin: 8px 0 0 0;
+  padding: 8px;
+  max-height: 150px;
+  overflow: auto;
+  background: #f4f4f4;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.debug__shot {
+  display: block;
+  margin-top: 8px;
+  /* 缩略图别把内嵌浏览器区域挤没了；完整截图以 CDP 产物为准 */
+  max-width: 100%;
+  max-height: 130px;
+  width: auto;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+}

@@ -1,0 +1,191 @@
+{
+  "round1": {
+    "round": 1,
+    "roundStart": "驾驶状态：驾驶中",
+    "openBaidu": "ok: true\naction: open_url\ndetail: 已跳转到 https://www.baidu.com/\nurl:   https://www.baidu.com/\ntitle: 百度一下，你就知道\n按钮(1):   百度一下\n链接(28):   新闻 / hao123 / 地图 / 贴吧 / 视频 / 图片 / 网盘 / 库库AI\n输入框(1): placeholder=联合国称古巴电力危机持续 | name=chat-textarea",
+    "type": "ok: true\naction: type\ndetail: 已向 TEXTAREA「中纪委连打两“虎”」 写入「AI 工作台」（方式：page-execCommand）\nurl:   https://www.baidu.com/\ntitle: 百度一下，你就知道\n按钮(1):   百度一下\n链接(11):   百度首页 / 设置 / 登录 / 图片 / 资讯 / 视频 / 笔记 / 地图\n输入框(1): placeholder=中纪委连打两“虎” | name=chat-textarea | value=AI 工作台",
+    "search": "ok: true\naction: click\ndetail: 点击了 BUTTON「百度一下」（该元素不在视口内，真实鼠标点不到，改用页面侧 click()）\nurl:   https://www.baidu.com/s?ie=utf-8&f=8&rsv_bp=1&rsv_idx=1&tn=baidu&wd=AI%20%E5%B7%A5%E4%BD%9C%E5%8F%B0&fenlei=256&rsv_pq=0xaeb03f44004b5efa&rsv_t=4842ufKxdad2TrgQWkOwZotulTTCA7iKtzAqkccLWY85A5nMg%2BNvMWg%2FaOy%2B&rqlang=en&rsv_enter=1&rsv_dl=tb_click&rsv_sug3=1&rsv_sug1=1&rsv_sug7=100&rsv_btype=i&rsv_sug=1\ntitle: AI 工作台_百度搜索\n按钮(5):   百度一下 / 免费AI生图 / 进店 / 进店 / 进店\n链接(40):   百度首页 / 设置 / 登录 / 图片 / 资讯 / 视频 / 笔记 / 地图\n输入框(2): placeholder=中纪委连打两“虎” | name=chat-textarea | value=AI 工作台 / placeholder=用AI一秒生成“AI 工作台”",
+    "read": "ok: true\naction: read_page\nurl:   https://www.baidu.com/s?ie=utf-8&f=8&rsv_bp=1&rsv_idx=1&tn=baidu&wd=AI%20%E5%B7%A5%E4%BD%9C%E5%8F%B0&fenlei=256&rsv_pq=0xaeb03f44004b5efa&rsv_t=4842ufKxdad2TrgQWkOwZotulTTCA7iKtzAqkccLWY85A5nMg%2BNvMWg%2FaOy%2B&rqlang=en&rsv_enter=1&rsv_dl=tb_click&rsv_sug3=1&rsv_sug1=1&rsv_sug7=100&rsv_btype=i&rsv_sug=1\ntitle: AI 工作台_百度搜索\n按钮(5):   百度一下 / 免费AI生图 / 进店 / 进店 / 进店\n链接(40):   百度首页 / 设置 / 登录 / 图片 / 资讯 / 视频 / 笔记 / 地图\n输入框(2): name=chat-textarea | value=AI 工作台 / placeholder=用AI一秒生成“AI 工作台”",
+    "baiduTitle": "AI 工作台_百度搜索",
+    "baiduUrl": "https://www.baidu.com/s?ie=utf-8&f=8&rsv_bp=1&rsv_idx=1&tn=baidu&wd=AI%20%E5%B7%A5%E4%BD%9C%E5%8F%B0&fenlei=256&rsv_pq=0xaeb03f44004b5efa&rsv_t=4842ufKxdad2TrgQWkOwZotulTTCA7iKtzAqkccLWY85A5nMg%2BNvMWg%2FaOy%2B&rqlang=en&rsv_enter=1&rsv_dl=tb_click&rsv_sug3=1&rsv_sug1=1&rsv_sug7=100&rsv_btype=i&rsv_sug=1",
+    "pauseState": "驾驶状态：已暂停（click / type 不会自动执行）",
+    "pointerAtWebview": {
+      "pointerEvents": "auto",
+      "hit": "WEBVIEW",
+      "hitWebview": true
+    },
+    "autoClickBlocked": "ok: false\naction: click\nerror: 驾驶已暂停，「click」不会自动执行；你可以在内嵌页上自己点。",
+    "humanInputAfterPause": {
+      "input": "#chat-textarea",
+      "focus": "chat-textarea",
+      "value": "human-P0",
+      "passed": true
+    },
+    "humanScrollAfterPause": {
+      "before": {
+        "y": 0,
+        "height": 4707,
+        "viewport": 256
+      },
+      "after": 960,
+      "passed": true
+    },
+    "baiduHumanLinkAfterPause": {
+      "before": "https://www.baidu.com/s?ie=utf-8&f=8&rsv_bp=1&rsv_idx=1&tn=baidu&wd=AI%20%E5%B7%A5%E4%BD%9C%E5%8F%B0&fenlei=256&rsv_pq=0xaeb03f44004b5efa&rsv_t=4842ufKxdad2TrgQWkOwZotulTTCA7iKtzAqkccLWY85A5nMg%2BNvMWg%2FaOy%2B&rqlang=en&rsv_enter=1&rsv_dl=tb_click&rsv_sug3=1&rsv_sug1=1&rsv_sug7=100&rsv_btype=i&rsv_sug=1",
+      "selector": "#__p0_link",
+      "href": "http://www.baidu.com/link?url=YP-yeFv0Ws_SrUsKs9rp7_ST6PhpPztkr6VYQj8V0D_xxGrE5leq1-HQizMYQTAgHUiLi1tTgG9a1o9H9eLWqjQIZ79XDipCkNWBZ-4OgZ5v4k3fvOV8l7APuiVMxyq8v4RhTBxzRImD4FrWM_mE_a",
+      "target": "_blank",
+      "text": "百度爱采购",
+      "after": "https://b2b.baidu.com/?from=b2b_straight&srcid=5103&pi=baidu.b2b_straight.source...ebec6ea6000b85e6",
+      "passed": true
+    },
+    "openExample": {
+      "ok": true,
+      "action": "open_url",
+      "detail": "已跳转到 https://example.com/",
+      "pageSnapshot": {
+        "buttons": [],
+        "inputs": [],
+        "links": [
+          "Learn more"
+        ],
+        "title": "Example Domain",
+        "url": "https://example.com/"
+      }
+    },
+    "exampleHumanLinkAfterPause": {
+      "before": "https://example.com/",
+      "selector": "#__p0_link",
+      "href": "https://iana.org/domains/example",
+      "target": "",
+      "text": "Learn more",
+      "after": "https://www.iana.org/help/example-domains",
+      "passed": true
+    },
+    "afterResume": "驾驶状态：驾驶中",
+    "afterTakeOver": "驾驶状态：已暂停（click / type 不会自动执行）",
+    "exampleHumanLinkAfterTakeOver": {
+      "before": "https://example.com/",
+      "selector": "#__p0_link",
+      "href": "https://iana.org/domains/example",
+      "target": "",
+      "text": "Learn more",
+      "after": "https://www.iana.org/help/example-domains",
+      "passed": true
+    },
+    "exampleHumanLinkAfterSecondToggle": {
+      "before": "https://example.com/",
+      "selector": "#__p0_link",
+      "href": "https://iana.org/domains/example",
+      "target": "",
+      "text": "Learn more",
+      "after": "https://www.iana.org/help/example-domains",
+      "passed": true
+    },
+    "exampleHumanLinkAfterResize": {
+      "before": "https://example.com/",
+      "selector": "#__p0_link",
+      "href": "https://iana.org/domains/example",
+      "target": "",
+      "text": "Learn more",
+      "after": "https://www.iana.org/help/example-domains",
+      "passed": true
+    },
+    "windowCount": 1
+  },
+  "round2": {
+    "round": 2,
+    "roundStart": "驾驶状态：驾驶中",
+    "openBaidu": "ok: true\naction: open_url\ndetail: 已跳转到 https://www.baidu.com/\nurl:   https://www.baidu.com/\ntitle: 百度一下，你就知道\n按钮(1):   百度一下\n链接(28):   新闻 / hao123 / 地图 / 贴吧 / 视频 / 图片 / 网盘 / 库库AI\n输入框(1): placeholder=甘肃：坚决拥护党中央决定 | name=chat-textarea",
+    "type": "ok: true\naction: type\ndetail: 已向 TEXTAREA「甘肃：坚决拥护党中央决定」 写入「AI 工作台」（方式：cdp-insertText）\nurl:   https://www.baidu.com/\ntitle: 百度一下，你就知道\n按钮(1):   百度一下\n链接(10):   百度首页 / 登录 / 图片 / 资讯 / 视频 / 笔记 / 地图 / 贴吧\n输入框(1): placeholder=甘肃：坚决拥护党中央决定 | name=chat-textarea | value=AI 工作台",
+    "search": "ok: true\naction: click\ndetail: 点击了 BUTTON「百度一下」（该元素不在视口内，真实鼠标点不到，改用页面侧 click()）\nurl:   https://www.baidu.com/s?ie=utf-8&f=8&rsv_bp=1&rsv_idx=1&ch=&tn=baidu&bar=&wd=AI+%E5%B7%A5%E4%BD%9C%E5%8F%B0&rn=&fenlei=256&oq=&rsv_pq=0xc801fc3f009538a9&rsv_t=77d5LOjcFKKb9yF94o2RZIikUdAJIsKqlPSY4JMPg50L5aGkQK8WR76PAOBO&rqlang=en&rsv_dl=tb&rsv_enter=1&rsv_sug3=2&rsv_sug1=1&rsv_sug7=100&rsv_btype=i&prefixsug=AI%2520%25E5%25B7%25A5%25E4%25BD%259C%25E5%258F%25B0&rsp=0&rsv_sug4=1766&rsv_sug=1\ntitle: AI 工作台_百度搜索\n按钮(5):   百度一下 / 免费AI生图 / 进店 / 进店 / 进店\n链接(40):   百度首页 / 设置 / 登录 / 图片 / 资讯 / 视频 / 笔记 / 地图\n输入框(2): name=chat-textarea | value=AI 工作台 / placeholder=用AI一秒生成“AI 工作台”",
+    "read": "ok: true\naction: read_page\nurl:   https://www.baidu.com/s?ie=utf-8&f=8&rsv_bp=1&rsv_idx=1&ch=&tn=baidu&bar=&wd=AI+%E5%B7%A5%E4%BD%9C%E5%8F%B0&rn=&fenlei=256&oq=&rsv_pq=0xc801fc3f009538a9&rsv_t=77d5LOjcFKKb9yF94o2RZIikUdAJIsKqlPSY4JMPg50L5aGkQK8WR76PAOBO&rqlang=en&rsv_dl=tb&rsv_enter=1&rsv_sug3=2&rsv_sug1=1&rsv_sug7=100&rsv_btype=i&prefixsug=AI%2520%25E5%25B7%25A5%25E4%25BD%259C%25E5%258F%25B0&rsp=0&rsv_sug4=1766&rsv_sug=1\ntitle: AI 工作台_百度搜索\n按钮(5):   百度一下 / 免费AI生图 / 进店 / 进店 / 进店\n链接(40):   百度首页 / 设置 / 登录 / 图片 / 资讯 / 视频 / 笔记 / 地图\n输入框(2): name=chat-textarea | value=AI 工作台 / placeholder=用AI一秒生成“AI 工作台”",
+    "baiduTitle": "AI 工作台_百度搜索",
+    "baiduUrl": "https://www.baidu.com/s?ie=utf-8&f=8&rsv_bp=1&rsv_idx=1&ch=&tn=baidu&bar=&wd=AI+%E5%B7%A5%E4%BD%9C%E5%8F%B0&rn=&fenlei=256&oq=&rsv_pq=0xc801fc3f009538a9&rsv_t=77d5LOjcFKKb9yF94o2RZIikUdAJIsKqlPSY4JMPg50L5aGkQK8WR76PAOBO&rqlang=en&rsv_dl=tb&rsv_enter=1&rsv_sug3=2&rsv_sug1=1&rsv_sug7=100&rsv_btype=i&prefixsug=AI%2520%25E5%25B7%25A5%25E4%25BD%259C%25E5%258F%25B0&rsp=0&rsv_sug4=1766&rsv_sug=1",
+    "pauseState": "驾驶状态：已暂停（click / type 不会自动执行）",
+    "pointerAtWebview": {
+      "pointerEvents": "auto",
+      "hit": "WEBVIEW",
+      "hitWebview": true
+    },
+    "autoClickBlocked": "ok: false\naction: click\nerror: 驾驶已暂停，「click」不会自动执行；你可以在内嵌页上自己点。",
+    "humanInputAfterPause": {
+      "input": "#chat-textarea",
+      "focus": "chat-textarea",
+      "value": "human-P0",
+      "passed": true
+    },
+    "humanScrollAfterPause": {
+      "before": {
+        "y": 0,
+        "height": 4960,
+        "viewport": 256
+      },
+      "after": 960,
+      "passed": true
+    },
+    "baiduHumanLinkAfterPause": {
+      "before": "https://www.baidu.com/s?ie=utf-8&f=8&rsv_bp=1&rsv_idx=1&ch=&tn=baidu&bar=&wd=AI+%E5%B7%A5%E4%BD%9C%E5%8F%B0&rn=&fenlei=256&oq=&rsv_pq=0xc801fc3f009538a9&rsv_t=77d5LOjcFKKb9yF94o2RZIikUdAJIsKqlPSY4JMPg50L5aGkQK8WR76PAOBO&rqlang=en&rsv_dl=tb&rsv_enter=1&rsv_sug3=2&rsv_sug1=1&rsv_sug7=100&rsv_btype=i&prefixsug=AI%2520%25E5%25B7%25A5%25E4%25BD%259C%25E5%258F%25B0&rsp=0&rsv_sug4=1766&rsv_sug=1",
+      "selector": "#__p0_link",
+      "href": "http://www.baidu.com/link?url=Jlxx9XuAOHj9dm1RXWJg17-UZJdwoKLoMOrcrxUxkcyUFwpGKjbkQ14RW13H5WE1",
+      "target": "_blank",
+      "text": "AI工作站 - 可视化 AI 创作与智能体工作台",
+      "after": "https://www.apiworkstation.cn/",
+      "passed": true
+    },
+    "openExample": {
+      "ok": true,
+      "action": "open_url",
+      "detail": "已跳转到 https://example.com/",
+      "pageSnapshot": {
+        "buttons": [],
+        "inputs": [],
+        "links": [
+          "Learn more"
+        ],
+        "title": "Example Domain",
+        "url": "https://example.com/"
+      }
+    },
+    "exampleHumanLinkAfterPause": {
+      "before": "https://example.com/",
+      "selector": "#__p0_link",
+      "href": "https://iana.org/domains/example",
+      "target": "",
+      "text": "Learn more",
+      "after": "https://www.iana.org/help/example-domains",
+      "passed": true
+    },
+    "afterResume": "驾驶状态：驾驶中",
+    "afterTakeOver": "驾驶状态：已暂停（click / type 不会自动执行）",
+    "exampleHumanLinkAfterTakeOver": {
+      "before": "https://example.com/",
+      "selector": "#__p0_link",
+      "href": "https://iana.org/domains/example",
+      "target": "",
+      "text": "Learn more",
+      "after": "https://www.iana.org/help/example-domains",
+      "passed": true
+    },
+    "exampleHumanLinkAfterSecondToggle": {
+      "before": "https://example.com/",
+      "selector": "#__p0_link",
+      "href": "https://iana.org/domains/example",
+      "target": "",
+      "text": "Learn more",
+      "after": "https://www.iana.org/help/example-domains",
+      "passed": true
+    },
+    "exampleHumanLinkAfterResize": {
+      "before": "https://example.com/",
+      "selector": "#__p0_link",
+      "href": "https://iana.org/domains/example",
+      "target": "",
+      "text": "Learn more",
+      "after": "https://www.iana.org/help/example-domains",
+      "passed": true
+    },
+    "windowCount": 1
+  },
+  "screenshot": "step-3-p0-input-fixed.png"
+}

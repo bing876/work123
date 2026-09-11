@@ -1,0 +1,82 @@
+{
+  "round1": {
+    "round": 1,
+    "a": {
+      "url": "https://www.baidu.com/s?ie=utf-8&f=8&rsv_bp=1&rsv_idx=1&tn=baidu&wd=AI%20%E5%B7%A5%E4%BD%9C%E5%8F%B0&fenlei=256&rsv_pq=0xb1b3c6b70057ce6d&rsv_t=250bQ7zmbwEhYMRQR8aBGp4JjYXD1YKYSfhtZpGcWKUf5QddCD3T4FInEvq1&rqlang=en&rsv_enter=1&rsv_dl=ib_click&rsv_btype=i",
+      "title": "AI 工作台_百度搜索",
+      "read": "ok: true\naction: read_page\nurl:   https://www.baidu.com/s?ie=utf-8&f=8&rsv_bp=1&rsv_idx=1&tn=baidu&wd=AI%20%E5%B7%A5%E4%BD%9C%E5%8F%B0&fenlei=256&rsv_pq=0xb1b3c6b70057ce6d&rsv_t=250bQ7zmbwEhYMRQR8aBGp4JjYXD1YKYSfhtZpGcWKUf5QddCD3T4FInEvq1&rqlang=en&rsv_enter=1&rsv_dl=ib_click&rsv_btype=i\ntitle: AI 工作台_百度搜索\n按钮(4):   百度一下 / 进店 / 进店 / 进店\n链接(40):   百度首页 / 设置 / 登录 / 图片 / 资讯 / 视频 / 笔记 / 地图\n输入框(1): placeholder=关晓彤：宋雨琦胆子肥嘟嘟的 | name=chat-textarea | value=AI 工作台"
+    },
+    "pause": {
+      "state": "驾驶状态：已暂停（click / type 不会自动执行）",
+      "pointer": "auto",
+      "hit": true
+    },
+    "blocked": "ok: false\naction: click\nerror: 驾驶已暂停，「click」不会自动执行；你可以在内嵌页上自己点。",
+    "manualInput": {
+      "focus": "chat-textarea",
+      "value": "human-P0"
+    },
+    "manualScroll": {
+      "before": 0,
+      "after": 960
+    },
+    "baiduLink": {
+      "text": "",
+      "before": "https://www.baidu.com/s?ie=utf-8&f=8&rsv_bp=1&rsv_idx=1&tn=baidu&wd=AI%20%E5%B7%A5%E4%BD%9C%E5%8F%B0&fenlei=256&rsv_pq=0xb1b3c6b70057ce6d&rsv_t=250bQ7zmbwEhYMRQR8aBGp4JjYXD1YKYSfhtZpGcWKUf5QddCD3T4FInEvq1&rqlang=en&rsv_enter=1&rsv_dl=ib_click&rsv_btype=i",
+      "after": "https://www.baidu.com/s?ie=utf-8&f=8&rsv_bp=1&rsv_idx=1&tn=baidu&wd=AI%20%E5%B7%A5%E4%BD%9C%E5%8F%B0&fenlei=256&rsv_pq=0xb1b3c6b70057ce6d&rsv_t=250bQ7zmbwEhYMRQR8aBGp4JjYXD1YKYSfhtZpGcWKUf5QddCD3T4FInEvq1&rqlang=en&rsv_enter=1&rsv_dl=ib_click&rsv_btype=i"
+    },
+    "examplePause": {
+      "before": "https://example.com/",
+      "after": "https://www.iana.org/help/example-domains"
+    },
+    "exampleTakeOver": {
+      "before": "https://example.com/",
+      "after": "https://www.iana.org/help/example-domains"
+    },
+    "exampleSecondToggleResize": {
+      "before": "https://example.com/",
+      "after": "https://www.iana.org/help/example-domains"
+    },
+    "windows": 1
+  },
+  "round2": {
+    "round": 2,
+    "a": {
+      "url": "https://www.baidu.com/s?ie=utf-8&f=8&rsv_bp=1&rsv_idx=1&ch=&tn=baidu&bar=&wd=AI+%E5%B7%A5%E4%BD%9C%E5%8F%B0&rn=&fenlei=256&oq=&rsv_pq=0xad0c3fba00b7f3a1&rsv_t=0087%2F%2FIjJkqoYVlDmNWuECYW7BCSSfKLrwWCtbkuOsM3hF%2B4nuo8CXnuHBIY&rqlang=en&rsv_dl=tb&rsv_enter=1&rsv_sug3=2&rsv_sug1=1&rsv_sug7=100&rsv_btype=i&prefixsug=AI%2520%25E5%25B7%25A5%25E4%25BD%259C%25E5%258F%25B0&rsp=0&rsv_sug=1",
+      "title": "AI 工作台_百度搜索",
+      "read": "ok: true\naction: read_page\nurl:   https://www.baidu.com/s?ie=utf-8&f=8&rsv_bp=1&rsv_idx=1&ch=&tn=baidu&bar=&wd=AI+%E5%B7%A5%E4%BD%9C%E5%8F%B0&rn=&fenlei=256&oq=&rsv_pq=0xad0c3fba00b7f3a1&rsv_t=0087%2F%2FIjJkqoYVlDmNWuECYW7BCSSfKLrwWCtbkuOsM3hF%2B4nuo8CXnuHBIY&rqlang=en&rsv_dl=tb&rsv_enter=1&rsv_sug3=2&rsv_sug1=1&rsv_sug7=100&rsv_btype=i&prefixsug=AI%2520%25E5%25B7%25A5%25E4%25BD%259C%25E5%258F%25B0&rsp=0&rsv_sug=1\ntitle: AI 工作台_百度搜索\n按钮(5):   百度一下 / 免费AI生图 / 进店 / 进店 / 进店\n链接(40):   百度首页 / 设置 / 登录 / 图片 / 资讯 / 视频 / 笔记 / 地图\n输入框(2): name=chat-textarea | value=AI 工作台 / placeholder=用AI一秒生成“AI 工作台”"
+    },
+    "pause": {
+      "state": "驾驶状态：已暂停（click / type 不会自动执行）",
+      "pointer": "auto",
+      "hit": true
+    },
+    "blocked": "ok: false\naction: click\nerror: 驾驶已暂停，「click」不会自动执行；你可以在内嵌页上自己点。",
+    "manualInput": {
+      "focus": "chat-textarea",
+      "value": "human-P0"
+    },
+    "manualScroll": {
+      "before": 0,
+      "after": 960
+    },
+    "baiduLink": {
+      "text": "无线画布",
+      "before": "https://www.baidu.com/s?ie=utf-8&f=8&rsv_bp=1&rsv_idx=1&ch=&tn=baidu&bar=&wd=AI+%E5%B7%A5%E4%BD%9C%E5%8F%B0&rn=&fenlei=256&oq=&rsv_pq=0xad0c3fba00b7f3a1&rsv_t=0087%2F%2FIjJkqoYVlDmNWuECYW7BCSSfKLrwWCtbkuOsM3hF%2B4nuo8CXnuHBIY&rqlang=en&rsv_dl=tb&rsv_enter=1&rsv_sug3=2&rsv_sug1=1&rsv_sug7=100&rsv_btype=i&prefixsug=AI%2520%25E5%25B7%25A5%25E4%25BD%259C%25E5%258F%25B0&rsp=0&rsv_sug=1",
+      "after": "https://www.baidu.com/s?ie=utf-8&f=8&rsv_bp=1&rsv_idx=1&ch=&tn=baidu&bar=&wd=AI+%E5%B7%A5%E4%BD%9C%E5%8F%B0&rn=&fenlei=256&oq=&rsv_pq=0xad0c3fba00b7f3a1&rsv_t=0087%2F%2FIjJkqoYVlDmNWuECYW7BCSSfKLrwWCtbkuOsM3hF%2B4nuo8CXnuHBIY&rqlang=en&rsv_dl=tb&rsv_enter=1&rsv_sug3=2&rsv_sug1=1&rsv_sug7=100&rsv_btype=i&prefixsug=AI%2520%25E5%25B7%25A5%25E4%25BD%259C%25E5%258F%25B0&rsp=0&rsv_sug=1"
+    },
+    "examplePause": {
+      "before": "https://example.com/",
+      "after": "https://www.iana.org/help/example-domains"
+    },
+    "exampleTakeOver": {
+      "before": "https://example.com/",
+      "after": "https://www.iana.org/help/example-domains"
+    },
+    "exampleSecondToggleResize": {
+      "before": "https://example.com/",
+      "after": "https://www.iana.org/help/example-domains"
+    },
+    "windows": 1
+  }
+}

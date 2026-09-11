@@ -1,0 +1,32 @@
+{
+  "name": "@ai-workbench/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI 工作台桌面端：React 渲染进程 + Electron 主进程",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "npm run build:electron && concurrently -k --success command-electron -n vite,electron -c cyan,magenta \"vite\" \"wait-on tcp:5173 -t 30000 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 node scripts/start-electron.mjs\"",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build:renderer": "vite build",
+    "build": "npm run build:electron && npm run build:renderer",
+    "start": "npm run build:electron && npm run build:renderer && node scripts/start-electron.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit"
+  },
+  "dependencies": {
+    "@ai-workbench/shared": "*",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron": "^33.2.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "wait-on": "^8.0.1"
+  }
+}

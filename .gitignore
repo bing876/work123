@@ -1,0 +1,24 @@
+# 依赖
+node_modules/
+.pnpm-store/
+
+# 构建产物
+dist/
+dist-electron/
+out/
+release/
+*.tsbuildinfo
+
+# 日志与本地环境
+*.log
+npm-debug.log*
+pnpm-debug.log*
+.env
+.env.local
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
