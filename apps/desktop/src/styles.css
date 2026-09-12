@@ -311,3 +311,80 @@ body {
   border: 1px solid #ddd;
   border-radius: 6px;
 }
+
+/* ---- 第 5 步（重做版）：登录页 + 左栏账号小块 ---- */
+.authWrap {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f3f4f6;
+}
+.authCard {
+  width: 380px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 22px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 6%);
+}
+.authCard h3 {
+  margin: 0 0 4px;
+  font-size: 17px;
+}
+.authTabs {
+  display: flex;
+  gap: 6px;
+}
+.authTab {
+  flex: 1;
+  padding: 6px 0;
+  font-size: 13px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #f9fafb;
+  cursor: pointer;
+}
+.authTab--on {
+  background: #111827;
+  color: #fff;
+  border-color: #111827;
+}
+.authRow {
+  display: flex;
+  gap: 8px;
+}
+.authInput {
+  padding: 8px 10px;
+  font-size: 13px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  outline: none;
+}
+.authInput:focus {
+  border-color: #6b7280;
+}
+.authErr {
+  color: #c0392b;
+  font-size: 12.5px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+.btn--go {
+  width: 100%;
+  background: #111827;
+  color: #fff;
+  border-color: #111827;
+}
+.account {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 10px 0;
+  padding: 10px;
+  border: 1px dashed #d1d5db;
+  border-radius: 8px;
+}

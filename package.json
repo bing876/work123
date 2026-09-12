@@ -2,7 +2,7 @@
   "name": "ai-workbench",
   "version": "0.1.0",
   "private": true,
-  "description": "AI 工作台 —— Electron + React + TypeScript + Vite 桌面应用（npm workspaces monorepo）",
+  "description": "AI 工作台 —— Electron + React + TypeScript + Vite 桌面应用 + Fastify/PostgreSQL 最小后端（npm workspaces monorepo）",
   "workspaces": [
     "apps/*",
     "packages/*"
@@ -12,9 +12,12 @@
   },
   "scripts": {
     "dev": "npm run build -w @ai-workbench/shared && npm run dev -w @ai-workbench/desktop",
-    "build": "npm run build -w @ai-workbench/shared && npm run build -w @ai-workbench/desktop",
+    "dev:server": "npm run dev -w @ai-workbench/server",
+    "db:up": "docker compose -f apps/server/docker-compose.yml up -d",
+    "db:down": "docker compose -f apps/server/docker-compose.yml down",
+    "build": "npm run build -w @ai-workbench/shared && npm run build -w @ai-workbench/desktop && npm run build -w @ai-workbench/server",
     "start": "npm run build -w @ai-workbench/shared && npm run start -w @ai-workbench/desktop",
-    "typecheck": "npm run typecheck -w @ai-workbench/shared && npm run typecheck -w @ai-workbench/desktop",
+    "typecheck": "npm run typecheck -w @ai-workbench/shared && npm run typecheck -w @ai-workbench/desktop && npm run typecheck -w @ai-workbench/server",
     "clean": "node scripts/clean.mjs"
   }
 }

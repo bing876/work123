@@ -157,3 +157,59 @@ export interface WorkbenchBridge {
   /** 订阅主进程转发过来的 UI 指令，返回取消订阅函数 */
   on: (event: BrowserEvent, callback: (payload?: string) => void) => () => void;
 }
+
+// ---------------------------------------------------------------------------
+// 第 5 步（重做版）：账号契约 —— XYZ 对外号 + 两套真登录 + 微信占位
+//
+// - 对外号 xyz_id：系统生成 `XYZ` + 数字（5 位起，用尽升 6/7 位），用户不能自选；
+//   register/login 的成功 JSON 都带它。
+// - 登录 A：手机号 + 短信验证码（未注册自动建号）；B：XYZ 号 + 密码（没设密码→明确失败）。
+// - 微信本步只预留：status.enabled=false；login 直接 501，不发 JWT。
+// - 没有邮箱主账号，没有 /chat/stream，不接大模型。
+// ---------------------------------------------------------------------------
+
+/** 登录用户对外可见的部分（不含任何密码/手机号明文；phone 只有打码形态） */
+export interface AuthUser {
+  id: number;
+  /** 对外号：XYZ+数字，唯一，系统生成 */
+  xyz_id: string;
+  /** 是否已设置过密码（false 时 XYZ+密码登录会明确失败提示先设密码） */
+  has_password: boolean;
+  /** 打码手机号（1 开头 11 位显示为 138****0000 形态；未绑定手机则 null） */
+  phone_masked: string | null;
+}
+
+/** 注册成功自动创建的项目 */
+export interface ProjectSummary {
+  id: number;
+  name: string;
+}
+
+/** 注册成功自动创建的 Agent「小助」 */
+export interface AgentSummary {
+  id: number;
+  name: string;
+}
+
+/** 登录成功响应（桌面端存的就是这个；token 不许打印到控制台） */
+export interface AuthSession {
+  token: string;
+  user: AuthUser;
+  project: ProjectSummary;
+  agents: AgentSummary[];
+}
+
+/** GET /auth/me 的响应（同 AuthSession 但不回显 token） */
+export type AuthProfile = Omit<AuthSession, 'token'>;
+
+/** GET /auth/wechat/status —— 本步恒为未开通 */
+export interface WechatStatus {
+  enabled: boolean;
+}
+
+/** POST /auth/sms/send 的响应 —— 刻意不含验证码 */
+export interface SmsSendResult {
+  sent: boolean;
+  /** 有效期（秒） */
+  expires_in: number;
+}

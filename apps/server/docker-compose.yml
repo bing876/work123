@@ -1,0 +1,24 @@
+# 第 5 步：本地开发用 PostgreSQL。
+# 启动：docker compose -f apps/server/docker-compose.yml up -d   （或仓库根 npm run db:up）
+# 停止：docker compose -f apps/server/docker-compose.yml down
+# 5432 被本机已有库占用时：改 ports 左边数字，并同步 apps/server/.env 的 DATABASE_URL。
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: workbench-pg
+    environment:
+      POSTGRES_USER: workbench
+      POSTGRES_PASSWORD: workbench
+      POSTGRES_DB: workbench
+    ports:
+      - "5432:5432"
+    volumes:
+      - workbench_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U workbench -d workbench"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  workbench_pgdata:
