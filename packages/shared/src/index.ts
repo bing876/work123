@@ -73,7 +73,14 @@ export type BrowserAction =
   | { action: 'read_page' }
   | { action: 'screenshot' }
   | { action: 'ask_user'; reason: string; question: string }
-  | { action: 'done'; summary: string; document_title: string; document_outline: string[] };
+  | { action: 'done'; summary: string; document_title: string; document_outline: string[] }
+  /**
+   * 第 9 步：一次性代填【普通】字段（姓名/地址/搜索词…）。
+   * 敏感字段（密码/验证码/支付/身份证）服务端与本地执行器都有硬闸，填了也会被拒。
+   */
+  | { action: 'fill_form'; fields: { target: string; text: string }[] }
+  /** 第 9 步：定位敏感字段（不带任何值）：聚焦输入框 + 等用户输完自动恢复驾驶 */
+  | { action: 'focus_sensitive_field'; target: string; fieldReason: string };
 
 /** 动作名，便于日志与结果回执 */
 export type BrowserActionType = BrowserAction['action'];
@@ -90,6 +97,18 @@ export interface PageSnapshot {
   links: string[];
   /** 可见输入框的可读标识（placeholder / name / 当前值） */
   inputs: string[];
+  /**
+   * 第 9 步：字段分类标注（敏感字段不出现 value 的任何痕迹）。
+   * 由本地 fieldClass.classifyField 生成——服务器只转述，不自己发明规则。
+   */
+  inputFields?: FieldClassInfo[];
+}
+
+/** 一个输入框的分类信息（label 是给人和模型看的描述，绝不含敏感值） */
+export interface FieldClassInfo {
+  label: string;
+  kind: 'sensitive' | 'normal';
+  reason: string;
 }
 
 /** 一次动作的执行结果 */
@@ -161,6 +180,9 @@ export interface WorkbenchBridge {
   agentStart: (goal: string, apiBase: string, token: string) => Promise<TaskState>;
   /** 中止驾驶员循环并清 token（退出登录时也要调） */
   agentStop: () => Promise<void>;
+
+  /** 第 9 步：把用户对「补资料」提问的回答交给主进程（仅普通资料；敏感值别走这里） */
+  agentAnswer: (text: string) => Promise<void>;
 
   /**
    * 第 8 步：下载任务结果文档（.md）。走主进程存盘对话框；内容里由主进程再做一道
@@ -294,4 +316,6 @@ export type AgentEventPayload =
   | { kind: 'step'; step: number; summary: string; ok: boolean }
   | { kind: 'ask'; reason: string; question: string }
   | { kind: 'done'; summary: string; documentTitle: string; documentOutline: string[]; docReady?: boolean; unreadHint?: string }
-  | { kind: 'note'; level: 'info' | 'error'; text: string };
+  | { kind: 'note'; level: 'info' | 'error'; text: string }
+  /** 第 9 步：敏感字段等待态——浏览器已前置并聚焦，人话提示在 message 里 */
+  | { kind: 'sensitive'; fieldReason: string; message: string };

@@ -43,6 +43,7 @@ const bridge: WorkbenchBridge = {
   agentStart: (goal: string, apiBase: string, token: string) =>
     ipcRenderer.invoke('workbench:agent:start', goal, apiBase, token),
   agentStop: () => ipcRenderer.invoke('workbench:agent:stop'),
+  agentAnswer: (text: string) => ipcRenderer.invoke('workbench:agent:answer', text),
 
   // ---- 第 8 步：结果文档下载 + 服务端任务快照（红点以它为准）----
   downloadDoc: (taskId: number, apiBase: string, token: string) =>

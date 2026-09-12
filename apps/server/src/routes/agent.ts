@@ -20,7 +20,7 @@
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Pool } from 'pg';
-import type { AgentActionRequest, AgentActionResponse, PageSnapshot } from '@ai-workbench/shared';
+import type { AgentActionRequest, AgentActionResponse, FieldClassInfo, PageSnapshot } from '@ai-workbench/shared';
 import type { BrowserAction } from '@ai-workbench/shared';
 import type { ServerEnv } from '../env';
 import type { JsonCipher } from '../crypto';
@@ -48,11 +48,11 @@ const WRAP_PROMPT = [
 const DRIVER_PROMPT = [
   '你是工作台浏览器的驾驶员。用户能看见工作台里的真实网页，也可随时暂停自己操作。',
   '每次只输出一个 JSON，不要 Markdown，不要注释，不要额外文字。',
-  '动作仅限：open_url, click, type, scroll, wait, ask_user, done（字段与产品类型一致）。',
+  '动作仅限：open_url, click, type, scroll, wait, ask_user, done, fill_form, focus_sensitive_field（字段与产品类型一致）。',
   '规则：',
   '1. 一次一步。不要一次规划十步。',
   '2. 当前页信息不够就 wait 或 ask_user，禁止瞎点。',
-  '3. 遇到登录、验证码、短信、扫码、支付、删除、发送、授权：必须 ask_user。不要猜密码，不要让用户把密码发到聊天里。',
+  '3.（第 9 步更新）遇到密码、验证码/短信码、支付、扫码、身份证等敏感项：绝不代填也绝不索要其值——用 focus_sensitive_field 把输入框定位好，让用户直接在浏览器里输入；删除、发送、授权这类不可逆动作仍用 ask_user。不要猜密码，也不要让用户把敏感值发到聊天里。',
   '4. 同一动作失败两次，第三次 ask_user，说明你看见了什么。',
   '5. 不要改浏览器设置，不要下安装包，不要关闭用户标签，不要绕过验证码，不要攻击网站。',
   '6. 系统告诉你已暂停时，只能 ask_user 或简短确认，不能输出 click/type/open_url。',
@@ -62,6 +62,9 @@ const DRIVER_PROMPT = [
   '10. 只打开了首页 / 入口页不算完成。目标里含「搜索 / 搜一下 / 查 / 找 X」这类动作时，必须真的把关键词输进输入框并提交（或点搜索按钮）、页面已经跳到结果页，才允许 done。',
   '11. 没做完不要 done，也不要用 done 代替 ask_user。拿不准就 ask_user 问用户，宁可多问一次。',
   '12. 禁止编造页面上没有的按钮。',
+  '13.（第 9 步）快照会标注每个输入框的分类。对 sensitive（密码/验证码/支付/身份证）字段：绝不用 type/fill_form 填它；需要用户输入时只输出 focus_sensitive_field（不带任何值，target 写明是哪个框），并在页面说明里让用户知道「输完会自动继续」。',
+  '14.（第 9 步）需要用户提供普通资料（姓名/性别/地址/公司/职位/备注/搜索词等）而你还没拿到：先输出 ask_user（reason 用 need_info，一句话问清要什么，可一次问多项）；拿到用户答复后用 fill_form 一次填完这些 normal 字段，再按需用 click 点「搜索/确定/提交/下一步」这类普通按钮。支付/收银的最终确认永远不点。',
+  '15.（第 9 步）用户在聊天里主动发了疑似密码/验证码的值：不要复述该值、不要拿它填任何字段，输出 focus_sensitive_field 定位对应输入框即可。',
 ].join('\n');
 
 /** paused 覆盖提示：拼在用户消息最前 */
@@ -72,7 +75,7 @@ const PAUSED_OVERRIDE = [
 ].join('\n');
 
 /** 允许的动作文法：与 shared BrowserAction 一致 */
-const ALLOWED = new Set(['open_url', 'click', 'type', 'scroll', 'wait', 'ask_user', 'done']);
+const ALLOWED = new Set(['open_url', 'click', 'type', 'scroll', 'wait', 'ask_user', 'done', 'fill_form', 'focus_sensitive_field']);
 
 /** 模型「交白卷」时的常见写法（空串、占位词）。这些一律不算可执行动作。 */
 const BLANK_ACTION_WORDS = new Set([
@@ -102,7 +105,7 @@ function isEmptyAction(raw: unknown): boolean {
 const RETRY_HINT_BLANK = [
   '注意：你上一次的输出不是可执行动作（空动作、空 JSON、缺 action 字段，或根本不是合法 JSON）。',
   '空动作不会被本地执行，也不会推进任务，只会让用户卡住——请不要再用空动作回答。',
-  '请只输出一个 JSON 对象，且必须带 action 字段，取值仅限：open_url / click / type / scroll / wait / ask_user / done。',
+  '请只输出一个 JSON 对象，且必须带 action 字段，取值仅限：open_url / click / type / scroll / wait / ask_user / done / fill_form / focus_sensitive_field。',
   '当前页信息不足以决定下一步 → 用 ask_user 并写清 question；目标已完成 → 用 done。',
 ].join('\n');
 
@@ -163,7 +166,7 @@ function authed(req: FastifyRequest, env: ServerEnv) {
 }
 
 /** 校验/归一模型吐出来的 JSON：不合法就换 ask_user，绝不让脏动作下发到本地执行 */
-function sanitizeAction(raw: unknown, paused: boolean): BrowserAction {
+function sanitizeAction(raw: unknown, paused: boolean, snapshot: PageSnapshot): BrowserAction {
   if (typeof raw !== 'object' || raw === null) return askUser('parse_failed', '我没看懂页面，请你指导一下（告诉我点哪里，或先自己操作再继续）。');
   const o = raw as Record<string, unknown>;
   const action = typeof o.action === 'string' ? o.action : '';
@@ -180,13 +183,48 @@ function sanitizeAction(raw: unknown, paused: boolean): BrowserAction {
     case 'click': {
       const target = str(o.target, 160);
       if (!target) return askUser('bad_target', '点击目标没写清楚。页面上你想让我点哪个？');
+      if (/(立即支付|确认支付|确认付款|去支付|去付款|提交订单|确认订单|pay\s*now|checkout|place\s*order)/i.test(target)) {
+        return askUser('payment_confirm', '支付/收银的最终确认必须由用户自己点，我不代点。请你在页面上确认后告诉我结果。');
+      }
       return { action: 'click', target };
     }
     case 'type': {
       const target = str(o.target, 160);
       const text = typeof o.text === 'string' ? o.text.slice(0, 500) : '';
       if (!target || !text) return askUser('bad_target', '输入框或要输入的内容没写清楚，请指导。');
+      const sens = matchSensitiveTarget(snapshot, target); // 第 9 步：想 type 敏感字段 → 换成定位
+      if (sens) {
+        return { action: 'focus_sensitive_field', target, fieldReason: sens.reason === 'server_guard' ? 'guard' : sens.reason };
+      }
       return { action: 'type', target, text, submit: Boolean(o.submit) };
+    }
+    case 'fill_form': {
+      const rawFields = Array.isArray(o.fields) ? o.fields.slice(0, 12) : [];
+      const kept: { target: string; text: string }[] = [];
+      let sensitiveHit: { target: string; reason: string } | null = null;
+      for (const f of rawFields) {
+        const t = str((f as Record<string, unknown>)?.target, 160);
+        const v = typeof (f as Record<string, unknown>)?.text === 'string' ? String((f as Record<string, unknown>).text).slice(0, 500) : '';
+        if (!t || !v) continue;
+        const sens = matchSensitiveTarget(snapshot, t);
+        if (sens) {
+          sensitiveHit = { target: t, reason: sens.reason === 'server_guard' ? 'guard' : sens.reason };
+          continue; // 敏感的一律剔出代填
+        }
+        kept.push({ target: t, text: v });
+      }
+      if (sensitiveHit && kept.length === 0) {
+        return { action: 'focus_sensitive_field', target: sensitiveHit.target, fieldReason: sensitiveHit.reason };
+      }
+      if (kept.length === 0) return askUser('bad_form', '这次要代填的字段一个都没定下来（可能目标写得太含糊）。请指导我该往哪个框填什么。');
+      // 部分剔敏：剩下的普通字段照填；被剔的敏感项由本地执行器兜底（双闸）
+      void sensitiveHit;
+      return { action: 'fill_form', fields: kept } satisfies BrowserAction;
+    }
+    case 'focus_sensitive_field': {
+      const target = str(o.target, 160);
+      if (!target) return askUser('bad_target', '要定位哪个输入框没说清楚。请告诉我字段名，或你自己点开那个框。');
+      return { action: 'focus_sensitive_field', target, fieldReason: str(o.fieldReason, 40) || 'guard' };
     }
     case 'scroll':
       return { action: 'scroll', direction: o.direction === 'up' ? 'up' : 'down' };
@@ -211,7 +249,7 @@ function sanitizeAction(raw: unknown, paused: boolean): BrowserAction {
 /** 兜底：paused 时物理拦掉会动页面的动作（规则 6 的服务端执行） */
 function enforcePausedGate(action: BrowserAction, paused: boolean): BrowserAction {
   if (!paused) return action;
-  if (action.action === 'click' || action.action === 'type' || action.action === 'open_url') {
+  if (action.action === 'click' || action.action === 'type' || action.action === 'open_url' || action.action === 'fill_form') {
     return askUser('paused_by_user', '你已暂停接管中，我不会动页面。要继续就点「继续」，或直接告诉我下一步。');
   }
   return action;
@@ -236,6 +274,19 @@ function extractJson(text: string): unknown {
   }
 }
 
+/** 服务端第二道闸：target 命中快照里已标敏感的框，或文案本身就像敏感字段，都算敏感 */
+const SENSITIVE_TARGET_RE = /(密码|password|验证码|校验码|动态口令|短信码|otp|captcha|verification\s*code|支付|付款|银行卡|卡号|cvv|身份证)/i;
+function matchSensitiveTarget(snapshot: PageSnapshot, target: string): FieldClassInfo | null {
+  const t = String(target ?? '').trim().toLowerCase();
+  if (!t) return null;
+  for (const f of snapshot.inputFields ?? []) {
+    if (f.kind !== 'sensitive') continue;
+    const lab = f.label.toLowerCase().replace(/^\[敏感·[^\]]*\]\s*/, '');
+    if (lab && !lab.includes('无标识') && (t.includes(lab.slice(0, 20)) || lab.includes(t))) return f;
+  }
+  return SENSITIVE_TARGET_RE.test(t) ? { label: t, kind: 'sensitive', reason: 'server_guard' } : null;
+}
+
 function snapshotBrief(s: PageSnapshot): string {
   const list = (a: string[] | undefined, n: number): string => (a && a.length ? a.slice(0, n).join(' | ') : '（无）');
   return [
@@ -244,6 +295,9 @@ function snapshotBrief(s: PageSnapshot): string {
     `可见按钮: ${list(s.buttons, 24)}`,
     `可见链接: ${list(s.links, 16)}`,
     `可见输入框: ${list(s.inputs, 12)}`,
+    ...(s.inputFields?.length
+      ? [`字段分类（敏感的一律不代填）: ${s.inputFields.map((f) => `${f.kind === 'sensitive' ? '敏感·' + f.reason : '普通'}[${f.label}]`).slice(0, 12).join(' ; ')}`]
+      : []),
   ].join('\n');
 }
 
@@ -378,7 +432,7 @@ export function registerAgentRoutes(app: FastifyInstance, { pool, env, cipher }:
           note: '模型两次都想在只打开入口页时就 done，已按规则转成 ask_user（避免过早 done）',
         } satisfies AgentActionResponse;
       }
-      return { action: enforcePausedGate(sanitizeAction(parsed, paused), paused) } satisfies AgentActionResponse;
+      return { action: enforcePausedGate(sanitizeAction(parsed, paused, snapshot), paused) } satisfies AgentActionResponse;
     } catch (err) {
       const msg = (err as Error)?.name === 'TimeoutError' ? '模型响应超时（60s），本轮没执行任何动作' : `模型服务连不上：${(err as Error).message}`;
       return errJson(reply, 502, msg);

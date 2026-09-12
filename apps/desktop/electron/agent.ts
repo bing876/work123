@@ -33,6 +33,14 @@ export interface AgentLoopHooks {
   aborted(): boolean;
   /** 向渲染进程广播（'agent' 事件）；实现方 JSON 序列化并发送 */
   emit(payload: AgentEventPayload): void;
+  /**
+   * 第 9 步：敏感字段等待态——实现方负责【窗口前置+聚焦已完成（exec 做过）】、
+   * 启动自动恢复观察、并在“用户输完提交/手动继续/回答资料”任一信号时 resolve。
+   * 循环 await 它：醒来后下一轮第一件事仍是 read_page（当前真实页），不重放旧步骤。
+   */
+  sensitiveHold?(): Promise<void>;
+  /** 第 9 步：取走用户对「补资料」提问的回答（一次性，取完即清） */
+  takeAnswers?(): string[];
   /** 改主进程状态机（大字横幅/调试区跟着走）；实现方桥接 driver */
   phase(next: 'running' | 'paused' | 'done' | 'failed', detail: string): void;
   /** 任务记账（服务端 tasks 表）；全部 best-effort，失败只静默 */
@@ -56,8 +64,15 @@ const FAILS_BEFORE_ASK = 2;
 
 type ExecutableAction = Extract<
   BrowserAction,
-  { action: 'open_url' | 'click' | 'type' | 'scroll' | 'wait' }
+  { action: 'open_url' | 'click' | 'type' | 'scroll' | 'wait' | 'fill_form' }
 >;
+
+const REASON_CN: Record<string, string> = {
+  password: '密码',
+  otp_guess: '验证码/动态口令',
+  payment_guess: '支付信息',
+  id_guess: '身份证号',
+};
 
 function label(a: BrowserAction): string {
   switch (a.action) {
@@ -75,6 +90,10 @@ function label(a: BrowserAction): string {
       return '请你指导';
     case 'done':
       return '完成任务';
+    case 'fill_form':
+      return `代填 ${a.fields.length} 项普通资料`;
+    case 'focus_sensitive_field':
+      return '定位敏感输入框（等你输入）';
     default:
       return String((a as { action: string }).action);
   }
@@ -118,6 +137,10 @@ export async function runAgentLoop(goal: string, hooks: AgentLoopHooks): Promise
       // 本地已经停手了，这里只补同步
       await hooks.taskStatus(taskId, 'paused').catch(() => undefined);
       return 'paused';
+    }
+    // 第 9 步：把用户对上一轮提问的回答并进上下文（只进 stepsSummary，不落任何库）
+    if (hooks.takeAnswers) {
+      for (const a of hooks.takeAnswers()) steps.push(`用户答复：${a}`);
     }
     let snap: PageSnapshot;
     try {
@@ -185,6 +208,30 @@ export async function runAgentLoop(goal: string, hooks: AgentLoopHooks): Promise
       });
       hooks.phase('done', `完成 — ${action.summary.slice(0, 40)}`);
       return 'done';
+    }
+
+    if (action.action === 'focus_sensitive_field') {
+      // 第 9 步敏感流程：定位聚焦 → paused → 等“输完自动继续”信号（watch 或手动兜底）
+      try {
+        await hooks.exec(action as never);
+      } catch {
+        /* 定位失败也进入等待：用户看得见页面，输完照样能手动继续 */
+      }
+      steps.push(`步 ${step}：定位敏感输入框（${action.fieldReason}），等用户输入`);
+      await hooks.taskStep(taskId, `步 ${step}：已定位敏感输入框，等用户输入（值不经 AI、不落库）`, true).catch(() => undefined);
+      hooks.phase('paused', `等待用户输入${REASON_CN[action.fieldReason] ?? '敏感信息'}——输完会自动继续`);
+      hooks.emit({
+        kind: 'sensitive',
+        fieldReason: action.fieldReason,
+        message: `需要你输入${REASON_CN[action.fieldReason] ?? '敏感信息'}，浏览器已帮你前置并定位到输入框；输完并提交后我会自动继续（我不会碰这个框，也不会读它的内容）。`,
+      });
+      if (hooks.sensitiveHold) {
+        await hooks.sensitiveHold();
+        if (hooks.aborted()) return 'aborted';
+        hooks.phase('running', `敏感输入完成，按当前页面继续：${goal.slice(0, 30)}`);
+        continue; // 下一轮第一件事 = read_page 当前真实页
+      }
+      return 'paused';
     }
 
     let res: DriveResult;

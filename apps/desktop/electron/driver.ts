@@ -1,4 +1,5 @@
 import { webContents } from 'electron';
+import { classifyField, FIELD_REASON_CN, isPaymentConfirmAction, type FieldDescriptor } from './fieldClass';
 import type {
   BrowserAction,
   BrowserActionType,
@@ -33,7 +34,7 @@ import type {
 let paused = false;
 
 /** 被暂停拦截的动作（其余动作如 open_url / scroll / read_page 仍然允许） */
-const PAUSED_BLOCKED: ReadonlySet<BrowserActionType> = new Set<BrowserActionType>(['click', 'type']);
+const PAUSED_BLOCKED: ReadonlySet<BrowserActionType> = new Set<BrowserActionType>(['click', 'type', 'fill_form']);
 
 type Target = Electron.WebContents;
 
@@ -351,7 +352,7 @@ function sleep(ms: number): Promise<void> {
 // ---------------------------------------------------------------------------
 
 const PAGE_HELPERS = `(() => {
-  if (window.__wbHelper && window.__wbHelper.__v === 5) return;
+  if (window.__wbHelper && window.__wbHelper.__v === 6) return;
   const visible = (el) => {
     if (!el) return false;
     const r = el.getBoundingClientRect();
@@ -463,6 +464,37 @@ const PAGE_HELPERS = `(() => {
     window.__wbTypeTarget = el || null;
     return el;
   };
+  // ---- 第 9 步：字段事实采集 + 页面侧粗敏感判定 ----
+  // 权威分类在 Node 侧 fieldClass.ts；页面里这份 sensitiveish 只干一件事：
+  // **疑似敏感就连 el.value 都不碰**，绝不让密码/验证码明文进快照、进模型、进日志。
+  const INPUT_SEL = 'input:not([type="hidden"]), textarea, [contenteditable="true"]';
+  const SENSITIVEISH_RE = /(验证码|校验码|动态口令|短信码|密码|身份证|银行卡|信用卡|cvv|otp|captcha|verification|password|passcode|security\s*code|payment|pay\s*now|checkout|card\s*number)/i;
+  const fieldOf = (el) => {
+    const lbl = (() => {
+      try {
+        if (el.labels && el.labels.length) return String(el.labels[0].innerText || '').trim().slice(0, 60);
+        const forId = el.id && document.querySelector('label[for="' + (window.CSS && CSS.escape ? CSS.escape(el.id) : el.id) + '"]');
+        if (forId) return String(forId.innerText || '').trim().slice(0, 60);
+      } catch (_) {}
+      return '';
+    })();
+    return {
+      tag: el.tagName,
+      type: (el.getAttribute('type') || (el.tagName === 'TEXTAREA' ? 'textarea' : (el.isContentEditable ? 'text' : ''))) || '',
+      name: el.getAttribute('name') || '',
+      id: el.id || '',
+      ph: el.getAttribute('placeholder') || '',
+      aria: el.getAttribute('aria-label') || '',
+      lbl,
+      maxlength: el.maxLength && el.maxLength > 0 && el.maxLength < 524288 ? el.maxLength : null,
+      inputmode: el.getAttribute('inputmode') || '',
+      editable: true,
+    };
+  };
+  const sensitiveish = (el) => {
+    const f = fieldOf(el);
+    return f.type === 'password' || SENSITIVEISH_RE.test([f.name, f.id, f.ph, f.aria, f.lbl].join(' '));
+  };
   const snapshot = () => ({
     url: location.href,
     title: document.title,
@@ -470,16 +502,19 @@ const PAGE_HELPERS = `(() => {
       .map(text).filter(Boolean).slice(0, 40),
     links: Array.prototype.filter.call(document.querySelectorAll('a[href]'), visible)
       .map(text).filter(Boolean).slice(0, 40),
-    inputs: Array.prototype.filter.call(document.querySelectorAll('input:not([type="hidden"]), textarea, [contenteditable="true"]'), visible)
+    inputs: Array.prototype.filter.call(document.querySelectorAll(INPUT_SEL), visible)
       .map((el) => {
         const ph = el.getAttribute('placeholder') || el.getAttribute('aria-label') || '';
         const nm = el.getAttribute('name') || el.id || '';
-        const val = el.value || '';
+        // 敏感框：不读 value（第 9 步硬规矩）
+        const val = sensitiveish(el) ? '' : (el.value || '');
         return [ph && ('placeholder=' + ph), nm && ('name=' + nm), val && ('value=' + val)]
           .filter(Boolean).join(' | ') || '(无标识输入框)';
       }).slice(0, 40),
+    fields: Array.prototype.filter.call(document.querySelectorAll(INPUT_SEL), visible)
+      .map(fieldOf).slice(0, 40),
   });
-  window.__wbHelper = { __v: 5, visible, text, find, findInput, findClickable, pick, snapshot };
+  window.__wbHelper = { __v: 6, visible, text, find, findInput, findClickable, pick, fieldOf, sensitiveish, snapshot };
 })();`;
 
 /** 组合一段「注入 helper + 执行动作」的脚本 */
@@ -487,9 +522,57 @@ function pageScript(body: string): string {
   return `${PAGE_HELPERS}\n${body}`;
 }
 
-/** 读一次页面快照 */
+/** 读一次页面快照（第 9 步：附带字段分类——敏感框连值都没进过这条链路） */
 async function readSnapshot(wc: Target): Promise<PageSnapshot> {
-  return evaluate<PageSnapshot>(wc, pageScript('(() => window.__wbHelper.snapshot())()'));
+  const raw = await evaluate<PageSnapshot & { fields?: FieldDescriptor[] }>(
+    wc,
+    pageScript('(() => window.__wbHelper.snapshot())()'),
+  );
+  const fields = Array.isArray(raw.fields) ? raw.fields : [];
+  const inputFields = fields.map((f) => {
+    const c = classifyField(f);
+    const desc = [f.ph && `placeholder=${f.ph}`, (f.name || f.id) && `name=${f.name || f.id}`, f.lbl && `label=${f.lbl}`]
+      .filter(Boolean)
+      .join(' | ') || '(无标识输入框)';
+    return {
+      label: c.kind === 'sensitive' ? `[敏感·${FIELD_REASON_CN[c.reason]}] ${desc}` : desc,
+      kind: c.kind,
+      reason: c.reason,
+    };
+  });
+  const { fields: _drop, ...snap } = raw;
+  return { ...snap, inputFields };
+}
+
+/** 第 9 步：type/fill_form 的敏感字段守卫——命中就拒填（不依赖模型自觉） */
+async function typeSensitiveGuard(wc: Target, target: string): Promise<string | null> {
+  const d = await evaluate<FieldDescriptor | null>(
+    wc,
+    pageScript(`(() => {
+      const el = window.__wbHelper.findInput(${JSON.stringify(target)});
+      return el ? window.__wbHelper.fieldOf(el) : null;
+    })()`),
+  );
+  if (!d) return null; // 元素都找不到，让 typeInto 自己报“没找到”
+  const c = classifyField(d);
+  return c.kind === 'sensitive'
+    ? `目标是敏感字段（${FIELD_REASON_CN[c.reason]}），AI 不代填——用户直接在该输入框里打字即可`
+    : null;
+}
+
+/** 第 9 步：click 的支付确认守卫——收银台最终确认永远由用户点 */
+async function payClickGuard(wc: Target, target: string): Promise<string | null> {
+  const hit = await evaluate<{ label: string } | null>(
+    wc,
+    pageScript(`(() => {
+      const el = window.__wbHelper.find(${JSON.stringify(target)});
+      return el ? { label: window.__wbHelper.text(el) } : null;
+    })()`),
+  );
+  if (hit && isPaymentConfirmAction(hit.label)) {
+    return `支付/收银的最终确认必须由用户自己点（按钮「${hit.label.slice(0, 40)}」），AI 不代点`;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -873,6 +956,10 @@ export async function drive(action: BrowserAction, targetWebContentsId?: number)
         break;
       }
       case 'click': {
+        const pay = await payClickGuard(wc, action.target); // 第 9 步：支付最终确认不代点
+        if (pay) {
+          return { ok: false, action: actionName, error: pay, pageSnapshot: await readSnapshot(wc) };
+        }
         const hit = await clickTarget(wc, action.target);
         if (!hit) {
           return {
@@ -888,6 +975,10 @@ export async function drive(action: BrowserAction, targetWebContentsId?: number)
         break;
       }
       case 'type': {
+        const guard = await typeSensitiveGuard(wc, action.target); // 第 9 步：敏感字段不代填
+        if (guard) {
+          return { ok: false, action: actionName, error: guard, pageSnapshot: await readSnapshot(wc) };
+        }
         const result = await typeInto(wc, action.target, action.text, Boolean(action.submit));
         if (!result.ok) {
           return {
@@ -923,6 +1014,52 @@ export async function drive(action: BrowserAction, targetWebContentsId?: number)
           screenshot: dataUrl,
         };
       }
+      case 'fill_form': {
+        // 第 9 步：一次填多个【普通】字段；每个字段都过敏感守卫，敏感的一律拒
+        const filled: string[] = [];
+        const refused: string[] = [];
+        const missed: string[] = [];
+        for (const f of (Array.isArray(action.fields) ? action.fields : []).slice(0, 12)) {
+          if (paused) throw new TaskAborted();
+          const g = await typeSensitiveGuard(wc, f.target);
+          if (g) {
+            refused.push(String(f.target));
+            continue;
+          }
+          const r = await typeInto(wc, f.target, String(f.text ?? ''), false);
+          (r.ok ? filled : missed).push(String(f.target) + (r.ok ? '' : `（${r.reason}）`));
+        }
+        const detail = `填了 ${filled.length} 项` +
+          (refused.length ? `；按规矩拒填敏感 ${refused.length} 项` : '') +
+          (missed.length ? `；没填上 ${missed.length} 项` : '');
+        if (filled.length === 0) {
+          return {
+            ok: false,
+            action: actionName,
+            error: refused.length && !missed.length ? '目标全是敏感字段，一项都不能代填' : missed.join(' / ') || '没有可填的字段',
+            pageSnapshot: await readSnapshot(wc),
+          };
+        }
+        return { ok: missed.length === 0, action: actionName, detail, pageSnapshot: await readSnapshot(wc) };
+      }
+      case 'focus_sensitive_field': {
+        // 第 9 步：只定位聚焦、不带也不读值——剩下交给用户的手
+        const f = await evaluate<{ found: boolean; label: string }>(
+          wc,
+          pageScript(`(() => {
+            const el = window.__wbHelper.find(${JSON.stringify(action.target)}) ||
+              window.__wbHelper.findInput(${JSON.stringify(action.target)});
+            if (!el) return { found: false, label: '' };
+            try { el.scrollIntoView({ block: 'center' }); } catch (_) {}
+            try { el.focus(); } catch (_) {}
+            return { found: true, label: String(window.__wbHelper.text(el) || el.tagName).slice(0, 60) };
+          })()`),
+        );
+        if (!f?.found) {
+          return { ok: false, action: actionName, error: `没找到要定位的输入框：${action.target}`, pageSnapshot: await readSnapshot(wc) };
+        }
+        return { ok: true, action: actionName, detail: `已定位并聚焦「${f.label}」`, pageSnapshot: await readSnapshot(wc) };
+      }
       case 'ask_user':
       case 'done': {
         // 第 3 步只定类型，不接业务（不接大模型）
@@ -941,4 +1078,73 @@ export async function drive(action: BrowserAction, targetWebContentsId?: number)
   } catch (err) {
     return { ok: false, action: actionName, error: (err as Error).message };
   }
+}
+
+// ---------------------------------------------------------------------------
+// 第 9 步：敏感输入完成后的「自动恢复驾驶」观察窗
+//
+// 信号（任一命中即恢复）：did-navigate / did-navigate-in-page / page-title-updated；
+// 或轮询发现**页面上敏感输入框整体消失**（登录/验证完成后表单通常就没了）。
+// 读不到快照（导航中脚本失败）也算“页面变了”。
+// 上限 10 分钟：到时静默停表，保留手动「继续」兜底——绝不为了自动而替用户点提交。
+// ---------------------------------------------------------------------------
+
+const SENSITIVE_WATCH_POLL_MS = 1_200;
+const SENSITIVE_WATCH_CAP_MS = 10 * 60_000;
+
+export function startSensitiveAutoResume(onDone: () => void): () => void {
+  let settled = false;
+  let wc: Target | null = null;
+  try {
+    wc = resolveTarget(undefined);
+  } catch {
+    /* 内嵌页不在：只靠轮询也起不来，直接让调用方等手动继续 */
+  }
+  const offs: Array<() => void> = [];
+  const cleanup = (): void => {
+    clearInterval(timer);
+    clearTimeout(cap);
+    for (const off of offs) off();
+    offs.length = 0;
+  };
+  const finish = (): void => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    onDone();
+  };
+  if (wc) {
+    const handler = (): void => finish();
+    const bound = wc;
+    bound.on('did-navigate', handler);
+    bound.on('did-navigate-in-page', handler);
+    bound.on('page-title-updated', handler);
+    offs.push(
+      () => bound.off('did-navigate', handler),
+      () => bound.off('did-navigate-in-page', handler),
+      () => bound.off('page-title-updated', handler),
+    );
+  }
+  const timer = setInterval(() => {
+    if (!wc || wc.isDestroyed()) {
+      finish();
+      return;
+    }
+    void (async () => {
+      try {
+        const snap = await readSnapshot(wc as Target);
+        if (!snap.inputFields?.some((f) => f.kind === 'sensitive')) finish();
+      } catch {
+        finish(); // 导航中读不到 = 页面变了
+      }
+    })();
+  }, SENSITIVE_WATCH_POLL_MS);
+  const cap = setTimeout(() => {
+    settled = true;
+    cleanup();
+  }, SENSITIVE_WATCH_CAP_MS);
+  return () => {
+    settled = true;
+    cleanup();
+  };
 }

@@ -308,6 +308,8 @@ export default function App() {
   /** 聊天区一条可关闭的提示（未配置模型 / 出错 / 已先行暂停等），不冒充 AI 的话 */
   const [chatNote, setChatNote] = useState('');
 
+  /** 第 9 步：驾驶员在聊天里等用户回答普通资料（need_info）——回答后自动继续，不用点「继续」 */
+  const [agentAwaitInfo, setAgentAwaitInfo] = useState(false);
   /** 第 7 步：主进程 'agent' 事件的镜像（步摘要/文档结论），权威循环在主进程 */
   const [agentSteps, setAgentSteps] = useState<string[]>([]);
   const [agentDoc, setAgentDoc] = useState<{ title: string; outline: string[] } | null>(null);
@@ -428,6 +430,7 @@ export default function App() {
     setTaskDetailOpen(false);
     setDocNote('');
     setHasUnread(false);
+    setAgentAwaitInfo(false);
   };
 
   /** 浏览器区域是否可见 */
@@ -538,7 +541,13 @@ export default function App() {
       } else if (p.kind === 'ask') {
         setAgentSteps([]);
         pushChatLine(`⚠️ ${p.question}`);
+        const needInfo = p.reason === 'need_info';
+        setAgentAwaitInfo(needInfo);
+        if (needInfo) setChatNote('小助在等你答这句话——直接在下面输入框回答即可，发出后会自动继续（不用点「继续」）。');
+      } else if (p.kind === 'sensitive') {
+        pushChatLine(`🔒 ${p.message}`);
       } else if (p.kind === 'done') {
+        setAgentAwaitInfo(false);
         pushChatLine(`✅ 任务完成：${p.summary}${p.docReady ? ` · ${p.unreadHint ?? '结果文档已生成'}` : '（文档未就绪：后端未配置模型或库未起，见后端日志）'}`);
         setAgentDoc({ title: p.documentTitle, outline: p.documentOutline });
         // 第 8 步：红点由服务端确认（finish 已置 unread=true），这里点亮并刷新卡片
@@ -546,6 +555,7 @@ export default function App() {
         void refreshTask();
       } else if (p.kind === 'note') {
         pushChatLine(`${p.level === 'error' ? '⚠️' : 'ℹ️'} ${p.text}`);
+        if (/继续|恢复驾驶/.test(p.text)) setAgentAwaitInfo(false);
       }
     });
     return () => {
@@ -566,6 +576,20 @@ export default function App() {
     const value = input.trim();
     if (!value || streaming) return;
     setChatNote('');
+    // 第 9 步本地闸：聊天里出现「密码/验证码：xxx」这类赋值就拦下——不发送、不落库、
+    // 让敏感值只走浏览器输入框（服务端聊天与代填执行层各有自己的闸，这是第一道）。
+    // 形态判定：敏感关键词后面跟着「像值的串」（≥6 位字母数字符号），或整句就是 4~8 位纯数字；
+    // 只是提到关键词（“验证码一般几位”）不会被拦——宁可拦赋值、不问句误伤。
+    if (/(密码|口令|password|passcode|验证码|校验码|captcha|otp|cvv|银行卡|卡号|身份证)[\s:：=是为]{0,3}[A-Za-z0-9*#@$%&+=.-]{6,}/i.test(value)
+      || /^\s*\d{4,8}\s*$/.test(value)) {
+      setChatNote('这看起来像密码/验证码/卡号：请不要发到聊天里。直接在右侧浏览器里输入（我已确保焦点在页面上），我不会代填、也不会留存。');
+      try {
+        void window.workbench?.focusBrowser();
+      } catch {
+        /* 聚焦失败不碍事 */
+      }
+      return;
+    }
     if (aiInControl) {
       void window.workbench?.pauseTask();
       setChatNote('任务在 running：已先暂停自动 click/type（状态机 → paused），聊天照常发。');
@@ -635,6 +659,12 @@ export default function App() {
     } finally {
       setStreaming(false);
       setStreamText('');
+    }
+    // 第 9 步：刚才是回答驾驶员的「补资料」提问 → 把答案递给主进程并自动恢复循环
+    if (agentAwaitInfo) {
+      setAgentAwaitInfo(false);
+      setChatNote('已把答复转给小助，继续驾驶中…');
+      void window.workbench?.agentAnswer(value);
     }
   };
 
@@ -875,7 +905,7 @@ export default function App() {
 
         <div className="inputBar">
           <input
-            placeholder={streaming ? '小助正在打字…' : '和小助聊聊（消息加密存服务端，刷新后还在）'}
+            placeholder={streaming ? '小助正在打字…' : agentAwaitInfo ? '回复小助的提问即可，发出后自动继续…' : '和小助聊聊（消息加密存服务端，刷新后还在）'}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && onSend()}

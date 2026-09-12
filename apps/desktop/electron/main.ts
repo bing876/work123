@@ -15,6 +15,7 @@ import {
   isDrivingPaused,
 } from './driver';
 import { runAgentLoop } from './agent';
+import { startSensitiveAutoResume } from './driver';
 import type {
   AgentActionResponse,
   AgentEventPayload,
@@ -193,10 +194,19 @@ ipcMain.handle('workbench:task:start', () => startTask());
 ipcMain.handle('workbench:task:pause', () => pauseTask());
 // 第 7 步：有挂起的驾驶员任务时，「继续」= 重启 AI 循环（第一步仍是 read_page，按当前页决策，
 // 不重放旧动作）；没有则维持第 4 步 demo 语义。
-ipcMain.handle('workbench:task:resume', () => (agentGoal ? startAgentLoop(agentGoal, false) : resumeTask()));
+ipcMain.handle('workbench:task:resume', () => {
+  // 第 9 步：敏感等待中点「继续」= 手动兜底唤醒（和自动信号走同一条路）
+  if (sensitiveWaiters.length > 0) {
+    notifyResume();
+    return getTaskState();
+  }
+  return agentGoal ? startAgentLoop(agentGoal, false) : resumeTask();
+});
 ipcMain.handle('workbench:task:reset', () => {
   agentEpoch += 1; // 外部循环作废（下一个检查点退出）
   agentGoal = null;
+  notifyResume();
+  pendingAnswers = [];
   return resetTask();
 });
 ipcMain.handle('workbench:task:state', () => getTaskState());
@@ -208,6 +218,42 @@ ipcMain.handle('workbench:task:state', () => getTaskState());
 //   - API Key 不经过这里：它只在 apps/server/.env。
 // ---------------------------------------------------------------------------
 let agentEpoch = 0;
+// 第 9 步：敏感输入等待——loop 挂在 promise 上；自动恢复 watch / 手动继续 / 用户答复 都来唤醒
+let sensitiveWaiters: Array<() => void> = [];
+let stopSensitiveWatch: (() => void) | null = null;
+let holdNoteTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingAnswers: string[] = [];
+
+function notifyResume(): void {
+  stopSensitiveWatch?.();
+  stopSensitiveWatch = null;
+  if (holdNoteTimer) {
+    clearTimeout(holdNoteTimer);
+    holdNoteTimer = null;
+  }
+  const waiters = sensitiveWaiters;
+  sensitiveWaiters = [];
+  for (const resolve of waiters) resolve();
+}
+
+/** 敏感等待态：前置窗口 + 聚焦内嵌页（字段本身 driver 已 focus）+ 挂自动恢复观察 */
+function sensitiveHold(): Promise<void> {
+  mainWindow?.show();
+  mainWindow?.focus();
+  sendToMainWindow('workbench:browser:focus'); // 渲染层：显示内嵌页并把焦点交给 webview
+  stopSensitiveWatch = startSensitiveAutoResume(() => notifyResume());
+  // 2 分钟还没动静：提示手动兜底，等待继续挂着（不算失败，只是没自动化）
+  holdNoteTimer = setTimeout(() => {
+    emitAgent({
+      kind: 'note',
+      level: 'info',
+      text: '没检测到页面变化。若你已完成输入并提交，点右侧「继续」即可恢复驾驶。',
+    });
+  }, 120_000);
+  return new Promise<void>((resolve) => {
+    sensitiveWaiters.push(resolve);
+  });
+}
 /** 非 null = 有一轮驾驶员任务挂着（done/failed/stop 后置 null；paused 时保留供「继续」） */
 let agentGoal: string | null = null;
 let agentApiBase = 'http://127.0.0.1:8787';
@@ -274,6 +320,12 @@ function startAgentLoop(goal: string, fresh: boolean): ReturnType<typeof getTask
     taskStatus: async (id, status) => {
       if (id === null) return;
       await agentPost('/agent/task/status', { taskId: id, status }).catch(() => undefined);
+    },
+    sensitiveHold,
+    takeAnswers: () => {
+      const list = pendingAnswers;
+      pendingAnswers = [];
+      return list;
     },
     // 第 8 步：done 收尾（服务端整理文档 + unread=true + 调通知桩；这里失败不卡 done）
     taskFinish: async (id, doneBits, pagePoints) => {
@@ -349,10 +401,26 @@ ipcMain.handle('workbench:doc:download', async (_event, taskIdRaw: unknown, apiB
 });
 
 
+// 第 9 步：用户对「补资料」提问的回答。只许普通资料（模型层+执行层双闸挡敏感值）；
+// 只进内存与步摘要，不进 messages/memories。等待中收到答复 = 自动唤醒继续。
+ipcMain.handle('workbench:agent:answer', (_event, text: unknown) => {
+  const t = typeof text === 'string' ? text.trim().slice(0, 200) : '';
+  if (!t) return getTaskState();
+  pendingAnswers.push(t);
+  if (sensitiveWaiters.length > 0) {
+    notifyResume();
+    return getTaskState();
+  }
+  if (agentGoal) return startAgentLoop(agentGoal, false); // 上一轮以 ask_user 停了：带答复重启（仍先读当前页）
+  return getTaskState();
+});
+
 ipcMain.handle('workbench:agent:stop', () => {
   agentEpoch += 1;
   agentGoal = null;
   agentJwt = '';
+  notifyResume(); // 别让挂在敏感等待上的循环僵住
+  pendingAnswers = [];
   emitAgent({ kind: 'note', level: 'info', text: '驾驶员循环已中止（登出/停止）。' });
 });
 

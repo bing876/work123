@@ -50,7 +50,7 @@ node apps/server/dist/index.js   # 生产式启动（先在 .env 里 NODE_ENV=pr
 | `POST /auth/login/xyz` | 免 | `{xyz, password}`（`xyz` 支持 `xyz10001` 或 `10001`）。**没设过密码 → 明确失败** `code:"password_not_set"`，不是含糊的“密码错误” |
 | `POST /auth/password/set` | **要 JWT** | `{new_password, old_password?}`。≥8 位 scrypt 哈希入库；已有密码必须带正确 `old_password` |
 | `GET /auth/me` | **要 JWT** | `{user{id, xyz_id, has_password, phone_masked}, project, agents}`；无/坏 token 401 |
-| `POST /agent/next-action` | **要 JWT** | 第 7 步“云端驾驶员”：`{goal, stepsSummary[], snapshot, paused?}` → 用驾驶员提示词调 DeepSeek（JSON 模式），**只回一个** BrowserAction。模型乱说/坏 JSON/坏网址 → 一律转 `ask_user`；`paused:true` 时服务端也物理拦 click/type/open_url |
+| `POST /agent/next-action` | **要 JWT** | 第 7 步“云端驾驶员”：`{goal, stepsSummary[], snapshot, paused?}` → 用驾驶员提示词调 DeepSeek（JSON 模式），**只回一个** BrowserAction（含第 9 步 `fill_form` / `focus_sensitive_field`）。模型乱说/坏 JSON/坏网址 → 一律转 `ask_user`；`paused:true` 时服务端物理拦 click/type/open_url/fill_form；第 9 步服务端第二道闸：`type`/`fill_form` 命中敏感字段（快照分类或关键词）→ 自动换成 `focus_sensitive_field`（值即弃）、`click` 命中支付最终确认 → 拒 |
 | `POST /agent/task/start` | **要 JWT** | `{goal}` → tasks 表记一条 running（payload.steps 只存一步一句的人话摘要，**绝不存整页 HTML**），返回 `{taskId}` |
 | `POST /agent/task/step` | **要 JWT** | `{taskId, summary, ok}` 追加一步摘要（失败自动带「（失败）」） |
 | `POST /agent/task/status` | **要 JWT** | `{taskId, status: running\|paused\|done\|failed}` |
@@ -94,4 +94,23 @@ node apps/server/dist/index.js   # 生产式启动（先在 .env 里 NODE_ENV=pr
    模型没配 Key 时开始任务会收到明确错误，不崩、不瞎点；
 8. 第 8 步：任务 done 后小助头像亮红点（`tasks.unread`，跟登录用户走），任务卡「查看结果」→
    展开短结论 + 「下载文档（.md）」，看过即红点灭；通知只打 `[notify:noop]` 日志
-   （想验证通知挂了任务仍算成：`.env` 设 `NOTIFY_STUB_FAIL=1`）。
+   （想验证通知挂了任务仍算成：`.env` 设 `NOTIFY_STUB_FAIL=1`）；
+9. 第 9 步：非敏感资料（姓名/地址…）——AI 先 `ask_user(reason=need_info)` 在聊天里问，你在聊天里
+   答，答完自动继续驾驶并 `fill_form` 代填；敏感资料（密码/验证码/支付/身份证）——AI 一律不代填：
+   `focus_sensitive_field` 把窗口前置、光标定位到那个框，聊天只给一句人话提示；你输完并提交，
+   driver 检测到导航/标题变化或敏感框消失即自动恢复驾驶（检测不到时 2 分钟提示手动「继续」兜底，
+   最长观察 10 分钟）。敏感值全程不进模型、不进 messages/memories/日志。
+
+## 第 9 步：字段分类的敏感关键词表（判不准就来改这里）
+
+单一来源 `apps/desktop/electron/fieldClass.ts`（服务端另有关键词自检兜底）：
+
+| 判定 | 条件 |
+| --- | --- |
+| password | `input[type=password]`（无条件） |
+| otp_guess | 文案含 验证码/校验码/动态口令/短信码/一次性密码/verification/verif/otp/captcha；或含 code **且**是短数字输入（maxlength≤8 / inputmode=numeric|tel / type=tel|number） |
+| payment_guess | 文案含 支付/付款/银行卡/信用卡/借记卡/卡号/CVV/CVC/安全码/payment/pay now/checkout/card number/收银台/收款 |
+| id_guess | 文案含 身份证/id card/idcard |
+| 不代点的按钮 | click 文案命中 立即支付/确认支付/确认付款/去支付/去付款/提交订单/确认订单/pay now/checkout/place order |
+
+已知误伤：`zipcode` 这类「code+短数字」会被判 otp——按“宁可多判”原则保留；被误判的框用户可以自己点。
