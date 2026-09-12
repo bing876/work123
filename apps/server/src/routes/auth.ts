@@ -162,8 +162,11 @@ export function registerAuthRoutes(app: FastifyInstance, { pool, env, cipher }: 
 
       const code = randomSixDigits();
       const salt = makeCodeSalt();
+      // created_at 这一列在 sms_codes 上是 NOT NULL 且**没有 DEFAULT**
+      // （其它表都有 DEFAULT now()，这张表漏了），所以必须由写入方显式给值，
+      // 否则会撞 "null value in column \"created_at\" violates not-null constraint"。
       await pool.query(
-        `INSERT INTO sms_codes (phone_hash, code_hash, salt, expires_at) VALUES ($1, $2, $3, ${CODE_TTL_SQL})`,
+        `INSERT INTO sms_codes (phone_hash, code_hash, salt, expires_at, created_at) VALUES ($1, $2, $3, ${CODE_TTL_SQL}, now())`,
         [hash, hashCode(code, salt), salt],
       );
 
