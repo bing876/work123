@@ -873,9 +873,14 @@ export default function App() {
           </div>
         </div>
 
-        {/* 第 3 步调试区：丑是故意的，只为证明驾驶通了 */}
-        <div className="debug">
-          <div className="debug__title">调试区 · 驾驶内嵌页（第 3 步 · 不接 AI）</div>
+        {/* 第 3 步调试区：丑是故意的，只为证明驾驶通了。
+            第 8 步：AI 循环 running 时**自动收起**（不是删掉，DOM 还在）——右栏本来就窄，
+            这个黄框会把网页挤矮、把搜索框挤出视口；paused / done 再自动展开。 */}
+        <div className={task.phase === 'running' ? 'debug debug--collapsed' : 'debug'}>
+          <div className="debug__title">
+            调试区 · 驾驶内嵌页（第 3 步 · 不接 AI）
+            {task.phase === 'running' && '（AI 驾驶中已自动收起——点「暂停」可展开）'}
+          </div>
           <div className="buttons-row">
             <button
               className="btn"

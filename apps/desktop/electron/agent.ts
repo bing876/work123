@@ -71,6 +71,28 @@ function label(a: BrowserAction): string {
   }
 }
 
+/** 「找不到输入框」类失败：模型给的 target 对不上页面上任何输入框 */
+const NO_INPUT_FOUND = /没找到可输入的输入框|找不到.{0,6}输入框/;
+
+/** 目标里的搜索关键词：「打开百度搜天气」→「天气」；抠不出来（不是搜索类目标）就返回空 */
+function searchKeyword(goal: string): string {
+  // 注意 搜(?!索) / 查(?!询|找)：防止「搜索」「查询」被单字分支截成「索」「询」这种半个词
+  const m = goal.match(/(?:搜索|搜一下|搜搜|搜个|查一下|查查|查询|查找|搜(?!索)|查(?!询|找))\s*(.+)$/);
+  const kw = (m?.[1] ?? '')
+    .replace(/^[「『"']+|[」』"']+$/g, '')
+    .replace(/[。.!！?？\s]+$/g, '')
+    .trim();
+  return kw && kw.length <= 60 ? kw : '';
+}
+
+/**
+ * 搜索兜底：右栏窄 + 调试区把网页压矮，搜索框常年整条在视口外，模型给的描述性 target
+ * 又对不上任何输入框。与其空 type 两次再放弃，不如直接开搜索结果页，一步到位。
+ */
+function searchUrl(keyword: string): string {
+  return `https://www.baidu.com/s?wd=${encodeURIComponent(keyword)}`;
+}
+
 /** 跑一整轮驾驶循环；返回结束原因（给 main.ts 记日志用，不进渲染层） */
 export async function runAgentLoop(goal: string, hooks: AgentLoopHooks): Promise<string> {
   const steps: string[] = [];
@@ -150,6 +172,27 @@ export async function runAgentLoop(goal: string, hooks: AgentLoopHooks): Promise
       fails = 0;
       continue;
     }
+
+    // 搜索兜底：type 找不到输入框时不要空转两次再放弃 —— 直接开搜索结果页，一步到位。
+    // （只对"目标是搜索"生效：从 goal 里抠得出关键词才走这条路。）
+    if (action.action === 'type' && NO_INPUT_FOUND.test(res.error ?? '')) {
+      const kw = searchKeyword(goal);
+      if (kw) {
+        const url = searchUrl(kw);
+        hooks.emit({ kind: 'note', level: 'info', text: `没找到输入框，改用搜索结果页直接搜「${kw}」：${url}` });
+        const fallback = await hooks.exec({ action: 'open_url', url });
+        const fbSummary = `步 ${step}（搜索兜底）：打开 ${url}${fallback.ok ? ' —— 已跳转' : `；失败：${fallback.error ?? '未知原因'}`}`;
+        steps.push(fbSummary);
+        hooks.emit({ kind: 'step', step, summary: fbSummary, ok: fallback.ok });
+        await hooks.taskStep(taskId, fbSummary, fallback.ok).catch(() => undefined);
+        if (fallback.ok) {
+          fails = 0;
+          continue;
+        }
+        res = fallback;
+      }
+    }
+
     fails += 1;
     if (fails >= FAILS_BEFORE_ASK) {
       // 说明书第 11 条：连败两次，第三次不许再盲点——本地兜底直接转 ask_user

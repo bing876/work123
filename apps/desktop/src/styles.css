@@ -312,6 +312,18 @@ body {
   border-radius: 6px;
 }
 
+/*
+ * 第 8 步：AI 循环 running 时自动收起调试区（DOM 还在，只是不占高度），
+ * 把右栏高度让给下面的网页 —— 右栏本来就窄，这个黄框会把网页压矮、把搜索框挤出视口。
+ * paused / done 时自动展开。只收内容，标题栏留着（能看出来它只是被收起了）。
+ */
+.debug--collapsed .buttons-row,
+.debug--collapsed .debug__state,
+.debug--collapsed .debug__out,
+.debug--collapsed .debug__shot {
+  display: none;
+}
+
 /* ---- 第 5 步（重做版）：登录页 + 左栏账号小块 ---- */
 .authWrap {
   height: 100vh;

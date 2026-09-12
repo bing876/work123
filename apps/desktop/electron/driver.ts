@@ -351,7 +351,7 @@ function sleep(ms: number): Promise<void> {
 // ---------------------------------------------------------------------------
 
 const PAGE_HELPERS = `(() => {
-  if (window.__wbHelper && window.__wbHelper.__v === 4) return;
+  if (window.__wbHelper && window.__wbHelper.__v === 5) return;
   const visible = (el) => {
     if (!el) return false;
     const r = el.getBoundingClientRect();
@@ -400,6 +400,69 @@ const PAGE_HELPERS = `(() => {
       (el) => visible(el) && el.children.length === 0 && text(el).toLowerCase().indexOf(low) >= 0);
     return hit || null;
   };
+  /**
+   * 找「能打字的框」。与 find 的关键差别：**文字对不上时不再返回 null**，
+   * 而是退回到页面上真实的 input / textarea（含被挤到视口外、用户看不见的那个）。
+   *
+   * 为什么必须有这个兜底：右栏本来就窄，调试区又把网页压矮，搜索框常常整条在视口外；
+   * 而模型爱给「百度搜索输入框」这种描述性 target，对不上任何 placeholder / 可见文字——
+   * 老实现到这一步就放弃、报「找不到输入框」，循环连败两次就转 ask_user。
+   * 这里按「搜索语义 > 在视口内 > 面积大」挑一个，之后统一 scrollIntoView 再输入。
+   */
+  const findInput = (target) => {
+    const hit = find(target);
+    if (hit) {
+      const t = hit.tagName;
+      if (t === 'INPUT' || t === 'TEXTAREA' || hit.isContentEditable) return hit;
+    }
+    const sel = 'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="image"]), textarea, [contenteditable="true"]';
+    const usable = (el) => {
+      if (el.disabled || el.readOnly) return false;
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) return false;   // 注意：只要求"有尺寸"，不要求在视口内
+      const s = getComputedStyle(el);
+      return s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) > 0;
+    };
+    const cands = Array.prototype.filter.call(document.querySelectorAll(sel), usable);
+    if (!cands.length) return null;
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
+    const inView = (el) => {
+      const r = el.getBoundingClientRect();
+      return r.bottom > 0 && r.top < vh && r.right > 0 && r.left < vw;
+    };
+    const searchish = (el) => /(search|query|wd|word|kw|q|搜)/i.test(
+      [el.getAttribute('name'), el.id, el.getAttribute('placeholder'), el.getAttribute('aria-label'), el.className]
+        .filter(Boolean).join(' '));
+    const area = (el) => { const r = el.getBoundingClientRect(); return r.width * r.height; };
+    const score = (el) => (searchish(el) ? 2 : 0) + (inView(el) ? 1 : 0);
+    cands.sort((a, b) => score(b) - score(a) || area(b) - area(a));
+    return cands[0];
+  };
+  /**
+   * click 专用：文字对不上时，只有 target 明显在说「输入框」才退回真实输入框
+   * （避免把「百度一下」这种按钮误当成输入框去点）。
+   */
+  const findClickable = (target) => {
+    const hit = find(target);
+    if (hit) return hit;
+    return /框|输入|input|textarea|搜索栏/i.test(String(target)) ? findInput(target) : null;
+  };
+  /**
+   * 同一轮 type 的四个脚本（找框 / 读回 / 三种写入）必须盯住**同一个**元素：
+   * findInput 是按打分挑的，写完一次 DOM 变了就可能挑到别的框，读回校验会误判成"没写进去"。
+   * 所以按 target 字符串缓存命中的元素；元素被移除（换页）就自动重新挑。
+   */
+  let pickKey = null;
+  const pick = (target) => {
+    const key = String(target);
+    const stashed = window.__wbTypeTarget;
+    if (pickKey === key && stashed && stashed.isConnected) return stashed;
+    const el = findInput(target);
+    pickKey = key;
+    window.__wbTypeTarget = el || null;
+    return el;
+  };
   const snapshot = () => ({
     url: location.href,
     title: document.title,
@@ -416,7 +479,7 @@ const PAGE_HELPERS = `(() => {
           .filter(Boolean).join(' | ') || '(无标识输入框)';
       }).slice(0, 40),
   });
-  window.__wbHelper = { __v: 4, visible, text, find, snapshot };
+  window.__wbHelper = { __v: 5, visible, text, find, findInput, findClickable, pick, snapshot };
 })();`;
 
 /** 组合一段「注入 helper + 执行动作」的脚本 */
@@ -500,7 +563,7 @@ async function clickTarget(
   } | null>(
     wc,
     pageScript(`(() => {
-      const el = window.__wbHelper.find(${JSON.stringify(target)});
+      const el = window.__wbHelper.findClickable(${JSON.stringify(target)});
       if (!el) return null;
       try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
       const r = el.getBoundingClientRect();
@@ -545,7 +608,7 @@ async function clickTarget(
   const done = await evaluate<boolean>(
     wc,
     pageScript(`(() => {
-      const el = window.__wbHelper.find(${JSON.stringify(target)});
+      const el = window.__wbHelper.findClickable(${JSON.stringify(target)});
       if (!el) return false;
       el.click();
       return true;
@@ -582,7 +645,7 @@ async function typeInto(
   const found = await evaluate<{ tag: string; label: string; x: number; y: number } | null>(
     wc,
     pageScript(`(() => {
-      const el = window.__wbHelper.find(${JSON.stringify(target)});
+      const el = window.__wbHelper.pick(${JSON.stringify(target)});
       if (!el) return null;
       try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
       el.focus();
@@ -626,7 +689,7 @@ async function typeInto(
     evaluate<string>(
       wc,
       pageScript(`(() => {
-        const el = window.__wbHelper.find(${JSON.stringify(target)});
+        const el = window.__wbHelper.pick(${JSON.stringify(target)});
         if (!el) return '';
         return String(('value' in el ? el.value : el.textContent) || '');
       })()`),
@@ -648,7 +711,7 @@ async function typeInto(
     await evaluate(
       wc,
       pageScript(`(() => {
-        const el = window.__wbHelper.find(${JSON.stringify(target)});
+        const el = window.__wbHelper.pick(${JSON.stringify(target)});
         if (!el) return false;
         el.focus();
         try { return document.execCommand('insertText', false, ${JSON.stringify(value)}); } catch (_) { return false; }
@@ -664,7 +727,7 @@ async function typeInto(
     await evaluate(
       wc,
       pageScript(`(() => {
-        const el = window.__wbHelper.find(${JSON.stringify(target)});
+        const el = window.__wbHelper.pick(${JSON.stringify(target)});
         if (!el) return false;
         if ('value' in el) {
           const proto = el instanceof HTMLTextAreaElement
