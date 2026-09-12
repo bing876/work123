@@ -83,10 +83,16 @@ CREATE TABLE IF NOT EXISTS tasks (
   status     TEXT NOT NULL DEFAULT 'pending',
   title      TEXT,
   payload    JSONB NOT NULL DEFAULT '{}'::jsonb,
+  unread     BOOLEAN NOT NULL DEFAULT false,
+  result_enc TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks (project_id, status);
+
+-- 第 8 步：对老库幂等补列（新库上面已带）——unread 红点跟服务端走；结果文档加密放 result_enc
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS unread BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS result_enc TEXT;
 
 CREATE TABLE IF NOT EXISTS memories (
   id         BIGSERIAL PRIMARY KEY,

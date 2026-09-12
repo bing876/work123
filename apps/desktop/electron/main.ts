@@ -1,4 +1,5 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   drive,
@@ -274,6 +275,17 @@ function startAgentLoop(goal: string, fresh: boolean): ReturnType<typeof getTask
       if (id === null) return;
       await agentPost('/agent/task/status', { taskId: id, status }).catch(() => undefined);
     },
+    // 第 8 步：done 收尾（服务端整理文档 + unread=true + 调通知桩；这里失败不卡 done）
+    taskFinish: async (id, doneBits, pagePoints) => {
+      const r = await agentPost<{ unreadHint?: string; docTitle?: string }>('/agent/task/finish', {
+        taskId: id,
+        summary: doneBits.summary,
+        document_title: doneBits.document_title,
+        document_outline: doneBits.document_outline,
+        pagePoints,
+      });
+      return { unreadHint: r.unreadHint, docReady: Boolean(r.docTitle) };
+    },
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   })
     .then((reason) => {
@@ -299,6 +311,43 @@ ipcMain.handle('workbench:agent:start', (_event, goal: unknown, apiBase: unknown
   if (typeof token === 'string') agentJwt = token; // 只存内存；绝不 console
   return startAgentLoop(g, true);
 });
+
+// 第 8 步：结果文档下载。渲染层把 apiBase+token 传进来（刷新后主进程可能没会话）；
+// 拿到 Markdown 后：先本地脱敏兜底，再弹系统“保存为”对话框（只有 1 个窗口，不新增窗）。
+ipcMain.handle('workbench:doc:download', async (_event, taskIdRaw: unknown, apiBaseRaw: unknown, tokenRaw: unknown) => {
+  const taskId = Number(taskIdRaw);
+  const apiBase = typeof apiBaseRaw === 'string' && apiBaseRaw ? apiBaseRaw : agentApiBase;
+  const token = typeof tokenRaw === 'string' && tokenRaw ? tokenRaw : agentJwt;
+  if (!Number.isInteger(taskId)) return { saved: false, error: '没有可用的任务号（taskId 非法）' };
+  if (!token) return { saved: false, error: '没有登录凭证：先登录再下载' };
+  try {
+    const res = await fetch(`${apiBase.replace(/\/+$/, '')}/agent/task/doc?taskId=${taskId}`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const data = (await res.json().catch(() => ({}))) as { markdown?: string; title?: string; error?: string };
+    if (!res.ok) return { saved: false, error: data.error ?? `HTTP ${res.status}` };
+    let md = String(data.markdown ?? '');
+    if (!md.trim()) return { saved: false, error: '文档是空的，别下载；去后端日志看收尾是否被跳过' };
+    // 脱敏兜底：Key/JWT/手机号绝不进文件（服务端文档本不该有，这里再滤一遍）
+    md = md
+      .replace(/Bearer\s+[A-Za-z0-9._\-]+/gi, 'Bearer [已隐去]')
+      .replace(/sk-[A-Za-z0-9_\-]{6,}/g, '[已隐去密钥]')
+      .replace(/\b1[3-9]\d{9}\b/g, '[已隐去手机号]');
+    const safeTitle = String(data.title || '任务记录')
+      .replace(/[\\/:*?"<>|\r\n]+/g, ' ')
+      .trim()
+      .slice(0, 60) || '任务记录';
+    const options = { defaultPath: `${safeTitle}.md`, filters: [{ name: 'Markdown 文档', extensions: ['md'] }] } as const;
+    const target = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+    const { canceled, filePath } = target ? await dialog.showSaveDialog(target, options) : await dialog.showSaveDialog(options);
+    if (canceled || !filePath) return { saved: false, canceled: true };
+    await writeFile(filePath, `<!-- 由 AI 工作台导出 · 只含任务结论，凭证与手机号已过滤 -->\n\n${md}`, 'utf8');
+    return { saved: true, path: filePath };
+  } catch (err) {
+    return { saved: false, error: (err as Error).message };
+  }
+});
+
 
 ipcMain.handle('workbench:agent:stop', () => {
   agentEpoch += 1;

@@ -54,7 +54,10 @@ node apps/server/dist/index.js   # 生产式启动（先在 .env 里 NODE_ENV=pr
 | `POST /agent/task/start` | **要 JWT** | `{goal}` → tasks 表记一条 running（payload.steps 只存一步一句的人话摘要，**绝不存整页 HTML**），返回 `{taskId}` |
 | `POST /agent/task/step` | **要 JWT** | `{taskId, summary, ok}` 追加一步摘要（失败自动带「（失败）」） |
 | `POST /agent/task/status` | **要 JWT** | `{taskId, status: running\|paused\|done\|failed}` |
-| `GET /agent/task/current` | **要 JWT** | 我最近一条任务（桌面刷新后还原任务卡） |
+| `GET /agent/task/current` | **要 JWT** | 我最近一条任务（含 `unread` 红点、短结论、文档标题——桌面刷新后原样还原） |
+| `POST /agent/task/finish` | **要 JWT** | 第 8 步 done 收尾：调模型整理一次（JSON：summary/文档标题/Markdown/红点提示）；**没配 Key 或模型乱答 → 用已有字段兜底生成，绝不卡死也绝不编造**；文档 AES 密文进 `tasks.result_enc`，`unread=true`，然后调通知桩 |
+| `GET /agent/task/doc` | **要 JWT** | `?taskId=` 解密回传整份 Markdown（下载用；只认自己的任务） |
+| `POST /agent/task/read` | **要 JWT** | 看完结果标已读：`unread=false`（红点熄灭；刷新后仍是已读） |
 | `GET /auth/wechat/status` | 免 | 恒为 `{enabled:false}` —— 本步只预留 |
 | `POST /chat/stream` | **要 JWT** | `{conversationId?, message}`。**SSE 流式**：`meta`(带会话号) → 若干 `{"delta"}` → `done`；助手全文完成才写库，中断只回 `error` 事件、绝不留半截“成功”。未配 `DEEPSEEK_API_KEY` → 503 `llm_not_configured`（不装样子）|
 | `GET /chat/history` | **要 JWT** | `?conversationId=` 可省（默认你最近一条会话）；返回解密后的 `messages`，桌面重启后还原用 |
@@ -88,4 +91,7 @@ node apps/server/dist/index.js   # 生产式启动（先在 .env 里 NODE_ENV=pr
    点气泡下的「确认 · 用工作台浏览器开始」（或输入框写好目标点「开始任务」）→ 主进程循环开始：
    每轮 read_page → `/agent/next-action` 拿**一个**动作 → driver 执行 → 记一步摘要。
    「暂停/我来操作」立刻停手；「继续」先读当前真实页再问下一步（不重放旧动作）；
-   模型没配 Key 时开始任务会收到明确错误，不崩、不瞎点。
+   模型没配 Key 时开始任务会收到明确错误，不崩、不瞎点；
+8. 第 8 步：任务 done 后小助头像亮红点（`tasks.unread`，跟登录用户走），任务卡「查看结果」→
+   展开短结论 + 「下载文档（.md）」，看过即红点灭；通知只打 `[notify:noop]` 日志
+   （想验证通知挂了任务仍算成：`.env` 设 `NOTIFY_STUB_FAIL=1`）。

@@ -44,6 +44,19 @@ import type { AgentEventPayload, AuthProfile, AuthSession, BrowserAction, ChatHi
 type Role = 'user' | 'assistant';
 type Message = { id: number; role: Role; text: string };
 
+/** 第 8 步：GET /agent/task/current 的形态（红点/结果都认这个，不信内存假数据） */
+interface CurrentTask {
+  id: number;
+  status: string;
+  goal: string;
+  steps: string[];
+  unread: boolean;
+  summary?: string;
+  docTitle?: string;
+  unreadHint?: string;
+  outline?: string[];
+}
+
 /** 状态机 → 展示文案（主进程是唯一事实源，这里只是翻译） */
 const PHASE_LABEL: Record<TaskPhase, string> = {
   idle: 'idle · 待命',
@@ -243,8 +256,11 @@ function formatResult(res: DriveResult): string {
 }
 
 export default function App() {
-  /** 头像右上角红点，可手动开关 */
-  const [hasUnread, setHasUnread] = useState(true);
+  /** 头像右上角红点：第 8 步起由服务端 tasks.unread 驱动（登录后拉 current，done 事件点亮，看完熄灭） */
+  const [hasUnread, setHasUnread] = useState(false);
+  const [curTask, setCurTask] = useState<CurrentTask | null>(null);
+  const [taskDetailOpen, setTaskDetailOpen] = useState(false);
+  const [docNote, setDocNote] = useState('');
   /**
    * 第 4 步：任务状态机的镜像。
    * 权威状态在主进程（driver.ts），挂载时取一次 + 之后靠 'state' 广播同步；
@@ -301,7 +317,58 @@ export default function App() {
     setMessages((prev) => prev.concat({ id: Date.now() + Math.floor(Math.random() * 1000), role: 'assistant', text }));
   };
 
-  /** 会话一定向拉一次历史：刷新/重启还能看见之前的对话；登出清零 */
+  /** 第 8 步：任务快照（状态/未读/结果）——红点的唯一事实源。
+   *  用 ref 拿会话：agent 订阅 effect 是挂载时建的闭包，直接引用 session 会拿到旧的 null。 */
+  const sessionRef = useRef<AuthSession | null>(null);
+  sessionRef.current = session;
+  const refreshTask = async () => {
+    const sess = sessionRef.current;
+    if (!sess) return;
+    try {
+      const r = await authFetchJson<{ task: CurrentTask | null }>('/agent/task/current', {
+        headers: { authorization: `Bearer ${sess.token}` },
+      });
+      if (r.task) {
+        setCurTask(r.task);
+        setHasUnread(r.task.status === 'done' && r.task.unread);
+      }
+    } catch {
+      /* 后端/库没起时红点保持原样，不打扰 */
+    }
+  };
+
+  /** 看完结果 → 服务端标记已读、红点熄灭 */
+  const openTaskResult = async () => {
+    if (!curTask) return;
+    setTaskDetailOpen(true);
+    if (curTask.unread) {
+      const sess = sessionRef.current;
+      try {
+        await authFetchJson('/agent/task/read', {
+          method: 'POST',
+          body: JSON.stringify({ taskId: curTask.id }),
+          headers: { authorization: `Bearer ${sess?.token ?? ''}` },
+        });
+        setCurTask({ ...curTask, unread: false });
+        setHasUnread(false);
+      } catch {
+        /* 标已读失败就留着红点，下次再点 */
+      }
+    }
+  };
+
+  /** 下载 .md：主进程弹“另存为”+写盘，内容经脱敏兜底 */
+  const downloadTaskDoc = async () => {
+    if (!curTask || !session) return;
+    setDocNote('正在准备文档…');
+    const r = await window.workbench?.downloadDoc(curTask.id, API_BASE(), session.token);
+    if (!r) return;
+    if (r.saved) setDocNote(`已保存：${r.path}`);
+    else if (r.canceled) setDocNote('已取消保存');
+    else setDocNote(`下载失败：${r.error ?? '未知原因'}`);
+  };
+
+  /** 会话一定向拉一次历史 + 任务快照：刷新/重启还能看见之前的对话与红点；登出清零 */
   useEffect(() => {
     setMessages([]);
     convIdRef.current = null;
@@ -314,6 +381,7 @@ export default function App() {
         if (off) return;
         convIdRef.current = h.conversationId;
         setMessages(h.messages.map((m) => ({ id: m.id, role: m.role, text: m.text })));
+        void refreshTask();
       })
       .catch((e) => {
         if (!off) setChatNote(`拉取历史失败：${(e as Error).message}`);
@@ -356,6 +424,10 @@ export default function App() {
     void window.workbench?.agentStop();
     setAgentSteps([]);
     setAgentDoc(null);
+    setCurTask(null);
+    setTaskDetailOpen(false);
+    setDocNote('');
+    setHasUnread(false);
   };
 
   /** 浏览器区域是否可见 */
@@ -467,8 +539,11 @@ export default function App() {
         setAgentSteps([]);
         pushChatLine(`⚠️ ${p.question}`);
       } else if (p.kind === 'done') {
-        pushChatLine(`✅ 任务完成：${p.summary}`);
+        pushChatLine(`✅ 任务完成：${p.summary}${p.docReady ? ` · ${p.unreadHint ?? '结果文档已生成'}` : '（文档未就绪：后端未配置模型或库未起，见后端日志）'}`);
         setAgentDoc({ title: p.documentTitle, outline: p.documentOutline });
+        // 第 8 步：红点由服务端确认（finish 已置 unread=true），这里点亮并刷新卡片
+        setHasUnread(true);
+        void refreshTask();
       } else if (p.kind === 'note') {
         pushChatLine(`${p.level === 'error' ? '⚠️' : 'ℹ️'} ${p.text}`);
       }
@@ -703,7 +778,7 @@ export default function App() {
             <span className="avatar__face" aria-hidden="true">
               助
             </span>
-            {hasUnread && <span className="red-dot" title="有未读消息" />}
+            {hasUnread && <span className="red-dot" title={curTask?.unreadHint || '任务结果待查看'} />}
           </div>
           <div className="contact__meta">
             <div className="contact__name">小助</div>
@@ -732,7 +807,7 @@ export default function App() {
 
         <div className="buttons-row">
           <button className="btn" type="button" onClick={() => setHasUnread((v) => !v)}>
-            切换红点
+            切换红点（演示）
           </button>
         </div>
 
@@ -836,6 +911,38 @@ export default function App() {
             复位任务
           </button>
         </div>
+
+        {/* 第 8 步：任务收尾卡——短结论、已读/未读、下载文档都在这（不做浏览器外壳） */}
+        {curTask && (
+          <div className="card">
+            <h4>
+              任务 #{curTask.id} · {curTask.status}{' '}
+              {curTask.unread ? <span className="unreadTag">● 未读</span> : <span className="readTag">✓ 已读</span>}
+            </h4>
+            <div className="small">目标：{curTask.goal}</div>
+            {curTask.status === 'done' && !taskDetailOpen && (
+              <div className="buttons-row">
+                <button className="btn" type="button" onClick={() => void openTaskResult()}>
+                  查看结果{curTask.unread ? '（红点在这）' : ''}
+                </button>
+              </div>
+            )}
+            {taskDetailOpen && (
+              <>
+                {curTask.summary && <div className="small taskSummary">{curTask.summary}</div>}
+                {curTask.outline && curTask.outline.length > 0 && (
+                  <div className="small">📄 {curTask.docTitle || '任务记录'} · {curTask.outline.slice(0, 4).join(' / ')}</div>
+                )}
+                <div className="buttons-row">
+                  <button className="btn" type="button" onClick={() => void downloadTaskDoc()}>
+                    下载文档（.md）
+                  </button>
+                </div>
+                {docNote && <div className="small">{docNote}</div>}
+              </>
+            )}
+          </div>
+        )}
 
         <div className="card">
           <h4>示例任务</h4>

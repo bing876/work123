@@ -444,3 +444,21 @@ body {
   border-radius: 6px;
   text-align: left;
 }
+
+/* ---- 第 8 步：任务收尾卡（红点标签/短结论）---- */
+.unreadTag {
+  color: #dc2626;
+  font-weight: 600;
+}
+.readTag {
+  color: #16a34a;
+}
+.taskSummary {
+  margin: 4px 0;
+  padding: 6px 8px;
+  background: #f8fafc;
+  border-left: 3px solid #94a3b8;
+  border-radius: 4px;
+  white-space: pre-wrap;
+  text-align: left;
+}

@@ -46,7 +46,7 @@ async function main(): Promise<void> {
 
   registerAuthRoutes(app, { pool, env, cipher });
   registerChatRoutes(app, { pool, env, cipher });
-  registerAgentRoutes(app, { pool, env });
+  registerAgentRoutes(app, { pool, env, cipher });
 
   try {
     await migrate(pool);

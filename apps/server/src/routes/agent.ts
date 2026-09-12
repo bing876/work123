@@ -23,13 +23,26 @@ import type { Pool } from 'pg';
 import type { AgentActionRequest, AgentActionResponse, PageSnapshot } from '@ai-workbench/shared';
 import type { BrowserAction } from '@ai-workbench/shared';
 import type { ServerEnv } from '../env';
+import type { JsonCipher } from '../crypto';
 import { bearerFrom, verifyToken } from '../crypto';
 import { isDbUnreachable } from '../db';
+import { notifyUser } from '../notify';
 
 export interface AgentDeps {
   pool: Pool;
   env: ServerEnv;
+  /** 第 8 步：done 的结果文档要加密进 tasks.result_enc（复用第 5 步 AES-256-GCM） */
+  cipher: JsonCipher;
 }
+
+/** 第 8 步「任务结束整理」提示词（只在服务端；编造是红线） */
+const WRAP_PROMPT = [
+  '你是工作台的“任务收尾员”。根据任务目标、步骤摘要和最后看到的页面要点，把已完成任务整理成结果。',
+  '只输出一个 JSON：{"summary":"给聊天窗口的短结论（可扫读，不要过程流水账）","document_title":"文档标题","document_markdown":"完整 Markdown：## 目标 / ## 结论 / ## 要点列表 / ## 来源 / ## 没做成的事","unread_hint":"红点旁极短提示，例如：调研结果已生成"}',
+  '不要编造没在输入里出现过的数字和原文；找不到就写「未找到」。',
+  'document_markdown 里禁止出现手机号、验证码、密码、token、API Key。',
+  '来源网址只能引用输入里出现过的 url。',
+].join('\n')
 
 /** 驾驶员系统提示词：只放服务端。逐字按第 7 步说明。 */
 const DRIVER_PROMPT = [
@@ -236,14 +249,41 @@ function snapshotBrief(s: PageSnapshot): string {
 
 /** 任务归属校验：tasks JOIN projects，只认自己的 */
 async function ownTask(pool: Pool, taskId: number, userId: number) {
-  const r = await pool.query<{ id: string; status: string; title: string | null; payload: unknown }>(
-    'SELECT t.id, t.status, t.title, t.payload FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id = $1 AND p.user_id = $2',
+  const r = await pool.query<{ id: string; status: string; title: string | null; payload: unknown; unread: boolean; result_enc: string | null }>(
+    'SELECT t.id, t.status, t.title, t.payload, t.unread, t.result_enc FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id = $1 AND p.user_id = $2',
     [taskId, userId],
   );
   return r.rowCount === 1 ? r.rows[0] : null;
 }
 
-export function registerAgentRoutes(app: FastifyInstance, { pool, env }: AgentDeps): void {
+
+/** 第 8 步：兜底文档——没配 Key 或模型乱答时，用已落库字段拼一份**不编造**的 Markdown */
+function buildFallbackDoc(goal: string, steps: string[], done: Record<string, unknown>): { summary: string; title: string; markdown: string; hint: string } {
+  const str = (v: unknown, d: string): string => (typeof v === 'string' && v.trim() ? v.trim() : d);
+  const summary = str(done.summary, '任务已完成（细节见文档）');
+  const title = str(done.document_title, '任务记录');
+  const outline = Array.isArray(done.document_outline) ? (done.document_outline as unknown[]).map(String).slice(0, 12) : [];
+  const lines = [
+    `# ${title}`,
+    '',
+    '## 目标',
+    goal || '未找到',
+    '',
+    '## 结论',
+    summary,
+    '',
+    '## 要点',
+    ...(outline.length ? outline.map((x) => `- ${x}`) : ['- 未找到（模型未配置或未能整理，以下为原始步骤）']),
+    '',
+    '## 步骤摘要',
+    ...(steps.length ? steps.map((x) => `- ${x}`) : ['- 未找到']),
+    '',
+    '> 本文档由任务记录字段兜底生成（第 8 步）；未接入模型整理，也未编造任何页面数据。',
+  ];
+  return { summary, title, markdown: lines.join('\n'), hint: '任务结果已生成' };
+}
+
+export function registerAgentRoutes(app: FastifyInstance, { pool, env, cipher }: AgentDeps): void {
   // ---------------------------------------------------------------- 只给一步
   app.post('/agent/next-action', async (req: FastifyRequest, reply: FastifyReply) => {
     const claims = authed(req, env);
@@ -408,19 +448,162 @@ export function registerAgentRoutes(app: FastifyInstance, { pool, env }: AgentDe
     }
   });
 
+// ============================================================ 第 8 步：done 的收尾
+  // finish：调模型整理一次（可缺）→ 兜底不卡死 → 文档密文入 result_enc → unread=true → 通知桩
+  app.post('/agent/task/finish', async (req: FastifyRequest, reply) => {
+    const claims = authed(req, env);
+    if (!claims) return errJson(reply, 401, '未登录或登录已过期');
+    const b = req.body as { taskId?: unknown; summary?: unknown; document_title?: unknown; document_outline?: unknown; pagePoints?: unknown } | null;
+    const taskId = Number(b?.taskId);
+    if (!Number.isInteger(taskId)) return errJson(reply, 400, 'taskId 必填');
+    try {
+      const t = await ownTask(pool, taskId, claims.sub);
+      if (!t) return errJson(reply, 404, '任务不存在或不是你的');
+      const payload = (t.payload ?? {}) as { goal?: string; steps?: string[] };
+      const goal = payload.goal ?? t.title ?? '';
+      const steps = payload.steps ?? [];
+      const doneBits = {
+        summary: typeof b?.summary === 'string' ? b.summary.slice(0, 400) : '',
+        document_title: typeof b?.document_title === 'string' ? b.document_title.slice(0, 120) : '',
+        document_outline: Array.isArray(b?.document_outline) ? (b.document_outline as unknown[]).slice(0, 12) : [],
+      };
+      let doc = buildFallbackDoc(goal, steps, doneBits as unknown as Record<string, unknown>);
+      if (env.deepseekApiKey) {
+        // 只整理一次；模型连不上/乱答都退回兜底，绝不让收尾卡死
+        try {
+          const points = Array.isArray(b?.pagePoints) ? (b.pagePoints as unknown[]).map(String).slice(0, 12) : [];
+          const r = await fetch(`${env.deepseekBaseUrl.replace(/\/+$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${env.deepseekApiKey}` },
+            body: JSON.stringify({
+              model: env.deepseekModel,
+              stream: false,
+              response_format: { type: 'json_object' },
+              temperature: 0.2,
+              messages: [
+                { role: 'system', content: WRAP_PROMPT },
+                {
+                  role: 'user',
+                  content: [
+                    `任务目标：${goal}`,
+                    `步骤摘要：\n${steps.map((x, i) => `${i + 1}. ${x}`).join('\n') || '（无）'}`,
+                    `驾驶员 done 结论：${doneBits.summary || '（无）'}`,
+                    `要点提纲：${doneBits.document_outline.join(' / ') || '（无）'}`,
+                    `最后页面要点（仅标题/按钮级，不含整页）：\n${points.join('\n') || '（无）'}`,
+                  ].join('\n\n'),
+                },
+              ],
+            }),
+            signal: AbortSignal.timeout(60_000),
+          });
+          if (r.ok) {
+            const data = (await r.json()) as { choices?: { message?: { content?: string } }[] };
+            const parsed = extractJson(data.choices?.[0]?.message?.content ?? '');
+            if (parsed && typeof parsed === 'object') {
+              const o = parsed as Record<string, unknown>;
+              const md = typeof o.document_markdown === 'string' ? o.document_markdown.slice(0, 20_000) : '';
+              if (md.trim()) {
+                doc = {
+                  summary: (typeof o.summary === 'string' && o.summary.trim()) ? o.summary.slice(0, 400) : doc.summary,
+                  title: (typeof o.document_title === 'string' && o.document_title.trim()) ? o.document_title.slice(0, 120) : doc.title,
+                  markdown: md,
+                  hint: (typeof o.unread_hint === 'string' && o.unread_hint.trim()) ? o.unread_hint.slice(0, 24) : doc.hint,
+                };
+              }
+            }
+          }
+        } catch (err) {
+          console.warn('[agent] 收尾整理未用模型（走兜底，任务仍算完成）：', (err as Error).message);
+        }
+      }
+      await pool.query(
+        "UPDATE tasks SET status = 'done', unread = true, result_enc = $2, payload = $3::jsonb, updated_at = now() WHERE id = $1",
+        [
+          taskId,
+          cipher.encryptText(doc.markdown),
+          JSON.stringify({ ...payload, doc: { summary: doc.summary, title: doc.title, hint: doc.hint, outline: doneBits.document_outline } }),
+        ],
+      );
+      try {
+        notifyUser(claims.sub, `${doc.hint}（任务 #${taskId}：${goal.slice(0, 30)}）`);
+      } catch (err) {
+        // 通知挂了不碍事：说明书钉死——任务仍算 done，红点和文档都在
+        console.warn('[agent] 通知失败（忽略，不影响任务）：', (err as Error).message);
+      }
+      return { ok: true, unread: true, unreadHint: doc.hint, docTitle: doc.title };
+    } catch (err) {
+      return dbErr(reply, err);
+    }
+  });
+
+  // 下载前取文档（密文解回）；老任务没存过 result_enc 就用字段兜底再生成
+  app.get('/agent/task/doc', async (req: FastifyRequest, reply) => {
+    const claims = authed(req, env);
+    if (!claims) return errJson(reply, 401, '未登录或登录已过期');
+    const q = req.query as { taskId?: unknown } | null;
+    const taskId = Number(q?.taskId);
+    if (!Number.isInteger(taskId)) return errJson(reply, 400, 'taskId 必填');
+    try {
+      const t = await ownTask(pool, taskId, claims.sub);
+      if (!t) return errJson(reply, 404, '任务不存在或不是你的');
+      const payload = (t.payload ?? {}) as { goal?: string; steps?: string[]; doc?: { summary?: string; title?: string; outline?: string[] } };
+      let markdown: string;
+      if (t.result_enc) {
+        try {
+          markdown = cipher.decryptText(t.result_enc);
+        } catch {
+          return errJson(reply, 500, '文档解密失败：DATA_KEY 可能换过');
+        }
+      } else {
+        const bits = { summary: payload.doc?.summary ?? '', document_title: payload.doc?.title ?? '', document_outline: payload.doc?.outline ?? [] };
+        markdown = buildFallbackDoc(payload.goal ?? t.title ?? '', payload.steps ?? [], bits as unknown as Record<string, unknown>).markdown;
+      }
+      const title = (payload.doc?.title ?? '任务记录').replace(/[\\/:*?"<>|\r\n]+/g, ' ').slice(0, 60) || '任务记录';
+      return { title, markdown };
+    } catch (err) {
+      return dbErr(reply, err);
+    }
+  });
+
+  // 看完即读：红点灭
+  app.post('/agent/task/read', async (req: FastifyRequest, reply) => {
+    const claims = authed(req, env);
+    if (!claims) return errJson(reply, 401, '未登录或登录已过期');
+    const taskId = Number((req.body as { taskId?: unknown } | null)?.taskId);
+    if (!Number.isInteger(taskId)) return errJson(reply, 400, 'taskId 必填');
+    try {
+      const t = await ownTask(pool, taskId, claims.sub);
+      if (!t) return errJson(reply, 404, '任务不存在或不是你的');
+      await pool.query('UPDATE tasks SET unread = false, updated_at = now() WHERE id = $1', [taskId]);
+      return { ok: true, unread: false };
+    } catch (err) {
+      return dbErr(reply, err);
+    }
+  });
+
   app.get('/agent/task/current', async (req: FastifyRequest, reply) => {
     const claims = authed(req, env);
     if (!claims) return errJson(reply, 401, '未登录或登录已过期');
     try {
-      const r = await pool.query<{ id: string; status: string; title: string | null; payload: unknown }>(
-        'SELECT t.id, t.status, t.title, t.payload FROM tasks t JOIN projects p ON p.id = t.project_id WHERE p.user_id = $1 ORDER BY t.id DESC LIMIT 1',
+      const r = await pool.query<{ id: string; status: string; title: string | null; payload: unknown; unread: boolean }>(
+        'SELECT t.id, t.status, t.title, t.payload, t.unread FROM tasks t JOIN projects p ON p.id = t.project_id WHERE p.user_id = $1 ORDER BY t.id DESC LIMIT 1',
         [claims.sub],
       );
       if (r.rowCount !== 1) return { task: null };
       const row = r.rows[0];
-      const payload = (row.payload ?? {}) as { goal?: string; steps?: string[] };
+      const payload = (row.payload ?? {}) as { goal?: string; steps?: string[]; doc?: { summary?: string; title?: string; hint?: string; outline?: string[] } };
       return {
-        task: { id: Number(row.id), status: row.status, goal: payload.goal ?? row.title ?? '', steps: payload.steps ?? [] },
+        task: {
+          id: Number(row.id),
+          status: row.status,
+          goal: payload.goal ?? row.title ?? '',
+          steps: payload.steps ?? [],
+          unread: Boolean(row.unread),
+          summary: payload.doc?.summary ?? '',
+          docTitle: payload.doc?.title ?? '',
+          unreadHint: payload.doc?.hint ?? '',
+          outline: payload.doc?.outline ?? [],
+        },
       };
     } catch (err) {
       return dbErr(reply, err);

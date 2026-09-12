@@ -39,6 +39,15 @@ export interface AgentLoopHooks {
   taskStart(goal: string): Promise<number | null>;
   taskStep(taskId: number | null, summary: string, ok: boolean): Promise<void>;
   taskStatus(taskId: number | null, status: 'running' | 'paused' | 'done' | 'failed'): Promise<void>;
+  /**
+   * 第 8 步：done 收尾——把结论/提纲/最后页面要点交给服务端整理成文档并打红点。
+   * best-effort：没配 Key 服务端也兜底生成；调用失败只当文档未就绪，不卡 done。
+   */
+  taskFinish?(
+    taskId: number,
+    done: { summary: string; document_title: string; document_outline: string[] },
+    pagePoints: string[],
+  ): Promise<{ unreadHint?: string; docReady?: boolean } | undefined>;
   sleep(ms: number): Promise<void>;
 }
 
@@ -145,15 +154,36 @@ export async function runAgentLoop(goal: string, hooks: AgentLoopHooks): Promise
       return 'ask_user';
     }
     if (action.action === 'done') {
+      await hooks.taskStep(taskId, `步 ${step}：done（${action.summary}）`, true).catch(() => undefined);
+      // 第 8 步：先让服务端把文档/红点做好（taskStatus done 由 finish 端点顺手置）；
+      // 页面要点只给标题/按钮级信息——整页 HTML 不进整理、不进库。
+      let docInfo: { unreadHint?: string; docReady?: boolean } | undefined;
+      if (taskId !== null && hooks.taskFinish) {
+        const pagePoints = [`url: ${snap.url}`, `title: ${snap.title}`, ...(snap.buttons ?? []).slice(0, 8).map((b) => `按钮：${b}`)];
+        try {
+          docInfo = await hooks.taskFinish(
+            taskId,
+            { summary: action.summary, document_title: action.document_title, document_outline: action.document_outline },
+            pagePoints,
+          );
+        } catch {
+          docInfo = undefined; // 收尾失败不吞掉“完成”本身：聊天照报结论
+        }
+        if (!docInfo) {
+          await hooks.taskStatus(taskId, 'done').catch(() => undefined);
+        }
+      } else {
+        await hooks.taskStatus(taskId, 'done').catch(() => undefined);
+      }
       hooks.emit({
         kind: 'done',
         summary: action.summary,
         documentTitle: action.document_title,
         documentOutline: action.document_outline,
+        docReady: docInfo?.docReady ?? false,
+        unreadHint: docInfo?.unreadHint,
       });
       hooks.phase('done', `完成 — ${action.summary.slice(0, 40)}`);
-      await hooks.taskStep(taskId, `步 ${step}：done（${action.summary}）`, true).catch(() => undefined);
-      await hooks.taskStatus(taskId, 'done').catch(() => undefined);
       return 'done';
     }
 

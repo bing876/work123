@@ -44,6 +44,10 @@ const bridge: WorkbenchBridge = {
     ipcRenderer.invoke('workbench:agent:start', goal, apiBase, token),
   agentStop: () => ipcRenderer.invoke('workbench:agent:stop'),
 
+  // ---- 第 8 步：结果文档下载 + 服务端任务快照（红点以它为准）----
+  downloadDoc: (taskId: number, apiBase: string, token: string) =>
+    ipcRenderer.invoke('workbench:doc:download', taskId, apiBase, token),
+
   /**
    * 简易订阅：把主进程发来的 'workbench:browser:*' 转成回调。
    * 返回取消订阅函数（contextBridge 会把函数代理过去）。

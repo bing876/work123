@@ -161,6 +161,17 @@ export interface WorkbenchBridge {
   agentStart: (goal: string, apiBase: string, token: string) => Promise<TaskState>;
   /** 中止驾驶员循环并清 token（退出登录时也要调） */
   agentStop: () => Promise<void>;
+
+  /**
+   * 第 8 步：下载任务结果文档（.md）。走主进程存盘对话框；内容里由主进程再做一道
+   * 脱敏兜底（Bearer/sk-/手机号一律替换），绝不把 Key/JWT/手机号写进文件。
+   */
+  downloadDoc: (
+    taskId: number,
+    apiBase: string,
+    token: string,
+  ) => Promise<{ saved: boolean; path?: string; canceled?: boolean; error?: string }>;
+
   /** 读取主进程权威状态（渲染进程挂载时初始同步用） */
   getTaskState: () => Promise<TaskState>;
 
@@ -282,5 +293,5 @@ export interface AgentActionResponse {
 export type AgentEventPayload =
   | { kind: 'step'; step: number; summary: string; ok: boolean }
   | { kind: 'ask'; reason: string; question: string }
-  | { kind: 'done'; summary: string; documentTitle: string; documentOutline: string[] }
+  | { kind: 'done'; summary: string; documentTitle: string; documentOutline: string[]; docReady?: boolean; unreadHint?: string }
   | { kind: 'note'; level: 'info' | 'error'; text: string };
