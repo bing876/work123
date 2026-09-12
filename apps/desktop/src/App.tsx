@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { AuthProfile, AuthSession, BrowserAction, DriveResult, TaskPhase, TaskState } from '@ai-workbench/shared';
+import type { AuthProfile, AuthSession, BrowserAction, ChatHistoryResult, DriveResult, TaskPhase, TaskState } from '@ai-workbench/shared';
 
 /**
  * 第 2 步（内嵌版）「脸和门」：
@@ -22,6 +22,13 @@ import type { AuthProfile, AuthSession, BrowserAction, DriveResult, TaskPhase, T
  *   - 打开先见登录页（手机验证码 / XYZ号+密码 / 微信占位），登录成功才渲染原三栏工作台；
  *   - 注册/登录成功拿到系统分配的对外号 `XYZ+数字`（不可自选），左栏可见；
  *   - 登录后才谈密码：左栏小块可设置/修改（≥8 位，服务端只存哈希）。
+ *
+ * 第 6 步「真聊天」：
+ *   - 中间聊天不再是内存假数据：发一句 → POST /chat/stream 带第 5 步 JWT，SSE 逐字打字机；
+ *   - 用 fetch 读流（EventSource 加不了 Authorization 头，所以不用它）；
+ *   - 刷新/重启仍登录时 GET /chat/history 还原（服务端从加密的 messages 表解密回传）；
+ *   - 第 4 步规矩还在：running 时发这句 = 先让主进程 paused，聊天照发；
+ *   - AI 只会说话：不指挥浏览器、不假装开过网页（服务端系统提示词也这么钉死）。
  */
 
 type Role = 'user' | 'assistant';
@@ -36,14 +43,12 @@ const PHASE_LABEL: Record<TaskPhase, string> = {
   failed: 'failed · 任务失败',
 };
 
-/** 写死的开场白，让界面一打开就有内容 */
-const SEED_MESSAGES: Message[] = [
-  { id: 1, role: 'assistant', text: '你好，我是小助～' },
-  { id: 2, role: 'user', text: '先不用接 AI，我要看见工作台。' },
-  { id: 3, role: 'assistant', text: '好的，我把工作台浏览器放到右边这一栏。' },
-  { id: 4, role: 'assistant', text: '第 3 步：调试区那几个按钮可以直接驾驶右边这块内嵌页。' },
-  { id: 5, role: 'assistant', text: '第 4 步：现在是状态机 idle/running/paused/done/failed——点「开始任务」，随时「暂停」或发一句话接管，「继续」会先读你停留的页面。' },
-];
+/**
+ * 第 6 步：不再放写死的开场白。
+ * 历史一律以服务端 `/chat/history` 为准（库里的密文解密回传）；
+ * 一条都没有时中间区显示一句空态提示，而不是拿假对话冒充“聊过”。
+ */
+const SEED_MESSAGES: Message[] = [];
 
 /** 工作台浏览器的默认落地页 */
 const DEFAULT_BROWSER_URL = 'https://example.com';
@@ -268,6 +273,37 @@ export default function App() {
     return () => { off = true; };
   }, []);
 
+  // ---- 第 6 步：流式聊天状态（真聊天，不再是内存假数据）----
+  /** 当前会话 id：登录后 /chat/history 给回，或 /chat/stream 的 meta 事件补上；只在内存，不硬编 */
+  const convIdRef = useRef<number | null>(null);
+  const [streaming, setStreaming] = useState(false);
+  /** 打字机中的半截助手回复（done 之前只活在这里；库里只有完成的全文） */
+  const [streamText, setStreamText] = useState('');
+  /** 聊天区一条可关闭的提示（未配置模型 / 出错 / 已先行暂停等），不冒充 AI 的话 */
+  const [chatNote, setChatNote] = useState('');
+
+  /** 会话一定向拉一次历史：刷新/重启还能看见之前的对话；登出清零 */
+  useEffect(() => {
+    setMessages([]);
+    convIdRef.current = null;
+    if (!session) return;
+    let off = false;
+    authFetchJson<ChatHistoryResult>('/chat/history', {
+      headers: { authorization: `Bearer ${session.token}` },
+    })
+      .then((h) => {
+        if (off) return;
+        convIdRef.current = h.conversationId;
+        setMessages(h.messages.map((m) => ({ id: m.id, role: m.role, text: m.text })));
+      })
+      .catch((e) => {
+        if (!off) setChatNote(`拉取历史失败：${(e as Error).message}`);
+      });
+    return () => {
+      off = true;
+    };
+  }, [session]);
+
   const onSubmitPassword = async () => {
     if (!session) return;
     setPwMsg('');
@@ -292,6 +328,11 @@ export default function App() {
     localStorage.removeItem(TOKEN_KEY);
     setSession(null);
     setPwMsg('');
+    // 第 6 步：聊天痕迹也清掉（历史本来就在服务端，重启登录后由 /chat/history 还原）
+    setMessages([]);
+    setChatNote('');
+    setStreamText('');
+    convIdRef.current = null;
   };
 
   /** 浏览器区域是否可见 */
@@ -383,25 +424,89 @@ export default function App() {
    */
   const pointerEvents = 'auto';
 
-  const onSend = () => {
+  /**
+   * 第 6 步：发送 = 走 /chat/stream（带 JWT，fetch 读 SSE；EventSource 加不了 Authorization 所以不用它）。
+   * 第 4 步规矩保留：running 时先让主进程暂停（权威横幅由 'state' 广播改回「你正在控制」），聊天照发。
+   */
+  const sendChat = async () => {
+    if (!session) return;
     const value = input.trim();
-    if (!value) return;
-    // 仅追加到内存 state，不落盘、不发网络
+    if (!value || streaming) return;
+    setChatNote('');
+    if (aiInControl) {
+      void window.workbench?.pauseTask();
+      setChatNote('任务在 running：已先暂停自动 click/type（状态机 → paused），聊天照常发。');
+    }
     setMessages((prev) => prev.concat({ id: Date.now(), role: 'user', text: value }));
     setInput('');
     setHasUnread(false);
-    // 第 4 步：running 时发一句话 = 用户接管 → 立刻让主进程暂停（权威横幅随后由广播改回「你正在控制」）。
-    // 只在确认 running 时通知，空闲时发消息不产生任何驾驶副作用。
-    if (aiInControl) {
-      setMessages((prev) =>
-        prev.concat({
-          id: Date.now() + 1,
-          role: 'assistant',
-          text: '收到你的消息，已立刻暂停自动 click/type（状态机 → paused）。想让我接着做就点「继续」：我会先 read_page 读你停留的真实页面，再决定下一步，不重放之前的步骤。',
-        }),
-      );
-      void window.workbench?.pauseTask();
+    setStreaming(true);
+    setStreamText('');
+    try {
+      const res = await fetch(`${API_BASE()}/chat/stream`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+        body: JSON.stringify({ conversationId: convIdRef.current ?? undefined, message: value }),
+      });
+      if (!res.ok || !res.body) {
+        // 服务端在开流前给的 JSON 人话（503 未配置模型 / 400 / 401…）原样贴出来
+        let msg = `HTTP ${res.status}`;
+        try {
+          const j = (await res.json()) as { error?: string; code?: string };
+          if (j.code === 'llm_not_configured') msg = '未配置模型：在 apps/server/.env 填 DEEPSEEK_API_KEY 后重启 npm run dev:server';
+          else if (j.error) msg = j.error;
+        } catch {
+          /* 非 JSON 错误体，维持 HTTP 状态码 */
+        }
+        setChatNote(`没发出去：${msg}`);
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      let acc = '';
+      let sawDone = false;
+      for (;;) {
+        const { done, value: chunk } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(chunk, { stream: true });
+        const blocks = buf.split(/\r?\n\r?\n/);
+        buf = blocks.pop() ?? '';
+        for (const block of blocks) {
+          const lines = block.split(/\r?\n/);
+          const ev = lines.find((l) => l.startsWith('event:'))?.slice(6).trim() ?? '';
+          const dl = lines.find((l) => l.startsWith('data:'));
+          if (!dl) continue;
+          let j: { delta?: string; error?: string; conversationId?: number };
+          try {
+            j = JSON.parse(dl.slice(5).trim());
+          } catch {
+            continue; // 坏帧忽略，等下一条
+          }
+          if (ev === 'meta' && typeof j.conversationId === 'number') convIdRef.current = j.conversationId;
+          else if (ev === 'error') setChatNote(`出错了：${j.error ?? '未知原因'}`);
+          else if (ev === 'done') sawDone = true;
+          else if (j.delta) {
+            acc += j.delta;
+            setStreamText(acc); // 打字机：逐段追加到助手气泡
+          }
+        }
+      }
+      if (acc) {
+        setMessages((prev) => prev.concat({ id: Date.now() + 1, role: 'assistant', text: acc }));
+      } else if (!sawDone) {
+        setChatNote((n) => n || '这轮没拿到回复（未完成，服务端不会把半截存进历史）。');
+      }
+    } catch (e) {
+      setChatNote(`连不上后端：${(e as Error).message}`);
+    } finally {
+      setStreaming(false);
+      setStreamText('');
     }
+  };
+
+  const onSend = () => {
+    void sendChat();
   };
 
   // 打开 / 查看浏览器：先本地显示，再走 IPC 通知主进程（不等回包，避免闪一下）
@@ -552,25 +657,47 @@ export default function App() {
         <div className="sidebar__footer">桥：{bridgeInfo}</div>
       </aside>
 
-      {/* 中间：聊天区 */}
+      {/* 中间：聊天区（第 6 步：真流式；历史在服务端加密存储，这里只是展示） */}
       <main className="middle">
         <div className="chat">
+          {messages.length === 0 && !streaming && (
+            <div className="small" style={{ padding: '8px 4px' }}>
+              还没有聊天记录。跟小助说句话试试——消息会加密存进库里，重启后还在。
+            </div>
+          )}
           {messages.map((m) => (
             <div key={m.id} className={`msg ${m.role}`}>
               {m.text}
             </div>
           ))}
+          {streaming && (
+            <div className="msg assistant">
+              {streamText || <span className="small">小助正在想…</span>}
+              <span className="caret" aria-hidden="true">
+                ▍
+              </span>
+            </div>
+          )}
+          {chatNote && (
+            <div className="chatNote">
+              <span>{chatNote}</span>
+              <button type="button" className="chatNote__x" aria-label="关闭提示" onClick={() => setChatNote('')}>
+                ✕
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="inputBar">
           <input
-            placeholder="和小助聊两句（仅内存，不会保存）"
+            placeholder={streaming ? '小助正在打字…' : '和小助聊聊（消息加密存服务端，刷新后还在）'}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && onSend()}
+            disabled={streaming}
           />
-          <button type="button" onClick={onSend}>
-            发送
+          <button type="button" onClick={onSend} disabled={streaming}>
+            {streaming ? '打字中…' : '发送'}
           </button>
         </div>
       </main>

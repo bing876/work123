@@ -213,3 +213,30 @@ export interface SmsSendResult {
   /** 有效期（秒） */
   expires_in: number;
 }
+
+// ---------------------------------------------------------------------------
+// 第 6 步：流式聊天契约（AI 只会说话，不指挥浏览器——那是第 7 步）
+// 桌面用 fetch 读流（不用 EventSource：它带不了 Authorization 头）
+// ---------------------------------------------------------------------------
+
+/** 库里一条聊天消息（历史接口回传的形态；text 是服务端解密后的明文，库里只有密文）。
+    顶部那个旧的 ChatMessage 是第 2 步假聊天的遗留壳，别看错。 */
+export interface ChatRow {
+  id: number;
+  role: 'user' | 'assistant';
+  text: string;
+  created_at?: string;
+}
+
+/** GET /chat/history 的响应：没有会话时 conversationId 为 null、messages 为空数组 */
+export interface ChatHistoryResult {
+  conversationId: number | null;
+  messages: ChatRow[];
+}
+
+/** /chat/stream 的 SSE 事件负载（data: 里的 JSON） */
+export type ChatStreamEvent =
+  | { conversationId: number; userMessageId: number } // event: meta（流第一帧）
+  | { delta: string } // 打字机：逐段追加
+  | { conversationId: number; messageId: number; contentLength: number } // event: done（助手已落库）
+  | { error: string }; // event: error（中断/失败：半截不算数）

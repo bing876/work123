@@ -388,3 +388,35 @@ body {
   border: 1px dashed #d1d5db;
   border-radius: 8px;
 }
+
+/* ---- 第 6 步：打字机光标 + 聊天提示条（error/notice，不是 AI 的话）---- */
+.caret {
+  display: inline-block;
+  margin-left: 1px;
+  color: #6b7280;
+  animation: caretBlink 1s steps(1) infinite;
+}
+@keyframes caretBlink {
+  50% { opacity: 0; }
+}
+.chatNote {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 4px;
+  padding: 7px 10px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #92400e;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  border-radius: 8px;
+}
+.chatNote__x {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: #92400e;
+  cursor: pointer;
+  font-size: 12px;
+}

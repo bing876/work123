@@ -1,7 +1,7 @@
 # apps/server —— AI 工作台最小后端（第 5 步 · 重做版）
 
-只负责「手机号 + XYZ 号登录」和数据库表：Node + **Fastify 5** + **PostgreSQL** + **JWT**，
-不接大模型，**没有邮箱登录、没有 /chat/stream、没有真微信**。
+负责「手机号 + XYZ 号登录」、数据库表和 DeepSeek 流式聊天：Node + **Fastify 5** + **PostgreSQL** + **JWT**，
+接且只接 DeepSeek 聊天（只说话、不指挥浏览器），**没有邮箱登录、没有真微信**。
 （早先按邮箱/用户名做的版本已整体作废，本目录是按新账号说明重写的。）
 
 ## 先起数据库（本机 Docker）
@@ -23,6 +23,8 @@ cp .env.example .env
 # 可选：
 #   PHONE_PEPPER=<随机串>            # 手机号哈希胡椒（「一手机一用户」靠它）；没配回退用 DATA_KEY
 #   SMS_MOCK=1                       # 开发：验证码只写服务器日志（生产模式下无效）
+#   DEEPSEEK_API_KEY=sk-...          # 第 6 步聊天用；不填不崩，/chat/stream 明确回「未配置模型」
+#   DEEPSEEK_BASE_URL / DEEPSEEK_MODEL  # 可选，默认 https://api.deepseek.com / deepseek-chat
 #   SMS_HTTP_URL=https://...         # 生产：POST {phone, code} 的短信网关
 ```
 
@@ -49,6 +51,8 @@ node apps/server/dist/index.js   # 生产式启动（先在 .env 里 NODE_ENV=pr
 | `POST /auth/password/set` | **要 JWT** | `{new_password, old_password?}`。≥8 位 scrypt 哈希入库；已有密码必须带正确 `old_password` |
 | `GET /auth/me` | **要 JWT** | `{user{id, xyz_id, has_password, phone_masked}, project, agents}`；无/坏 token 401 |
 | `GET /auth/wechat/status` | 免 | 恒为 `{enabled:false}` —— 本步只预留 |
+| `POST /chat/stream` | **要 JWT** | `{conversationId?, message}`。**SSE 流式**：`meta`(带会话号) → 若干 `{"delta"}` → `done`；助手全文完成才写库，中断只回 `error` 事件、绝不留半截“成功”。未配 `DEEPSEEK_API_KEY` → 503 `llm_not_configured`（不装样子）|
+| `GET /chat/history` | **要 JWT** | `?conversationId=` 可省（默认你最近一条会话）；返回解密后的 `messages`，桌面重启后还原用 |
 | `POST /auth/wechat/login` | 免 | 恒为 `501 {code:'wechat_not_enabled'}`，**绝不发 JWT** |
 
 三个登录成功接口（login/sms、login/xyz）返回同一形状：

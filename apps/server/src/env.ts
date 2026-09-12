@@ -14,6 +14,10 @@ export interface ServerEnv {
   smsMock: boolean;
   smsHttpUrl: string;
   isProduction: boolean;
+  /** 第 6 步：DeepSeek 流式聊天。key 只允许存在这里（apps/server/.env），缺失不拒启——/chat/stream 自己拒答 */
+  deepseekApiKey: string;
+  deepseekBaseUrl: string;
+  deepseekModel: string;
 }
 
 export function loadEnv(): ServerEnv {
@@ -61,5 +65,8 @@ export function loadEnv(): ServerEnv {
     smsMock,
     smsHttpUrl,
     isProduction,
+    deepseekApiKey: (process.env.DEEPSEEK_API_KEY || '').trim(),
+    deepseekBaseUrl: (process.env.DEEPSEEK_BASE_URL || '').trim() || 'https://api.deepseek.com',
+    deepseekModel: (process.env.DEEPSEEK_MODEL || '').trim() || 'deepseek-chat',
   };
 }
