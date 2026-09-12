@@ -933,14 +933,18 @@ export default function App() {
                 {curTask.outline && curTask.outline.length > 0 && (
                   <div className="small">📄 {curTask.docTitle || '任务记录'} · {curTask.outline.slice(0, 4).join(' / ')}</div>
                 )}
-                <div className="buttons-row">
-                  <button className="btn" type="button" onClick={() => void downloadTaskDoc()}>
-                    下载文档（.md）
-                  </button>
-                </div>
-                {docNote && <div className="small">{docNote}</div>}
               </>
             )}
+            {/* 第 8 步：任务 done 后「下载文档」直接摆在右栏，不必先点「查看结果」。
+                判定用「主进程状态机 done」或「服务端任务 done」——两者任一为 done 就给按钮。 */}
+            {(task.phase === 'done' || curTask.status === 'done') && (
+              <div className="buttons-row">
+                <button className="btn btn--go docDownload" type="button" onClick={() => void downloadTaskDoc()}>
+                  下载文档（.md）
+                </button>
+              </div>
+            )}
+            {docNote && <div className="small">{docNote}</div>}
           </div>
         )}
 

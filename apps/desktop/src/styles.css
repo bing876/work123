@@ -391,6 +391,14 @@ body {
   color: #fff;
   border-color: #111827;
 }
+/* ---- 第 8 步：任务 done 后的「下载文档」按钮（右栏里要一眼看见）---- */
+.docDownload {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 10px 12px;
+  border-style: solid;
+  border-width: 2px;
+}
 .account {
   display: flex;
   flex-direction: column;
