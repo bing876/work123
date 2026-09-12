@@ -337,7 +337,7 @@ ipcMain.handle('workbench:doc:download', async (_event, taskIdRaw: unknown, apiB
       .replace(/[\\/:*?"<>|\r\n]+/g, ' ')
       .trim()
       .slice(0, 60) || '任务记录';
-    const options = { defaultPath: `${safeTitle}.md`, filters: [{ name: 'Markdown 文档', extensions: ['md'] }] } as const;
+    const options: Electron.SaveDialogOptions = { defaultPath: `${safeTitle}.md`, filters: [{ name: 'Markdown 文档', extensions: ['md'] }] };
     const target = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
     const { canceled, filePath } = target ? await dialog.showSaveDialog(target, options) : await dialog.showSaveDialog(options);
     if (canceled || !filePath) return { saved: false, canceled: true };
