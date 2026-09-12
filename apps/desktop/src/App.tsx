@@ -578,9 +578,13 @@ export default function App() {
   // ---- 第 4 步：状态机按钮。本地不记账，一切以下方 'state' 广播回来的 task 为准 ----
 
   /** 开始 / 重新执行 demo 任务：先保证内嵌页可见（复用第 2/3 步的显示逻辑，不做新外壳） */
-  const onStartTask = () => {
+  const onStartTask = async () => {
     setBrowserMounted(true);
     setBrowserVisible(true);
+    // 等内嵌页 guest 真就绪再让主进程跑任务 —— 否则第一次点会出现
+    // "没有找到内嵌 webview 的 webContents"（主进程 runLoop 是同步跑到第一个 await，
+    // React 还没来得及重新挂载 <webview>，guest 也还没拿到 id）。
+    await getWebviewId();
     void window.workbench?.startTask();
   };
 
