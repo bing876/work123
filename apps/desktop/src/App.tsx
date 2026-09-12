@@ -32,6 +32,8 @@ import type { AgentEventPayload, AuthProfile, AuthSession, BrowserAction, ChatHi
  *
  * 第 7 步「云端驾驶员」：
  *   - 聊天里模型说「这需要用工作台浏览器，确认后我开始操作」时，气泡下出现【确认按钮】；
+ *     按钮只挂在**最后一条**确认回复上（旧按钮不再渲染），goal 取该确认之前最近的
+ *     那句**用户原话**（例如「打开百度搜天气」）——不读输入框、不取更早的消息，取不到就不开车；
  *     或输入框里写好目标点「开始任务」——两个入口都把目标交给主进程的 agent 循环；
  *   - 循环在**主进程**：read_page → POST /agent/next-action（带 JWT）→ 拿【一个】动作 →
  *     走现有 driver 执行 → 记一步摘要 → 再读页……直到 done / ask_user / 你暂停；
@@ -748,22 +750,34 @@ export default function App() {
           {messages.map((m, idx) => (
             <div key={m.id}>
               <div className={`msg ${m.role}`}>{m.text}</div>
-              {m.role === 'assistant' && m.text.includes('确认后我开始操作') && (
-                <div style={{ padding: '2px 4px' }}>
-                  <button
-                    type="button"
-                    className="btn"
-                    disabled={task.phase === 'running'}
-                    onClick={() => {
-                      // 目标 = 这条回复之前最近的用户消息（未确认前绝不开循环）
-                      const goal = [...messages.slice(0, idx)].reverse().find((x) => x.role === 'user')?.text ?? '';
-                      void startAgentTask(goal);
-                    }}
-                  >
-                    确认 · 用工作台浏览器开始
-                  </button>
-                </div>
-              )}
+              {/* 第 8 步：确认按钮只挂在「最后一条」确认回复上——旧确认按钮不再渲染，
+                  免得用户点到老按钮、拿旧目标开新任务（例如用「打开百度」去搜天气）。
+                  目标一律取这条确认之前最近的那句用户原话（例如「打开百度搜天气」）：
+                  既不读输入框，也不用更早的消息；取不到就明确提示，不拿空 goal 去开车。 */}
+              {m.role === 'assistant' &&
+                m.text.includes('确认后我开始操作') &&
+                idx === messages.length - 1 &&
+                !streaming && (
+                  <div style={{ padding: '2px 4px' }}>
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={task.phase === 'running'}
+                      onClick={() => {
+                        const goal = (
+                          [...messages.slice(0, idx)].reverse().find((x) => x.role === 'user')?.text ?? ''
+                        ).trim();
+                        if (!goal) {
+                          setChatNote('这条确认没有对应的用户原话，我没有开始。请把目标再发一遍（例如「打开百度搜天气」）。');
+                          return;
+                        }
+                        void startAgentTask(goal);
+                      }}
+                    >
+                      确认 · 用工作台浏览器开始
+                    </button>
+                  </div>
+                )}
             </div>
           ))}
           {streaming && (

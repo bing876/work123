@@ -44,8 +44,11 @@ const DRIVER_PROMPT = [
   '5. 不要改浏览器设置，不要下安装包，不要关闭用户标签，不要绕过验证码，不要攻击网站。',
   '6. 系统告诉你已暂停时，只能 ask_user 或简短确认，不能输出 click/type/open_url。',
   '7. 用户说继续时，只根据「当前 url + 当前页面元素」，不要假设还在旧页面，不要从头再来。',
-  '8. 做完立刻 done，带 summary 和 document_outline。',
-  '9. 禁止编造页面上没有的按钮。',
+  '8. type 必须同时给出 target（输入框）和 text（真正要输入的文字）；不知道要输入什么就用 ask_user 问，禁止给 text 为空的 type。',
+  '9. done 只表示「用户要的最终结果已经出现在当前页面上」。',
+  '10. 只打开了首页 / 入口页不算完成。目标里含「搜索 / 搜一下 / 查 / 找 X」这类动作时，必须真的把关键词输进输入框并提交（或点搜索按钮）、页面已经跳到结果页，才允许 done。',
+  '11. 没做完不要 done，也不要用 done 代替 ask_user。拿不准就 ask_user 问用户，宁可多问一次。',
+  '12. 禁止编造页面上没有的按钮。',
 ].join('\n');
 
 /** paused 覆盖提示：拼在用户消息最前 */
@@ -83,12 +86,47 @@ function isEmptyAction(raw: unknown): boolean {
 }
 
 /** 第一轮交白卷时的纠偏提示：再要一次合法动作，别急着把用户踢成 paused */
-const RETRY_HINT = [
+const RETRY_HINT_BLANK = [
   '注意：你上一次的输出不是可执行动作（空动作、空 JSON、缺 action 字段，或根本不是合法 JSON）。',
   '空动作不会被本地执行，也不会推进任务，只会让用户卡住——请不要再用空动作回答。',
   '请只输出一个 JSON 对象，且必须带 action 字段，取值仅限：open_url / click / type / scroll / wait / ask_user / done。',
   '当前页信息不足以决定下一步 → 用 ask_user 并写清 question；目标已完成 → 用 done。',
 ].join('\n');
+
+/** 第一轮就想收工（只开了首页）时的纠偏提示：把"完成"的门槛说清楚 */
+const RETRY_HINT_EARLY_DONE = [
+  '注意：你上一次直接给了 done，但现在只打开了首页 / 入口页，用户要的结果还没出现在页面上。',
+  'done 只表示「用户要的最终结果已经在当前页面上」；只打开首页不算完成。',
+  '请继续输出下一个动作（不要 done）：例如在搜索框里 type 关键词并 submit，或 click 搜索按钮。',
+  '如果当前页信息不足以继续，就用 ask_user 问用户，不要用 done 蒙混过去。',
+].join('\n');
+
+/** 目标里有没有「要搜 / 要查 / 要找」的意图（纯「打开某页」不算） */
+const SEARCH_INTENT = /(搜索|搜一下|搜搜|搜个|查询|查一下|查查|查找|搜|查|找一下|找找)/;
+/** 到目前为止有没有真"动过手"的步骤（输入 / 点击 / 提交） */
+const HANDS_ON_STEP = /(输入|写入|点击|提交|回车)/;
+
+/** 当前页看起来已经是「结果页」：URL 上带了查询参数（例如百度 /s?wd=天气） */
+function looksLikeResultPage(url: string): boolean {
+  return /[?&][^=&#]+=[^&#]+/.test(url);
+}
+
+/**
+ * 判断模型这次的 done 是不是「太早」（只打开首页就想收工）。
+ * 判定刻意收窄，避免误伤：
+ *   1) 目标里必须有搜索/查询意图 —— 单纯「打开百度」打开完 done 是合理的；
+ *   2) 到目前为止没有任何「输入/点击」步骤 —— 说明只 open_url 过，没真推进目标；
+ *   3) 当前页也不是带查询参数的结果页 —— 模型直接开结果 URL 的情况放过。
+ * 三条同时成立才算早，然后会带纠偏提示重问一次；两次都这样才转 ask_user。
+ */
+function isPrematureDone(raw: unknown, goal: string, steps: string[], snapshot: PageSnapshot): boolean {
+  if (typeof raw !== 'object' || raw === null) return false;
+  if ((raw as Record<string, unknown>).action !== 'done') return false;
+  if (!SEARCH_INTENT.test(goal)) return false;
+  if (steps.some((s) => HANDS_ON_STEP.test(s))) return false;
+  if (looksLikeResultPage(snapshot.url)) return false;
+  return true;
+}
 
 function askUser(reason: string, question: string): Extract<BrowserAction, { action: 'ask_user' }> {
   return { action: 'ask_user', reason, question };
@@ -236,11 +274,12 @@ export function registerAgentRoutes(app: FastifyInstance, { pool, env }: AgentDe
       .join('\n\n');
 
     try {
-      // 最多问两轮：第一轮模型可能交白卷（空动作 / 空 JSON / 缺 action / 坏 JSON），
-      // 第二轮带纠偏提示再要一次合法 BrowserAction —— 避免一次空动作就把用户踢进 paused。
+      // 最多问两轮：第一轮模型可能交白卷（空动作 / 空 JSON / 坏 JSON），也可能「只开了首页就想 done」；
+      // 第二轮带对应纠偏提示再要一次 —— 既不因一次坏输出就把用户踢进 paused，也不假装任务已完成。
       let parsed: unknown = null;
-      let blank = true;
+      let problem: 'bad_json' | 'empty_action' | 'early_done' | 'none' = 'bad_json';
       for (let attempt = 1; attempt <= 2; attempt += 1) {
+        const hint = attempt === 1 ? '' : problem === 'early_done' ? RETRY_HINT_EARLY_DONE : RETRY_HINT_BLANK;
         const r = await fetch(`${env.deepseekBaseUrl.replace(/\/+$/, '')}/chat/completions`, {
           method: 'POST',
           headers: { 'content-type': 'application/json', authorization: `Bearer ${env.deepseekApiKey}` },
@@ -251,7 +290,7 @@ export function registerAgentRoutes(app: FastifyInstance, { pool, env }: AgentDe
             temperature: 0.2,
             messages: [
               { role: 'system', content: DRIVER_PROMPT },
-              { role: 'user', content: attempt === 1 ? userMsg : `${userMsg}\n\n${RETRY_HINT}` },
+              { role: 'user', content: hint ? `${userMsg}\n\n${hint}` : userMsg },
             ],
           }),
           signal: AbortSignal.timeout(60_000),
@@ -264,19 +303,22 @@ export function registerAgentRoutes(app: FastifyInstance, { pool, env }: AgentDe
         const data = (await r.json()) as { choices?: { message?: { content?: string } }[] };
         const content = data.choices?.[0]?.message?.content ?? '';
         parsed = extractJson(content);
-        blank = parsed === null || isEmptyAction(parsed);
-        if (!blank) break; // 拿到非空动作，收工
-        if (attempt === 1) console.warn('[agent] 模型第 1 轮给的是空动作/坏 JSON，带纠偏提示再要一次');
+        if (parsed === null) problem = 'bad_json';
+        else if (isEmptyAction(parsed)) problem = 'empty_action';
+        else if (isPrematureDone(parsed, goal, steps, snapshot)) problem = 'early_done';
+        else problem = 'none';
+        if (problem === 'none') break; // 拿到可用动作，收工
+        if (attempt === 1) console.warn(`[agent] 模型第 1 轮结果不可用（${problem}），带纠偏提示再要一次`);
       }
 
-      if (parsed === null) {
+      if (problem === 'bad_json') {
         // 模型没说人话：按说明书当 ask_user，不瞎执行
         return {
           action: askUser('parse_failed', '模型这两次都没给出合法 JSON 动作，我没有执行任何动作，也没有推进任务。请告诉我下一步，或你自己操作后点「继续」。'),
           note: '模型输出不是合法 JSON（已带纠偏提示重问一次），已按规则转成 ask_user',
         } satisfies AgentActionResponse;
       }
-      if (blank) {
+      if (problem === 'empty_action') {
         // 空字符串 / 空 / 空 JSON / 缺 action 字段：一律不当可执行动作，也不静默推进
         return {
           action: askUser(
@@ -284,6 +326,16 @@ export function registerAgentRoutes(app: FastifyInstance, { pool, env }: AgentDe
             '模型这一步给的是空动作（没有可执行内容），我没有执行任何动作，也没有推进任务。请直接告诉我下一步，或你自己操作后点「继续」。',
           ),
           note: '模型两次都只给出空动作（空字符串/空 JSON/缺 action 字段），已按规则转成 ask_user',
+        } satisfies AgentActionResponse;
+      }
+      if (problem === 'early_done') {
+        // 只打开了首页就想收工：绝不当成完成，也不静默推进
+        return {
+          action: askUser(
+            'early_done',
+            `模型想直接宣告完成，但「${goal}」还没做完——现在只打开了入口页，关键词还没搜。我没有把它当成完成。请告诉我下一步，或你自己操作后点「继续」。`,
+          ),
+          note: '模型两次都想在只打开入口页时就 done，已按规则转成 ask_user（避免过早 done）',
         } satisfies AgentActionResponse;
       }
       return { action: enforcePausedGate(sanitizeAction(parsed, paused), paused) } satisfies AgentActionResponse;
