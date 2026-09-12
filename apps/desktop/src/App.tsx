@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { AuthProfile, AuthSession, BrowserAction, ChatHistoryResult, DriveResult, TaskPhase, TaskState } from '@ai-workbench/shared';
+import type { AgentEventPayload, AuthProfile, AuthSession, BrowserAction, ChatHistoryResult, DriveResult, TaskPhase, TaskState } from '@ai-workbench/shared';
 
 /**
  * 第 2 步（内嵌版）「脸和门」：
@@ -29,6 +29,14 @@ import type { AuthProfile, AuthSession, BrowserAction, ChatHistoryResult, DriveR
  *   - 刷新/重启仍登录时 GET /chat/history 还原（服务端从加密的 messages 表解密回传）；
  *   - 第 4 步规矩还在：running 时发这句 = 先让主进程 paused，聊天照发；
  *   - AI 只会说话：不指挥浏览器、不假装开过网页（服务端系统提示词也这么钉死）。
+ *
+ * 第 7 步「云端驾驶员」：
+ *   - 聊天里模型说「这需要用工作台浏览器，确认后我开始操作」时，气泡下出现【确认按钮】；
+ *     或输入框里写好目标点「开始任务」——两个入口都把目标交给主进程的 agent 循环；
+ *   - 循环在**主进程**：read_page → POST /agent/next-action（带 JWT）→ 拿【一个】动作 →
+ *     走现有 driver 执行 → 记一步摘要 → 再读页……直到 done / ask_user / 你暂停；
+ *   - 暂停/继续语义沿用第 4 步：暂停立刻停手，继续先读**当前真实页**，绝不重放旧动作；
+ *   - 渲染层只是镜像：大字、任务卡「最近步」、聊天里的 ⚠️/✅ 都来自 'agent' 事件。
  */
 
 type Role = 'user' | 'assistant';
@@ -282,6 +290,15 @@ export default function App() {
   /** 聊天区一条可关闭的提示（未配置模型 / 出错 / 已先行暂停等），不冒充 AI 的话 */
   const [chatNote, setChatNote] = useState('');
 
+  /** 第 7 步：主进程 'agent' 事件的镜像（步摘要/文档结论），权威循环在主进程 */
+  const [agentSteps, setAgentSteps] = useState<string[]>([]);
+  const [agentDoc, setAgentDoc] = useState<{ title: string; outline: string[] } | null>(null);
+
+  /** 聊天里追加一条「小助之外」的系统泡（driver 循环的问话/结论/报错），只进内存展示 */
+  const pushChatLine = (text: string) => {
+    setMessages((prev) => prev.concat({ id: Date.now() + Math.floor(Math.random() * 1000), role: 'assistant', text }));
+  };
+
   /** 会话一定向拉一次历史：刷新/重启还能看见之前的对话；登出清零 */
   useEffect(() => {
     setMessages([]);
@@ -333,6 +350,10 @@ export default function App() {
     setChatNote('');
     setStreamText('');
     convIdRef.current = null;
+    // 第 7 步：驾驶员循环和 token 一并停掉/清掉（主进程里也不留）
+    void window.workbench?.agentStop();
+    setAgentSteps([]);
+    setAgentDoc(null);
   };
 
   /** 浏览器区域是否可见 */
@@ -423,6 +444,41 @@ export default function App() {
    * （paused 标志 + phase），不是靠 CSS 吃掉鼠标。
    */
   const pointerEvents = 'auto';
+
+  // 订阅主进程驾驶员事件：step 摘要进任务卡；ask/done/note 进聊天区
+  useEffect(() => {
+    const bridge = window.workbench;
+    if (!bridge) return;
+    let off = false;
+    const offAgent = bridge.on('agent', (payload) => {
+      if (!payload) return;
+      let p: AgentEventPayload;
+      try {
+        p = JSON.parse(payload) as AgentEventPayload;
+      } catch {
+        return;
+      }
+      if (off) return;
+      if (p.kind === 'step') {
+        setAgentSteps((prev) => prev.concat(`${p.summary}${p.ok ? '' : ' ❌'}`).slice(-6));
+      } else if (p.kind === 'ask') {
+        setAgentSteps([]);
+        pushChatLine(`⚠️ ${p.question}`);
+      } else if (p.kind === 'done') {
+        pushChatLine(`✅ 任务完成：${p.summary}`);
+        setAgentDoc({ title: p.documentTitle, outline: p.documentOutline });
+      } else if (p.kind === 'note') {
+        pushChatLine(`${p.level === 'error' ? '⚠️' : 'ℹ️'} ${p.text}`);
+      }
+    });
+    return () => {
+      off = true;
+      offAgent();
+    };
+    // pushChatLine/setMessages 都是稳定 setState，无需入依赖
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
 
   /**
    * 第 6 步：发送 = 走 /chat/stream（带 JWT，fetch 读 SSE；EventSource 加不了 Authorization 所以不用它）。
@@ -578,6 +634,19 @@ export default function App() {
   // ---- 第 4 步：状态机按钮。本地不记账，一切以下方 'state' 广播回来的 task 为准 ----
 
   /** 开始 / 重新执行 demo 任务：先保证内嵌页可见（复用第 2/3 步的显示逻辑，不做新外壳） */
+  /** 第 7 步：输入框有内容 → 当作任务目标交给主进程 AI 循环；空 → 维持第 4 步 demo */
+  const startAgentTask = async (rawGoal?: string) => {
+    const goal = (rawGoal ?? '').trim();
+    if (!goal || !session) return;
+    setBrowserMounted(true);
+    setBrowserVisible(true);
+    await getWebviewId(); // 复用第 6 步补丁：先等内嵌页 guest 就绪
+    setAgentSteps([]);
+    setAgentDoc(null);
+    // token 递给主进程只用于请求头；不打印
+    void window.workbench?.agentStart(goal, API_BASE(), session.token);
+  };
+
   const onStartTask = async () => {
     setBrowserMounted(true);
     setBrowserVisible(true);
@@ -585,6 +654,13 @@ export default function App() {
     // "没有找到内嵌 webview 的 webContents"（主进程 runLoop 是同步跑到第一个 await，
     // React 还没来得及重新挂载 <webview>，guest 也还没拿到 id）。
     await getWebviewId();
+    if (input.trim() && session) {
+      // 第 7 步主路径：带着输入框里的目标开 AI 循环（不发送聊天、不重做 UI）
+      const goal = input.trim();
+      setInput('');
+      void startAgentTask(goal);
+      return;
+    }
     void window.workbench?.startTask();
   };
 
@@ -669,9 +745,25 @@ export default function App() {
               还没有聊天记录。跟小助说句话试试——消息会加密存进库里，重启后还在。
             </div>
           )}
-          {messages.map((m) => (
-            <div key={m.id} className={`msg ${m.role}`}>
-              {m.text}
+          {messages.map((m, idx) => (
+            <div key={m.id}>
+              <div className={`msg ${m.role}`}>{m.text}</div>
+              {m.role === 'assistant' && m.text.includes('确认后我开始操作') && (
+                <div style={{ padding: '2px 4px' }}>
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={task.phase === 'running'}
+                    onClick={() => {
+                      // 目标 = 这条回复之前最近的用户消息（未确认前绝不开循环）
+                      const goal = [...messages.slice(0, idx)].reverse().find((x) => x.role === 'user')?.text ?? '';
+                      void startAgentTask(goal);
+                    }}
+                  >
+                    确认 · 用工作台浏览器开始
+                  </button>
+                </div>
+              )}
             </div>
           ))}
           {streaming && (
@@ -734,8 +826,23 @@ export default function App() {
         <div className="card">
           <h4>示例任务</h4>
           <div className="small">
-            状态：<span className="status-running">running</span>
+            状态：<span className="status-running">{PHASE_LABEL[task.phase].split(' ')[0]}</span>
           </div>
+          {agentSteps.length > 0 && (
+            <div className="agentSteps" role="log">
+              {agentSteps.map((x, i) => (
+                <div className="small" key={i}>
+                  {x}
+                </div>
+              ))}
+            </div>
+          )}
+          {agentDoc && (
+            <div className="small">
+              📄 {agentDoc.title}
+              {agentDoc.outline.length > 0 && ` · 提纲：${agentDoc.outline.slice(0, 4).join(' / ')}`}
+            </div>
+          )}
           <div className="buttons-row">
             <button className="btn" type="button" onClick={onOpenBrowser}>
               打开工作台浏览器

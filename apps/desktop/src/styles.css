@@ -420,3 +420,15 @@ body {
   cursor: pointer;
   font-size: 12px;
 }
+
+/* ---- 第 7 步：任务卡上的“最近步”小列表（主进程 agent 事件镜像，丑点没事）---- */
+.agentSteps {
+  margin: 6px 0;
+  padding: 6px 8px;
+  max-height: 96px;
+  overflow-y: auto;
+  background: #fafafa;
+  border: 1px solid #eee;
+  border-radius: 6px;
+  text-align: left;
+}

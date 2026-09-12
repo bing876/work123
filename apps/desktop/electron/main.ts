@@ -9,8 +9,17 @@ import {
   pauseTask,
   resumeTask,
   resetTask,
+  takeoverRun,
+  setExternalPhase,
+  isDrivingPaused,
 } from './driver';
-import type { BrowserAction } from '@ai-workbench/shared';
+import { runAgentLoop } from './agent';
+import type {
+  AgentActionResponse,
+  AgentEventPayload,
+  BrowserAction,
+  PageSnapshot,
+} from '@ai-workbench/shared';
 
 /**
  * Electron 主进程 —— 只有它能碰 Node / 系统能力。
@@ -181,9 +190,122 @@ setTaskListener((state) => {
 
 ipcMain.handle('workbench:task:start', () => startTask());
 ipcMain.handle('workbench:task:pause', () => pauseTask());
-ipcMain.handle('workbench:task:resume', () => resumeTask());
-ipcMain.handle('workbench:task:reset', () => resetTask());
+// 第 7 步：有挂起的驾驶员任务时，「继续」= 重启 AI 循环（第一步仍是 read_page，按当前页决策，
+// 不重放旧动作）；没有则维持第 4 步 demo 语义。
+ipcMain.handle('workbench:task:resume', () => (agentGoal ? startAgentLoop(agentGoal, false) : resumeTask()));
+ipcMain.handle('workbench:task:reset', () => {
+  agentEpoch += 1; // 外部循环作废（下一个检查点退出）
+  agentGoal = null;
+  return resetTask();
+});
 ipcMain.handle('workbench:task:state', () => getTaskState());
+
+// ---------------------------------------------------------------------------
+// 第 7 步：云端驾驶员「一步一问」循环的编排层（就在主进程；渲染进程不直连 CDP）
+//   - 调后端 /agent/next-action 要带第 5 步 JWT——token 只存在这里（内存），绝不打印全文；
+//   - 执行永远走现有 driver.ts；暂停由 driver 的 paused 闸 + 循环自查双保险；
+//   - API Key 不经过这里：它只在 apps/server/.env。
+// ---------------------------------------------------------------------------
+let agentEpoch = 0;
+/** 非 null = 有一轮驾驶员任务挂着（done/failed/stop 后置 null；paused 时保留供「继续」） */
+let agentGoal: string | null = null;
+let agentApiBase = 'http://127.0.0.1:8787';
+let agentJwt = '';
+
+function emitAgent(payload: AgentEventPayload): void {
+  sendToMainWindow('workbench:browser:agent', JSON.stringify(payload));
+}
+
+async function agentPost<T>(path: string, body: unknown): Promise<T> {
+  if (!agentJwt) throw new Error('没有可用的登录凭证（请先在窗口里登录）');
+  let res: Response;
+  try {
+    res = await fetch(`${agentApiBase.replace(/\/+$/, '')}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${agentJwt}` },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    throw new Error(`连不上后端 ${agentApiBase}：${(err as Error).message}`);
+  }
+  const data = (await res.json().catch(() => ({}))) as T & { error?: string; code?: string };
+  if (!res.ok) {
+    const code = (data as { code?: string }).code;
+    if (code === 'llm_not_configured') throw new Error('未配置模型：在 apps/server/.env 填 DEEPSEEK_API_KEY 后重启 npm run dev:server');
+    if (res.status === 401) throw new Error('登录已过期：重新登录后再点「继续」');
+    throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`);
+  }
+  return data;
+}
+
+function startAgentLoop(goal: string, fresh: boolean): ReturnType<typeof getTaskState> {
+  const epoch = ++agentEpoch;
+  agentGoal = goal;
+  const state = takeoverRun(fresh ? `AI 驾驶中 · 任务：${goal.slice(0, 36)}` : `继续任务（先读当前页）：${goal.slice(0, 36)}`);
+  void runAgentLoop(goal, {
+    nextAction: (body: { taskId: number | null; goal: string; stepsSummary: string[]; snapshot: PageSnapshot }) =>
+      agentPost<AgentActionResponse>('/agent/next-action', body).then((r) => {
+        if (!r || typeof (r.action as { action?: string })?.action !== 'string') throw new Error('大脑回了畸形 JSON');
+        return r;
+      }),
+    exec: (action) => drive(action),
+    readSnapshot: async () => {
+      const r = await drive({ action: 'read_page' });
+      if (!r.ok || !r.pageSnapshot) throw new Error(r.error ?? 'read_page 没拿到快照');
+      return r.pageSnapshot;
+    },
+    isPaused: () => isDrivingPaused(),
+    aborted: () => epoch !== agentEpoch,
+    emit: emitAgent,
+    phase: setExternalPhase,
+    taskStart: async (g) => {
+      try {
+        const r = await agentPost<{ taskId: number }>('/agent/task/start', { goal: g });
+        return typeof r.taskId === 'number' ? r.taskId : null;
+      } catch {
+        return null; // 记账失败不拦驾驶
+      }
+    },
+    taskStep: async (id, summary, ok) => {
+      if (id === null) return;
+      await agentPost('/agent/task/step', { taskId: id, summary, ok }).catch(() => undefined);
+    },
+    taskStatus: async (id, status) => {
+      if (id === null) return;
+      await agentPost('/agent/task/status', { taskId: id, status }).catch(() => undefined);
+    },
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  })
+    .then((reason) => {
+      if (epoch !== agentEpoch) return; // 已被新任务/复位顶掉，别动全局
+      if (reason === 'done' || reason === 'read_failed' || reason === 'brain_failed') agentGoal = null;
+      // paused / ask_user / stuck / budget：留着 agentGoal，「继续」从这里重启
+      console.log(`[agent] 循环结束：${reason}`);
+    })
+    .catch((err) => {
+      // 循环本体不抛穿（内部都 catch 了）；真到这就是编程错误，也得说人话而不是崩
+      console.error('[agent] 循环异常：', err);
+      emitAgent({ kind: 'note', level: 'error', text: `驾驶员内部错误：${(err as Error).message}` });
+      setExternalPhase('failed', `驾驶员内部错误 — ${(err as Error).message}`);
+      agentGoal = null;
+    });
+  return state;
+}
+
+ipcMain.handle('workbench:agent:start', (_event, goal: unknown, apiBase: unknown, token: unknown) => {
+  const g = typeof goal === 'string' ? goal.trim().slice(0, 200) : '';
+  if (!g) return getTaskState();
+  if (typeof apiBase === 'string' && apiBase) agentApiBase = apiBase;
+  if (typeof token === 'string') agentJwt = token; // 只存内存；绝不 console
+  return startAgentLoop(g, true);
+});
+
+ipcMain.handle('workbench:agent:stop', () => {
+  agentEpoch += 1;
+  agentGoal = null;
+  agentJwt = '';
+  emitAgent({ kind: 'note', level: 'info', text: '驾驶员循环已中止（登出/停止）。' });
+});
 
 // 单实例锁：重复启动时聚焦已有窗口，而不是再开一个
 const gotTheLock = app.requestSingleInstanceLock();

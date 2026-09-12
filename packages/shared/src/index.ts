@@ -26,7 +26,7 @@ export interface ChatSession {
 }
 
 /** 内嵌浏览器区域可订阅的事件名（state：第 4 步状态机广播，payload 为 TaskState 的 JSON） */
-export type BrowserEvent = 'open' | 'show' | 'hide' | 'focus' | 'state';
+export type BrowserEvent = 'open' | 'show' | 'hide' | 'focus' | 'state' | 'agent';
 
 // ---------------------------------------------------------------------------
 // 第 4 步：任务状态机
@@ -151,6 +151,16 @@ export interface WorkbenchBridge {
   resumeTask: () => Promise<TaskState>;
   /** 复位：任意状态回到 idle，用于从 done / failed 重新开始 */
   resetTask: () => Promise<TaskState>;
+
+  /**
+   * 第 7 步：启动云端驾驶员循环（一次一步）。
+   * @param goal   用户确认过的任务目标
+   * @param apiBase 后端地址（http://127.0.0.1:8787）
+   * @param token  第 5 步的 JWT——只递给主进程用于请求头，绝不打印
+   */
+  agentStart: (goal: string, apiBase: string, token: string) => Promise<TaskState>;
+  /** 中止驾驶员循环并清 token（退出登录时也要调） */
+  agentStop: () => Promise<void>;
   /** 读取主进程权威状态（渲染进程挂载时初始同步用） */
   getTaskState: () => Promise<TaskState>;
 
@@ -240,3 +250,37 @@ export type ChatStreamEvent =
   | { delta: string } // 打字机：逐段追加
   | { conversationId: number; messageId: number; contentLength: number } // event: done（助手已落库）
   | { error: string }; // event: error（中断/失败：半截不算数）
+
+// ---------------------------------------------------------------------------
+// 第 7 步：云端驾驶员循环 —— 看页 → 只输出一步动作 → 本地执行
+//
+// 动作类型复用上面的 BrowserAction，不另起第二套。
+// 桌面主进程把 read_page 快照 POST 给服务端，服务端只回【一个】动作。
+// ---------------------------------------------------------------------------
+
+/** POST /agent/next-action 的请求体（snapshot 就是 read_page 的 PageSnapshot） */
+export interface AgentActionRequest {
+  /** 服务端 tasks 表里的任务 id（start 之后带上来，用于记步） */
+  taskId?: number;
+  /** 用户确认过的目标（一句话） */
+  goal: string;
+  /** 已执行步骤的人话摘要（最近若干条，不含整页 HTML） */
+  stepsSummary: string[];
+  /** 当前页面快照（url/title/可见元素），继续时一定是最新的 */
+  snapshot: PageSnapshot;
+  /** true=用户接管中：服务端禁止返回 click/type/open_url */
+  paused?: boolean;
+}
+
+/** POST /agent/next-action 的响应：单个动作 + 可选的人话备注 */
+export interface AgentActionResponse {
+  action: BrowserAction;
+  note?: string;
+}
+
+/** 主进程 → 渲染进程 'agent' 事件负载（JSON 字符串） */
+export type AgentEventPayload =
+  | { kind: 'step'; step: number; summary: string; ok: boolean }
+  | { kind: 'ask'; reason: string; question: string }
+  | { kind: 'done'; summary: string; documentTitle: string; documentOutline: string[] }
+  | { kind: 'note'; level: 'info' | 'error'; text: string };

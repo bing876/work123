@@ -1,8 +1,10 @@
 /**
- * AI 工作台最小后端（第 6 步：账号 + 流式聊天）。
+ * AI 工作台最小后端（第 7 步：账号 + 流式聊天 + 云端驾驶员“一步一问”接口）。
  *
- * 接口面：GET /health（无需登录）+ /auth/*（第 5 步账号全家）+ /chat/stream、/chat/history（第 6 步，要 JWT）。
- * 明确没有：邮箱登录、大模型指挥浏览器（第 7 步再说）、真微信。监听 127.0.0.1，只服务本机桌面端。
+ * 接口面：GET /health（免）+ /auth/*（账号）+ /chat/stream、/chat/history（聊天）
+ *           + /agent/next-action、/agent/task/*（第 7 步驾驶员循环的“大脑”半边，要 JWT）。
+ * 服务器**不直接碰浏览器**：动作都返回给桌面主进程，由本地 driver.ts 执行。
+ * 明确没有：邮箱登录、真微信；云端也拿不到 CDP（只出动作建议，执行与叫停在本地）。监听 127.0.0.1。
  */
 import 'dotenv/config';
 import Fastify from 'fastify';
@@ -12,6 +14,7 @@ import { makePool, migrate } from './db';
 import { makeCipher } from './crypto';
 import { registerAuthRoutes } from './routes/auth';
 import { registerChatRoutes } from './routes/chat';
+import { registerAgentRoutes } from './routes/agent';
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -43,6 +46,7 @@ async function main(): Promise<void> {
 
   registerAuthRoutes(app, { pool, env, cipher });
   registerChatRoutes(app, { pool, env, cipher });
+  registerAgentRoutes(app, { pool, env });
 
   try {
     await migrate(pool);
@@ -54,7 +58,7 @@ async function main(): Promise<void> {
   await app.listen({ port: env.port, host: '127.0.0.1' });
   console.log(
     `[server] http://127.0.0.1:${env.port} —— GET /health；短信模式：${env.smsMock ? 'mock（验证码只进本日志）' : 'http 网关'}` +
-      `；模型：${env.deepseekApiKey ? `已配置（${env.deepseekModel} @ ${env.deepseekBaseUrl}）` : '未配置（/chat/stream 会提示填 DEEPSEEK_API_KEY）'}`,
+      `；模型：${env.deepseekApiKey ? `已配置（${env.deepseekModel} @ ${env.deepseekBaseUrl}）` : '未配置（/chat/stream 与 /agent/next-action 会明确拒绝并提示填 DEEPSEEK_API_KEY）'}`,
   );
 }
 

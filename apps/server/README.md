@@ -1,6 +1,6 @@
 # apps/server —— AI 工作台最小后端（第 5 步 · 重做版）
 
-负责「手机号 + XYZ 号登录」、数据库表和 DeepSeek 流式聊天：Node + **Fastify 5** + **PostgreSQL** + **JWT**，
+负责「手机号 + XYZ 号登录」、数据库表、DeepSeek 流式聊天和“一步一问”的驾驶员大脑：Node + **Fastify 5** + **PostgreSQL** + **JWT**，
 接且只接 DeepSeek 聊天（只说话、不指挥浏览器），**没有邮箱登录、没有真微信**。
 （早先按邮箱/用户名做的版本已整体作废，本目录是按新账号说明重写的。）
 
@@ -50,6 +50,11 @@ node apps/server/dist/index.js   # 生产式启动（先在 .env 里 NODE_ENV=pr
 | `POST /auth/login/xyz` | 免 | `{xyz, password}`（`xyz` 支持 `xyz10001` 或 `10001`）。**没设过密码 → 明确失败** `code:"password_not_set"`，不是含糊的“密码错误” |
 | `POST /auth/password/set` | **要 JWT** | `{new_password, old_password?}`。≥8 位 scrypt 哈希入库；已有密码必须带正确 `old_password` |
 | `GET /auth/me` | **要 JWT** | `{user{id, xyz_id, has_password, phone_masked}, project, agents}`；无/坏 token 401 |
+| `POST /agent/next-action` | **要 JWT** | 第 7 步“云端驾驶员”：`{goal, stepsSummary[], snapshot, paused?}` → 用驾驶员提示词调 DeepSeek（JSON 模式），**只回一个** BrowserAction。模型乱说/坏 JSON/坏网址 → 一律转 `ask_user`；`paused:true` 时服务端也物理拦 click/type/open_url |
+| `POST /agent/task/start` | **要 JWT** | `{goal}` → tasks 表记一条 running（payload.steps 只存一步一句的人话摘要，**绝不存整页 HTML**），返回 `{taskId}` |
+| `POST /agent/task/step` | **要 JWT** | `{taskId, summary, ok}` 追加一步摘要（失败自动带「（失败）」） |
+| `POST /agent/task/status` | **要 JWT** | `{taskId, status: running\|paused\|done\|failed}` |
+| `GET /agent/task/current` | **要 JWT** | 我最近一条任务（桌面刷新后还原任务卡） |
 | `GET /auth/wechat/status` | 免 | 恒为 `{enabled:false}` —— 本步只预留 |
 | `POST /chat/stream` | **要 JWT** | `{conversationId?, message}`。**SSE 流式**：`meta`(带会话号) → 若干 `{"delta"}` → `done`；助手全文完成才写库，中断只回 `error` 事件、绝不留半截“成功”。未配 `DEEPSEEK_API_KEY` → 503 `llm_not_configured`（不装样子）|
 | `GET /chat/history` | **要 JWT** | `?conversationId=` 可省（默认你最近一条会话）；返回解密后的 `messages`，桌面重启后还原用 |
@@ -78,4 +83,9 @@ node apps/server/dist/index.js   # 生产式启动（先在 .env 里 NODE_ENV=pr
 3. 登录页填 `13800138000` → 点「获取验证码」→ 回终端 A 抄 `[sms:mock]` 那行的 6 位码 → 登录；
 4. 未注册手机号当场建号：欢迎条显示你的 `XYZ` 号 → 进原来的三栏工作台（左栏「我的账号」可设密码、查号）；
 5. 设完密码后可退出、用 `XYZ+密码` 再登；没设过密码的号走这条路会收到明确失败提示；
-6. 点微信入口只会弹「即将开通」，不会进工作台（服务端对应接口 501，不发 token）。
+6. 点微信入口只会弹「即将开通」，不会进工作台（服务端对应接口 501，不发 token）；
+7. 第 7 步：聊天里问「帮我打开百度搜天气」→ 小助回「这需要用工作台浏览器，确认后我开始操作」→
+   点气泡下的「确认 · 用工作台浏览器开始」（或输入框写好目标点「开始任务」）→ 主进程循环开始：
+   每轮 read_page → `/agent/next-action` 拿**一个**动作 → driver 执行 → 记一步摘要。
+   「暂停/我来操作」立刻停手；「继续」先读当前真实页再问下一步（不重放旧动作）；
+   模型没配 Key 时开始任务会收到明确错误，不崩、不瞎点。

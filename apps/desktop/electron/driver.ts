@@ -142,6 +142,23 @@ export function resumeTask(): TaskState {
   return getTaskState();
 }
 
+/**
+ * 第 7 步：主进程外部编排循环（agent.ts 的云端驾驶员）接管状态机。
+ * 效果 = ++loopToken（把内置 demo runLoop / 上一个外部循环踢下线）+ 解除驾驶暂停 + 置 running。
+ * **不会**启动 demo 的 runLoop —— AI 循环自己按「读页→问一步→执行一步」走。
+ */
+export function takeoverRun(detail: string): TaskState {
+  loopToken += 1;
+  paused = false;
+  setPhase('running', detail, 0);
+  return getTaskState();
+}
+
+/** 第 7 步：外部循环汇报状态（running 步摘要 / ask_user→paused / done / failed），只动状态机不动执行 */
+export function setExternalPhase(next: TaskPhase, detail: string, step = phaseStep): void {
+  setPhase(next, detail, step);
+}
+
 export function resetTask(): TaskState {
   loopToken += 1;
   paused = false;

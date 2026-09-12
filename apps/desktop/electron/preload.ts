@@ -39,6 +39,11 @@ const bridge: WorkbenchBridge = {
   resetTask: () => ipcRenderer.invoke('workbench:task:reset'),
   getTaskState: () => ipcRenderer.invoke('workbench:task:state'),
 
+  // ---- 第 7 步：云端驾驶员循环（编排就在主进程；token 只递给主进程用，不打印）----
+  agentStart: (goal: string, apiBase: string, token: string) =>
+    ipcRenderer.invoke('workbench:agent:start', goal, apiBase, token),
+  agentStop: () => ipcRenderer.invoke('workbench:agent:stop'),
+
   /**
    * 简易订阅：把主进程发来的 'workbench:browser:*' 转成回调。
    * 返回取消订阅函数（contextBridge 会把函数代理过去）。
