@@ -5,6 +5,9 @@
  *     → 用驾驶员系统提示词 + 目标 + 步摘要 + 当前页快照调 DeepSeek（非流式，JSON 模式），
  *       解析出唯一一个 BrowserAction 返回。
  *     - 模型输出不合法 / 编造动作 → 一律转成 ask_user（“我没看懂页面，请你指导”），绝不瞎点；
+ *     - 空动作（空字符串 / 空 / 空 JSON {} / 缺 action 字段 / 占位词「空」）一律不当可执行动作：
+ *       先带纠偏提示重问一次要合法 BrowserAction，两次都是空才转 ask_user 并写清原因，
+ *       绝不静默推进——否则用户会卡在「点继续 → 立刻 paused」的空动作死循环里；
  *     - paused=true → 服务端兜底：click/type/open_url 全部拦下换成 ask_user；
  *     - 没配 DEEPSEEK_API_KEY → 503 llm_not_configured，不放假动作。
  *   POST /agent/task/start  {goal} → tasks 表记一条 running（payload.steps=[]），返回 {taskId}
@@ -54,6 +57,38 @@ const PAUSED_OVERRIDE = [
 
 /** 允许的动作文法：与 shared BrowserAction 一致 */
 const ALLOWED = new Set(['open_url', 'click', 'type', 'scroll', 'wait', 'ask_user', 'done']);
+
+/** 模型「交白卷」时的常见写法（空串、占位词）。这些一律不算可执行动作。 */
+const BLANK_ACTION_WORDS = new Set([
+  '', '空', '无', '没有', 'none', 'null', 'nil', 'n/a', 'na', 'undefined', '-', '—', '()', '{}',
+]);
+
+function isBlankActionWord(v: unknown): boolean {
+  return typeof v === 'string' && BLANK_ACTION_WORDS.has(v.trim().toLowerCase());
+}
+
+/**
+ * 空动作判定：空字符串 / null / undefined / 空 JSON（{}）/ 缺 action 字段 / 占位词「空」……
+ * 这些绝不当可执行动作下发，也不能静默当成一步推进——否则用户会卡在
+ * 「点继续 → 立刻 paused → 再点继续」的空动作死循环里。
+ */
+function isEmptyAction(raw: unknown): boolean {
+  if (raw === null || raw === undefined) return true;
+  if (typeof raw === 'string') return isBlankActionWord(raw);
+  if (typeof raw !== 'object') return false;
+  const o = raw as Record<string, unknown>;
+  if (Object.keys(o).length === 0) return true; // 空 JSON {}
+  if (!('action' in o) || o.action === null || o.action === undefined) return true; // 缺 action 字段
+  return isBlankActionWord(o.action); // 空串 / 占位词
+}
+
+/** 第一轮交白卷时的纠偏提示：再要一次合法动作，别急着把用户踢成 paused */
+const RETRY_HINT = [
+  '注意：你上一次的输出不是可执行动作（空动作、空 JSON、缺 action 字段，或根本不是合法 JSON）。',
+  '空动作不会被本地执行，也不会推进任务，只会让用户卡住——请不要再用空动作回答。',
+  '请只输出一个 JSON 对象，且必须带 action 字段，取值仅限：open_url / click / type / scroll / wait / ask_user / done。',
+  '当前页信息不足以决定下一步 → 用 ask_user 并写清 question；目标已完成 → 用 done。',
+].join('\n');
 
 function askUser(reason: string, question: string): Extract<BrowserAction, { action: 'ask_user' }> {
   return { action: 'ask_user', reason, question };
@@ -201,34 +236,54 @@ export function registerAgentRoutes(app: FastifyInstance, { pool, env }: AgentDe
       .join('\n\n');
 
     try {
-      const r = await fetch(`${env.deepseekBaseUrl.replace(/\/+$/, '')}/chat/completions`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${env.deepseekApiKey}` },
-        body: JSON.stringify({
-          model: env.deepseekModel,
-          stream: false,
-          response_format: { type: 'json_object' },
-          temperature: 0.2,
-          messages: [
-            { role: 'system', content: DRIVER_PROMPT },
-            { role: 'user', content: userMsg },
-          ],
-        }),
-        signal: AbortSignal.timeout(60_000),
-      });
-      if (!r.ok) {
-        const brief = (await r.text().catch(() => '')).slice(0, 200).replace(/\s+/g, ' ');
-        console.error('[agent] 上游 HTTP', r.status, brief);
-        return errJson(reply, 502, `模型服务返回 HTTP ${r.status}：${brief || '（无详情）'}`);
+      // 最多问两轮：第一轮模型可能交白卷（空动作 / 空 JSON / 缺 action / 坏 JSON），
+      // 第二轮带纠偏提示再要一次合法 BrowserAction —— 避免一次空动作就把用户踢进 paused。
+      let parsed: unknown = null;
+      let blank = true;
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        const r = await fetch(`${env.deepseekBaseUrl.replace(/\/+$/, '')}/chat/completions`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${env.deepseekApiKey}` },
+          body: JSON.stringify({
+            model: env.deepseekModel,
+            stream: false,
+            response_format: { type: 'json_object' },
+            temperature: 0.2,
+            messages: [
+              { role: 'system', content: DRIVER_PROMPT },
+              { role: 'user', content: attempt === 1 ? userMsg : `${userMsg}\n\n${RETRY_HINT}` },
+            ],
+          }),
+          signal: AbortSignal.timeout(60_000),
+        });
+        if (!r.ok) {
+          const brief = (await r.text().catch(() => '')).slice(0, 200).replace(/\s+/g, ' ');
+          console.error('[agent] 上游 HTTP', r.status, brief);
+          return errJson(reply, 502, `模型服务返回 HTTP ${r.status}：${brief || '（无详情）'}`);
+        }
+        const data = (await r.json()) as { choices?: { message?: { content?: string } }[] };
+        const content = data.choices?.[0]?.message?.content ?? '';
+        parsed = extractJson(content);
+        blank = parsed === null || isEmptyAction(parsed);
+        if (!blank) break; // 拿到非空动作，收工
+        if (attempt === 1) console.warn('[agent] 模型第 1 轮给的是空动作/坏 JSON，带纠偏提示再要一次');
       }
-      const data = (await r.json()) as { choices?: { message?: { content?: string } }[] };
-      const content = data.choices?.[0]?.message?.content ?? '';
-      const parsed = extractJson(content);
+
       if (parsed === null) {
         // 模型没说人话：按说明书当 ask_user，不瞎执行
         return {
-          action: askUser('parse_failed', '我没看懂页面，请你指导一下下一步（也可以你自己操作，然后点「继续」）。'),
-          note: '模型输出不是合法 JSON，已按规则转成 ask_user',
+          action: askUser('parse_failed', '模型这两次都没给出合法 JSON 动作，我没有执行任何动作，也没有推进任务。请告诉我下一步，或你自己操作后点「继续」。'),
+          note: '模型输出不是合法 JSON（已带纠偏提示重问一次），已按规则转成 ask_user',
+        } satisfies AgentActionResponse;
+      }
+      if (blank) {
+        // 空字符串 / 空 / 空 JSON / 缺 action 字段：一律不当可执行动作，也不静默推进
+        return {
+          action: askUser(
+            'empty_action',
+            '模型这一步给的是空动作（没有可执行内容），我没有执行任何动作，也没有推进任务。请直接告诉我下一步，或你自己操作后点「继续」。',
+          ),
+          note: '模型两次都只给出空动作（空字符串/空 JSON/缺 action 字段），已按规则转成 ask_user',
         } satisfies AgentActionResponse;
       }
       return { action: enforcePausedGate(sanitizeAction(parsed, paused), paused) } satisfies AgentActionResponse;
