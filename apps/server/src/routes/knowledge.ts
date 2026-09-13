@@ -129,10 +129,10 @@ function normalizeExtractedText(raw: string, kind: KnowledgeKind): string {
   }
   const replacementCount = (text.match(/\uFFFD/g) ?? []).length;
   if (replacementCount > 8 && replacementCount / Math.max(visible.length, 1) > 0.01) {
-    throw new KnowledgeInputError(kind === 'pdf' ? 'PDF 抽出的文字疑似乱码，请换一份带文字层的 PDF。' : 'txt/md 请使用 UTF-8 编码后再上传。');
+    throw new KnowledgeInputError(kind === 'pdf' ? '这份文件读出来是乱码，请换一份正常的文件再上传。' : 'txt/md 请使用 UTF-8 编码后再上传。');
   }
   if (codePointLength(text) > KNOWLEDGE_MAX_TEXT_CHARS) {
-    throw new KnowledgeInputError(`抽出的正文超过 ${KNOWLEDGE_MAX_TEXT_CHARS.toLocaleString()} 字，本版请拆分后上传。`, 413);
+    throw new KnowledgeInputError(`这份文件内容超过 ${KNOWLEDGE_MAX_TEXT_CHARS.toLocaleString()} 字太长了，本版请拆分后再上传。`, 413);
   }
   return text;
 }
