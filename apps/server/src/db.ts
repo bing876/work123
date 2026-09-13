@@ -94,15 +94,33 @@ CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks (project_id, status);
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS unread BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS result_enc TEXT;
 
+-- 第 10 步：用户档案记忆挂 owner_id（全员共用）；老列 project_id/mem_key/value_enc 保留兼容
 CREATE TABLE IF NOT EXISTS memories (
-  id         BIGSERIAL PRIMARY KEY,
-  project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  agent_id   BIGINT REFERENCES agents(id) ON DELETE SET NULL,
-  mem_key    TEXT NOT NULL,
-  value_enc  TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  id                BIGSERIAL PRIMARY KEY,
+  project_id        BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  agent_id          BIGINT REFERENCES agents(id) ON DELETE SET NULL,
+  mem_key           TEXT NOT NULL,
+  value_enc         TEXT NOT NULL,
+  owner_id          BIGINT REFERENCES users(id) ON DELETE CASCADE,
+  type              TEXT NOT NULL DEFAULT 'preference',
+  content_encrypted TEXT,
+  source            TEXT,
+  status            TEXT NOT NULL DEFAULT 'pending',
+  needs_confirm     BOOLEAN NOT NULL DEFAULT false,
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_memories_project ON memories (project_id);
+
+-- 对第 5 步建过表的老库幂等补列（注入/列表一律按 owner_id 过滤，不按项目隔离）
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS owner_id BIGINT REFERENCES users(id) ON DELETE CASCADE;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'preference';
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS content_encrypted TEXT;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS source TEXT;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS needs_confirm BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+CREATE INDEX IF NOT EXISTS idx_memories_owner ON memories (owner_id, status);
 `;
 
 export async function migrate(pool: Pool): Promise<void> {

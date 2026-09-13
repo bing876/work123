@@ -226,7 +226,9 @@ async function extractCore(
     'SELECT id FROM projects WHERE user_id = $1 ORDER BY is_default DESC, id ASC LIMIT 1',
     [ownerId],
   );
-  const projectId = p.rowCount === 1 ? Number(p.rows[0].id) : null;
+  // memories.project_id 是老表的 NOT NULL 外键（兼容保留）：没有默认项目就明确跳过，不撞约束
+  if (p.rowCount !== 1) return { extracted: 0, pending: [], skipped: 'no_project' };
+  const projectId = Number(p.rows[0].id);
 
   let inserted = 0;
   const pending: MemoryItem[] = [];
