@@ -8,7 +8,7 @@
  *   - fact：只在“会改变以后行为”（needs_confirm=true）时进 pending；否则整条丢弃；active 的 fact
  *     默认不注入，仅当本轮用户原话/任务目标命中其分词才追加；
  *   - pending 一律不注入；未确认永不影响行为；
- *   - 写入前必过敏感闸（密码/验证码/证件/卡号/Cookie 等原文一律丢弃该条）；
+ *   - 写入前必过敏感闸（密码/验证码/证件/卡号/账号/邮箱/Cookie 等原文一律丢弃该条）；
  *   - 语义去重用「规范化句子精确匹配」（不上向量库）；
  *   - 结束才抽取：任务 done/failed（服务端自触发）、聊天闲置 15 分钟（定时扫）、桌面「结束」按钮；
  *     同一会话/任务 10 分钟内不重复抽。
@@ -47,6 +47,24 @@ const EXTRACT_PROMPT = [
 const SENSITIVE_MEM_RE =
   /(密码|口令|passw|验证\s*码|校验\s*码|captcha|\botp\b|动[态态].{0,2}(码|令)|身份证|银行\s*卡|信用\s*卡|卡号|\bcvv\b|\bcvc\b|cookie|token|令牌|\bsecret\b)/i;
 const LONG_DIGITS_RE = /\d{11,}/;
+
+/**
+ * R4 补：账号/邮箱类“具体值”闸（说明书点名：content 里禁止出现账号、邮箱原文）。
+ * 只认“带值”的写法——像「以后用当前已登录的浏览器账号」这种不带值的决定必须放行。
+ */
+const SENSITIVE_ACCOUNT_RE = new RegExp(
+  [
+    '[\\w.+-]+@[\\w-]+(?:\\.[\\w-]+)+', // 邮箱地址形态
+    '(?:账号|帐号|用户名|邮箱|手机号|email|account)\\s*(?:[:：=是为]\\s*)?[A-Za-z0-9][\\w.\\-@]{2,}', // 账号：abc123 / 邮箱是 a@b.com
+    '(?:账号|帐号|用户名|邮箱|手机号)\\s*[:：=]\\s*[\\w\\u4e00-\\u9fa5]{2,}', // 账号：小明
+  ].join('|'),
+  'i',
+);
+
+/** 三闸合一：敏感关键词 + 账号/邮箱类具体值 + 长数字串（写入前与注入前都走这一支） */
+function memSensitive(s: string): boolean {
+  return SENSITIVE_MEM_RE.test(s) || SENSITIVE_ACCOUNT_RE.test(s) || LONG_DIGITS_RE.test(s);
+}
 
 function normalizeText(s: string): string {
   return String(s).toLowerCase().replace(/[\s，。、,.;；:：!！?？~～"'“”‘’()（）【】\-—_+·]/g, '');
@@ -136,7 +154,7 @@ export async function buildMemoryBlock(
       } catch {
         continue; // DATA_KEY 换过之类的脏行：跳过，不炸聊天
       }
-      if (SENSITIVE_MEM_RE.test(text) || LONG_DIGITS_RE.test(text)) continue; // 注入前也过闸，双保险
+      if (memSensitive(text)) continue; // 注入前也过闸（含账号/邮箱类），双保险
       lines.push(`- [${label(r.type)}] ${text}`);
     }
     if (lines.length > 0) lines.push('若两条冲突，以更晚的为准。');
@@ -151,7 +169,7 @@ export async function buildMemoryBlock(
       } catch {
         continue;
       }
-      if (SENSITIVE_MEM_RE.test(text) || LONG_DIGITS_RE.test(text)) continue; // 注入前也过一遍闸
+      if (memSensitive(text)) continue; // 注入前也过一遍闸（含账号/邮箱类）
       if (wordHits(userText, text)) lines.push(`- [事实·本轮相关] ${text}`);
     }
     if (lines.length === 0) return '';
@@ -242,7 +260,7 @@ async function extractCore(
     const needs = type === 'preference' ? false : type === 'decision' ? true : Boolean(o.needs_confirm);
     if (type === 'fact' && !needs) continue;
     // 写入前敏感闸（含长数字串=证件/卡号形态）
-    if (SENSITIVE_MEM_RE.test(content) || LONG_DIGITS_RE.test(content)) {
+    if (memSensitive(content)) {
       console.warn('[memories] 一条疑似敏感内容在写入前被丢弃（不落库、不入卡）');
       continue;
     }

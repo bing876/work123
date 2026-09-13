@@ -335,6 +335,29 @@ export default function App() {
       /* 后端/库没起就不打扰 */
     }
   };
+  /** R3 补拉：任务 done/failed 与闲置 15 分钟的抽取都在服务端后台跑（含最长 60 秒的模型调用），
+   *  事件到达那一刻拉的一把通常早于抽取完成——所以事件过后再补拉几次。 */
+  const memTimersRef = useRef<number[]>([]);
+  const scheduleMemRefresh = () => {
+    memTimersRef.current.forEach((t) => window.clearTimeout(t));
+    memTimersRef.current = [5_000, 20_000, 45_000, 75_000].map((ms) =>
+      window.setTimeout(() => void loadMemories(), ms),
+    );
+  };
+  useEffect(
+    () => () => {
+      memTimersRef.current.forEach((t) => window.clearTimeout(t));
+      memTimersRef.current = [];
+    },
+    [],
+  );
+  /** R3 补拉（闲置路径）：服务端每 15 分钟扫一次、无事件可听，客户端定时轻量查一次列表，
+   *  保证待确认条目最终会自己上卡（查询只读列表，确认前依旧不注入）。 */
+  useEffect(() => {
+    if (!session) return;
+    const t = window.setInterval(() => void loadMemories(), 60_000);
+    return () => window.clearInterval(t);
+  }, [session]);
   /** 「结束」：手动触发一次提取（同会话 10 分钟内重复点会被服务端去重窗口挡下） */
   const endConversationAndExtract = async () => {
     if (!sessionRef.current) return;
@@ -348,9 +371,16 @@ export default function App() {
         body: JSON.stringify({ conversationId: convIdRef.current }),
         headers: memHeaders(),
       });
-      if (r.skipped === 'llm_not_configured') setChatNote('没配 DEEPSEEK_API_KEY，这次没整理记忆。');
+      // R1：不向用户暴露内部配置名/服务名（R1 前是「没配 DEEPSEEK_API_KEY」）
+      if (r.skipped === 'llm_not_configured') setChatNote('这次没整理记忆：后端还没接上模型。');
       else if (r.skipped === 'dedup_10min') setChatNote('刚整理过一次了（10 分钟内不重复）。');
-      else {
+      else if (r.skipped === 'empty_transcript') setChatNote('这段对话还没内容，没什么可整理的。');
+      else if (r.skipped === 'nothing_worth_remembering') setChatNote('整理完了，没有新增。');
+      else if (r.skipped) {
+        // R2：其余 skipped 全是失败类（上游非 200 / 模型返回坏 JSON / 连不上 / 没有可写入的项目），
+        // 绝不能落进“整理完了、没有新增”这个成功提示里
+        setChatNote('这次没整理成（服务没返回结果），稍后再点一次试试。');
+      } else {
         const silent = Math.max(0, r.extracted - r.pending.length);
         setChatNote(silent > 0 ? `已静默记下 ${silent} 条偏好；${r.pending.length > 0 ? '还有要你先确认的：' : '没有需要确认的。'}` : '整理完了，没有新增。');
       }
@@ -619,6 +649,7 @@ export default function App() {
         setHasUnread(true);
         void refreshTask();
         void loadMemories(); // 第 10 步：任务 done 的抽取在服务端做，可能刚产出待确认条目
+        scheduleMemRefresh(); // R3：上面这一把通常早于服务端抽取完成，补拉几次确认卡才会出现
       } else if (p.kind === 'note') {
         pushChatLine(`${p.level === 'error' ? '⚠️' : 'ℹ️'} ${p.text}`);
         if (/继续|恢复驾驶/.test(p.text)) setAgentAwaitInfo(false);
