@@ -41,7 +41,37 @@ const EXTRACT_PROMPT = [
   '4. 「以后用当前已登录的浏览器账号」可以记成 decision，但 content 禁止写出账号、邮箱、密码的具体值。',
   '5. type=preference 时 needs_confirm 必须 false；type=decision 时必须 true；fact 仅当会改变以后行为才输出（needs_confirm true），否则不要输出它。',
   '6. 一次最多 5 条。content 一句话中文（30 字内最佳），不要解释、不要引号。',
+  '7. 【关键分类】preference 只留给「说话语气 / 长短」这类表达习惯（例：「以后回复尽量短」「别用客套话」）。',
+  '   凡是会改变「怎么干活」的工作规则——主题、配色、格式、模板、流程、工具、默认规则、以后每次/所有/都怎么办——',
+  '   一律 type=decision、needs_confirm=true（例：「以后所有报告都用蓝色主题」「以后都用表格出」「报告默认三段式」）。',
+  '   拿不准就按 decision 处理（宁可让用户确认，也不要静默生效）。',
 ].join('\n');
+
+/**
+ * 写入前的保守兜底（第 3 项验收失败后补）：模型可能把「工作方式/主题/流程」误判成 preference，
+ * 只靠提示词不够 —— 这里在解析 JSON 之后、落库之前再判一次：命中即强制 decision + needs_confirm，
+ * 让它走 pending 上确认卡，禁止静默 active。
+ */
+const THEME_RULE_RE = /(主题|主题色|配色|样式|风格|模板|版式|布局|字体|字号)/;
+const WORK_RULE_RE = /(报告|报表|文档|幻灯片|ppt|界面|格式|流程|规范|标准|默认|字段|单位|语言|图表|表格)/i;
+/** 明确写出「用/按/走 X（格式/主题）」的要求 */
+const FORMAT_RULE_RE = /(用|按|走|采用)\s*(蓝色|红色|绿色|深色|浅色|表格|列表|三段|markdown|pdf|word)/i;
+const GLOBAL_MARK_RE = /(所有|每次|一律|统统|全部|默认|统一|凡是)/;
+const FUTURE_MARK_RE = /(以后|今后|往后|接下来|从现在起|之后|长期)/;
+
+/**
+ * 只要命中就强制按 decision（pending + 必须确认）处理，禁止静默 active。
+ * 判定要点：主题/格式类词 或 工作方式词，且带「全局/长期」信号；
+ * 或者干脆是显式「用/按 X 格式」的要求。语气长短类（例：以后回复尽量短）不命中。
+ */
+function looksLikeWorkRule(content: string): boolean {
+  const s = String(content ?? '');
+  if (!s) return false;
+  if (FORMAT_RULE_RE.test(s)) return true;
+  const globalOrFuture = GLOBAL_MARK_RE.test(s) || FUTURE_MARK_RE.test(s);
+  if (!globalOrFuture) return false;
+  return THEME_RULE_RE.test(s) || WORK_RULE_RE.test(s);
+}
 
 /** 写入前的敏感闸（模型已经收过一道，这里再兜一层；命中即丢弃该条） */
 const SENSITIVE_MEM_RE =
@@ -234,10 +264,19 @@ async function extractCore(
   const pending: MemoryItem[] = [];
   for (const item of list) {
     const o = (item ?? {}) as Record<string, unknown>;
-    const type = String(o.type ?? '');
-    if (!['preference', 'decision', 'fact'].includes(type)) continue;
+    const rawType = String(o.type ?? '');
+    if (!['preference', 'decision', 'fact'].includes(rawType)) continue;
     const content = typeof o.content === 'string' ? o.content.trim().slice(0, CONTENT_MAX) : '';
     if (content.length < 2) continue;
+    // 保守兜底（提示词之外的第二道）：工作方式/主题/流程/默认规则一律按 decision 处理，
+    // 禁止当成 preference 静默 active —— 必须先上确认卡、用户点了确认才生效。
+    let type = rawType;
+    if (looksLikeWorkRule(content)) {
+      type = 'decision';
+      if (rawType !== 'decision') {
+        console.warn(`[memories] 「${content.slice(0, 20)}…」被判定为工作方式规则：强制 decision + pending（模型给的是 ${rawType}）`);
+      }
+    }
     // 说明书钉死：preference 永不需确认；decision 必确认；fact 不需确认就丢
     const needs = type === 'preference' ? false : type === 'decision' ? true : Boolean(o.needs_confirm);
     if (type === 'fact' && !needs) continue;
