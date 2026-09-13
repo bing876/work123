@@ -15,6 +15,7 @@ import { makeCipher } from './crypto';
 import { registerAuthRoutes } from './routes/auth';
 import { registerChatRoutes } from './routes/chat';
 import { registerAgentRoutes } from './routes/agent';
+import { registerMemoryRoutes, startIdleScheduler } from './routes/memories';
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -47,6 +48,9 @@ async function main(): Promise<void> {
   registerAuthRoutes(app, { pool, env, cipher });
   registerChatRoutes(app, { pool, env, cipher });
   registerAgentRoutes(app, { pool, env, cipher });
+  // 第 10 步：用户档案记忆（确认后才注入）；闲置 15 分钟的自动提取靠这个扫描
+  registerMemoryRoutes(app, { pool, env, cipher });
+  startIdleScheduler({ pool, env, cipher });
 
   try {
     await migrate(pool);

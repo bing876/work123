@@ -470,3 +470,32 @@ body {
   white-space: pre-wrap;
   text-align: left;
 }
+
+/* ---- 第 10 步：记忆确认卡 + 侧栏「我的记忆」（沿用现有卡片皮肤，不新做整站）---- */
+.memCard {
+  margin: 8px 10px;
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+}
+.memList {
+  margin-top: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+  text-align: left;
+}
+.memList__row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 0;
+  border-top: 1px dashed #eee;
+}
+.memList__forget {
+  border: none;
+  background: none;
+  color: #dc2626;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}

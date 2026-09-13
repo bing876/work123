@@ -23,6 +23,7 @@ import type { ServerEnv } from '../env';
 import type { JsonCipher } from '../crypto';
 import { bearerFrom, verifyToken } from '../crypto';
 import { isDbUnreachable } from '../db';
+import { buildMemoryBlock } from './memories';
 
 export interface ChatDeps {
   pool: Pool;
@@ -159,6 +160,10 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
       );
       const userMessageId = Number(um.rows[0].id);
 
+      // 第 10 步：该用户已确认的档案记忆注入系统提示词（无记忆=空串，行为与第 9 步一致）
+      const memBlock = await buildMemoryBlock(pool, cipher, claims.sub, message);
+      const memoryBlock = memBlock ? `\n\n${memBlock}` : '';
+
       // 2) 调 DeepSeek（OpenAI 兼容 chat/completions，stream:true）。失败/无流 → 普通 JSON 错误，不开 SSE
       const ac = new AbortController();
       const deadline = setTimeout(() => ac.abort(), UPSTREAM_TIMEOUT_MS);
@@ -170,7 +175,11 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
           body: JSON.stringify({
             model: env.deepseekModel,
             stream: true,
-            messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...history, { role: 'user', content: message }],
+            messages: [
+              { role: 'system', content: SYSTEM_PROMPT + memoryBlock },
+              ...history,
+              { role: 'user', content: message },
+            ],
           }),
           signal: ac.signal,
         });

@@ -55,6 +55,10 @@ node apps/server/dist/index.js   # 生产式启动（先在 .env 里 NODE_ENV=pr
 | `POST /agent/task/step` | **要 JWT** | `{taskId, summary, ok}` 追加一步摘要（失败自动带「（失败）」） |
 | `POST /agent/task/status` | **要 JWT** | `{taskId, status: running\|paused\|done\|failed}` |
 | `GET /agent/task/current` | **要 JWT** | 我最近一条任务（含 `unread` 红点、短结论、文档标题——桌面刷新后原样还原） |
+| `POST /memories/extract` | **要 JWT** | 第 10 步：桌面「结束」按钮触发一次会话记忆整理（同会话 10 分钟去重窗口）。preference 静默 active；decision/有行为影响的 fact 进 pending 上确认卡；写入前先过敏感闸（密码/验证码/证件/卡号等整条丢弃）；规范化同句不重复入库 |
+| `GET /memories` | **要 JWT** | {active:[…], pending:[…]}（「我的记忆」列表 + 确认卡数据源，均本人） |
+| `POST /memories/confirm` / `reject` | **要 JWT** | 整卡或逐条：pending→active / →rejected；**确认前绝不注入**，rejected 不再重弹 |
+| `POST /memories/forget` | **要 JWT** | active→archived，立即从注入源消失（不提供编辑） |
 | `POST /agent/task/finish` | **要 JWT** | 第 8 步 done 收尾：调模型整理一次（JSON：summary/文档标题/Markdown/红点提示）；**没配 Key 或模型乱答 → 用已有字段兜底生成，绝不卡死也绝不编造**；文档 AES 密文进 `tasks.result_enc`，`unread=true`，然后调通知桩 |
 | `GET /agent/task/doc` | **要 JWT** | `?taskId=` 解密回传整份 Markdown（下载用；只认自己的任务） |
 | `POST /agent/task/read` | **要 JWT** | 看完结果标已读：`unread=false`（红点熄灭；刷新后仍是已读） |

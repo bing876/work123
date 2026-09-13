@@ -319,3 +319,28 @@ export type AgentEventPayload =
   | { kind: 'note'; level: 'info' | 'error'; text: string }
   /** 第 9 步：敏感字段等待态——浏览器已前置并聚焦，人话提示在 message 里 */
   | { kind: 'sensitive'; fieldReason: string; message: string };
+
+// ---------------------------------------------------------------------------
+// 第 10 步：用户档案记忆 ——「记住这个人」，确认后才注入执行
+// ---------------------------------------------------------------------------
+
+/** 一条记忆（服务端已解密成人话文本才下发；库里只有密文） */
+export interface MemoryItem {
+  id: number;
+  type: 'preference' | 'decision' | 'fact';
+  content: string;
+  updatedAt: string;
+}
+
+/** GET /memories：active 进「我的记忆」列表，pending 上确认卡 */
+export interface MemoryListResult {
+  active: MemoryItem[];
+  pending: MemoryItem[];
+}
+
+/** POST /memories/extract：preference 已静默入库；pending 才是卡片内容 */
+export interface MemoryExtractResult {
+  extracted: number;
+  pending: MemoryItem[];
+  skipped?: string;
+}

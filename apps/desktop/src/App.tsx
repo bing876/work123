@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { AgentEventPayload, AuthProfile, AuthSession, BrowserAction, ChatHistoryResult, DriveResult, TaskPhase, TaskState } from '@ai-workbench/shared';
+import type { AgentEventPayload, AuthProfile, AuthSession, BrowserAction, ChatHistoryResult, DriveResult, MemoryExtractResult, MemoryItem, MemoryListResult, TaskPhase, TaskState } from '@ai-workbench/shared';
 
 /**
  * 第 2 步（内嵌版）「脸和门」：
@@ -310,6 +310,10 @@ export default function App() {
 
   /** 第 9 步：驾驶员在聊天里等用户回答普通资料（need_info）——回答后自动继续，不用点「继续」 */
   const [agentAwaitInfo, setAgentAwaitInfo] = useState(false);
+  /** 第 10 步：用户档案记忆（active 列表 + 待确认卡）——一切以服务端为准 */
+  const [memActive, setMemActive] = useState<MemoryItem[]>([]);
+  const [memPending, setMemPending] = useState<MemoryItem[]>([]);
+  const [memOpen, setMemOpen] = useState(false);
   /** 第 7 步：主进程 'agent' 事件的镜像（步摘要/文档结论），权威循环在主进程 */
   const [agentSteps, setAgentSteps] = useState<string[]>([]);
   const [agentDoc, setAgentDoc] = useState<{ title: string; outline: string[] } | null>(null);
@@ -318,6 +322,63 @@ export default function App() {
   const pushChatLine = (text: string) => {
     setMessages((prev) => prev.concat({ id: Date.now() + Math.floor(Math.random() * 1000), role: 'assistant', text }));
   };
+
+  // ---- 第 10 步：记忆 —— pending 上卡、active 进列表；确认前绝不注入 ----
+  const memHeaders = () => ({ authorization: `Bearer ${sessionRef.current?.token ?? ''}` });
+  const loadMemories = async () => {
+    if (!sessionRef.current) return;
+    try {
+      const r = await authFetchJson<MemoryListResult>('/memories', { headers: memHeaders() });
+      setMemActive(r.active);
+      setMemPending(r.pending);
+    } catch {
+      /* 后端/库没起就不打扰 */
+    }
+  };
+  /** 「结束」：手动触发一次提取（同会话 10 分钟内重复点会被服务端去重窗口挡下） */
+  const endConversationAndExtract = async () => {
+    if (!sessionRef.current) return;
+    if (convIdRef.current === null) {
+      setChatNote('还没聊过天，没有可整理的。');
+      return;
+    }
+    try {
+      const r = await authFetchJson<MemoryExtractResult>('/memories/extract', {
+        method: 'POST',
+        body: JSON.stringify({ conversationId: convIdRef.current }),
+        headers: memHeaders(),
+      });
+      if (r.skipped === 'llm_not_configured') setChatNote('没配 DEEPSEEK_API_KEY，这次没整理记忆。');
+      else if (r.skipped === 'dedup_10min') setChatNote('刚整理过一次了（10 分钟内不重复）。');
+      else {
+        const silent = Math.max(0, r.extracted - r.pending.length);
+        setChatNote(silent > 0 ? `已静默记下 ${silent} 条偏好；${r.pending.length > 0 ? '还有要你先确认的：' : '没有需要确认的。'}` : '整理完了，没有新增。');
+      }
+      void loadMemories();
+    } catch (e) {
+      setChatNote(`整理记忆没成：${(e as Error).message}`);
+    }
+  };
+  const decideMemories = async (kind: 'confirm' | 'reject') => {
+    if (!sessionRef.current) return;
+    try {
+      await authFetchJson(`/memories/${kind}`, { method: 'POST', body: JSON.stringify({ all: true }), headers: memHeaders() });
+      setChatNote(kind === 'confirm' ? '好，记下了，从现在起按这个来。' : '收到，这几条作废。');
+      void loadMemories();
+    } catch (e) {
+      setChatNote(`操作没成：${(e as Error).message}`);
+    }
+  };
+  const forgetMemory = async (id: number) => {
+    if (!sessionRef.current) return;
+    try {
+      await authFetchJson('/memories/forget', { method: 'POST', body: JSON.stringify({ id }), headers: memHeaders() });
+      void loadMemories();
+    } catch (e) {
+      setChatNote(`忘掉失败：${(e as Error).message}`);
+    }
+  };
+  const MEM_TYPE_CN: Record<string, string> = { preference: '偏好', decision: '决定', fact: '事实' };
 
   /** 第 8 步：任务快照（状态/未读/结果）——红点的唯一事实源。
    *  用 ref 拿会话：agent 订阅 effect 是挂载时建的闭包，直接引用 session 会拿到旧的 null。 */
@@ -384,6 +445,7 @@ export default function App() {
         convIdRef.current = h.conversationId;
         setMessages(h.messages.map((m) => ({ id: m.id, role: m.role, text: m.text })));
         void refreshTask();
+        void loadMemories(); // 刷新后：pending 卡与「我的记忆」都还在
       })
       .catch((e) => {
         if (!off) setChatNote(`拉取历史失败：${(e as Error).message}`);
@@ -431,6 +493,9 @@ export default function App() {
     setDocNote('');
     setHasUnread(false);
     setAgentAwaitInfo(false);
+    setMemActive([]);
+    setMemPending([]);
+    setMemOpen(false);
   };
 
   /** 浏览器区域是否可见 */
@@ -553,6 +618,7 @@ export default function App() {
         // 第 8 步：红点由服务端确认（finish 已置 unread=true），这里点亮并刷新卡片
         setHasUnread(true);
         void refreshTask();
+        void loadMemories(); // 第 10 步：任务 done 的抽取在服务端做，可能刚产出待确认条目
       } else if (p.kind === 'note') {
         pushChatLine(`${p.level === 'error' ? '⚠️' : 'ℹ️'} ${p.text}`);
         if (/继续|恢复驾驶/.test(p.text)) setAgentAwaitInfo(false);
@@ -833,6 +899,26 @@ export default function App() {
             </button>
           </div>
           {pwMsg && <div className="small">{pwMsg}</div>}
+          <div className="buttons-row">
+            <button type="button" className="btn" onClick={() => setMemOpen((v) => !v)}>
+              我的记忆（{memActive.length}）
+            </button>
+          </div>
+          {memOpen && (
+            <div className="memList" role="list">
+              {memActive.length === 0 && <div className="small">还没有记过东西。</div>}
+              {memActive.map((m) => (
+                <div className="memList__row" key={m.id}>
+                  <span className="small">
+                    {MEM_TYPE_CN[m.type] ?? m.type}：{m.content}
+                  </span>
+                  <button type="button" className="memList__forget" onClick={() => void forgetMemory(m.id)}>
+                    忘掉这条
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="buttons-row">
@@ -891,6 +977,24 @@ export default function App() {
               <span className="caret" aria-hidden="true">
                 ▍
               </span>
+            </div>
+          )}
+          {memPending.length > 0 && (
+            <div className="card memCard">
+              <h4>需要你确认</h4>
+              {memPending.map((m) => (
+                <div className="small" key={m.id}>
+                  {MEM_TYPE_CN[m.type] ?? m.type}：{m.content}
+                </div>
+              ))}
+              <div className="buttons-row">
+                <button type="button" className="btn" onClick={() => void decideMemories('confirm')}>
+                  确认
+                </button>
+                <button type="button" className="btn" onClick={() => void decideMemories('reject')}>
+                  不用，忘掉这条
+                </button>
+              </div>
             </div>
           )}
           {chatNote && (

@@ -27,6 +27,7 @@ import type { JsonCipher } from '../crypto';
 import { bearerFrom, verifyToken } from '../crypto';
 import { isDbUnreachable } from '../db';
 import { notifyUser } from '../notify';
+import { buildMemoryBlock, triggerTaskExtract } from './memories';
 
 export interface AgentDeps {
   pool: Pool;
@@ -355,7 +356,10 @@ export function registerAgentRoutes(app: FastifyInstance, { pool, env, cipher }:
     const steps = Array.isArray(body?.stepsSummary) ? body.stepsSummary.filter((x) => typeof x === 'string').slice(-12) : [];
     const paused = Boolean(body?.paused);
 
+    // 第 10 步：驾驶员同样吃“已确认记忆”（pending 不会出现在这里——只查 active）
+    const memBlock = await buildMemoryBlock(pool, cipher, claims.sub, goal);
     const userMsg = [
+      memBlock ? `先读该用户的档案记忆并遵守：\n${memBlock}` : '',
       paused ? PAUSED_OVERRIDE : '',
       `任务目标：${goal}`,
       `已完成步骤（最近 ${steps.length} 条）：`,
@@ -496,6 +500,9 @@ export function registerAgentRoutes(app: FastifyInstance, { pool, env, cipher }:
       const t = await ownTask(pool, taskId, claims.sub);
       if (!t) return errJson(reply, 404, '任务不存在或不是你的');
       await pool.query('UPDATE tasks SET status = $2, updated_at = now() WHERE id = $1', [taskId, status]);
+      if (status === 'done' || status === 'failed') {
+        triggerTaskExtract({ pool, env, cipher }, claims.sub, taskId, t.payload);
+      }
       return { ok: true };
     } catch (err) {
       return dbErr(reply, err);
@@ -584,6 +591,10 @@ export function registerAgentRoutes(app: FastifyInstance, { pool, env, cipher }:
         // 通知挂了不碍事：说明书钉死——任务仍算 done，红点和文档都在
         console.warn('[agent] 通知失败（忽略，不影响任务）：', (err as Error).message);
       }
+      triggerTaskExtract({ pool, env, cipher }, claims.sub, taskId, {
+        ...(payload as Record<string, unknown>),
+        doc: { summary: doc.summary },
+      } as never);
       return { ok: true, unread: true, unreadHint: doc.hint, docTitle: doc.title };
     } catch (err) {
       return dbErr(reply, err);
