@@ -17,6 +17,8 @@
     "db:down": "docker compose -f apps/server/docker-compose.yml down",
     "build": "npm run build -w @ai-workbench/shared && npm run build -w @ai-workbench/desktop && npm run build -w @ai-workbench/server",
     "start": "npm run build -w @ai-workbench/shared && npm run start -w @ai-workbench/desktop",
+    "package": "npm run build -w @ai-workbench/shared && npm run package -w @ai-workbench/desktop",
+    "package:dir": "npm run build -w @ai-workbench/shared && npm run package:dir -w @ai-workbench/desktop",
     "typecheck": "npm run typecheck -w @ai-workbench/shared && npm run typecheck -w @ai-workbench/desktop && npm run typecheck -w @ai-workbench/server",
     "clean": "node scripts/clean.mjs"
   }

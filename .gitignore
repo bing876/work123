@@ -7,6 +7,8 @@ dist/
 dist-electron/
 out/
 release/
+# electron-builder 本机产物（安装包 / unpacked 目录），不提交，更不会把本地 .env 带进 Git
+apps/desktop/release/
 *.tsbuildinfo
 
 # 日志与本地环境

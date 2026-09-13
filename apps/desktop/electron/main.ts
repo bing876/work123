@@ -28,9 +28,11 @@ import type {
  * 渲染进程跑在独立沙箱里，通过 preload 暴露的白名单通道通信。
  */
 
-/** 开发模式下 Vite Dev Server 的地址（与 vite.config.ts 的 server.port 保持一致） */
+/** 开发模式下 Vite Dev Server 的地址（与 vite.config.ts 的 server.port 保持一致）。
+ * 打包后的 app.isPackaged=true，即使用户环境里意外留有 VITE_DEV_SERVER_URL，
+ * 也必须加载安装包内的 dist/index.html，而不是依赖 npm run dev 的 Vite。 */
 const DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL;
-const isDev = Boolean(DEV_SERVER_URL);
+const isDev = !app.isPackaged && Boolean(DEV_SERVER_URL);
 
 let mainWindow: BrowserWindow | null = null;
 

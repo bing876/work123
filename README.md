@@ -70,6 +70,28 @@ npm install
 
 ---
 
+## 打包与本机安装（第 12 步）
+
+桌面安装包只包含 Electron 主窗口和已经编译的桌面界面；**不会**打包 `apps/server`、Postgres 数据、`.env` 或任何 API Key。后端仍按 [`apps/server/README.md`](apps/server/README.md) 在用户本机单独启动，保持现有的 Postgres + `apps/server` 架构。
+
+```bash
+npm run package
+```
+
+该命令会先编译共享类型、Electron 主进程和 Vite 渲染页面，再由 `electron-builder` 为**当前操作系统**生成可安装产物。默认输出目录是 `apps/desktop/release/`（已忽略，不进 Git）：
+
+| 当前系统 | 产物 | 打开方式 |
+| --- | --- | --- |
+| Windows | `AI-Workbench-<version>-win-<arch>.exe` | 双击 NSIS 安装程序，安装后从开始菜单打开“AI 工作台” |
+| macOS | `AI-Workbench-<version>-mac-<arch>.dmg` | 打开 DMG，将“AI 工作台”拖进 Applications 后启动 |
+| Linux | `AI-Workbench-<version>-linux-<arch>.AppImage` | `chmod +x <产物>.AppImage && ./<产物>.AppImage` |
+
+只想检查打包后的目录布局、不生成安装器时可运行 `npm run package:dir`。打包后打开的是安装产物中的 `dist-electron/main.js` 与 `dist/index.html`，不依赖 `npm run dev` 或 Vite；它仍只创建一个主窗口，右栏网页仍由现有 `<webview partition="persist:workbench-browser">` 内嵌。
+
+> 打开安装包前，请先按后端 README 起好 Postgres 和 `npm run dev:server`。桌面包连接本机 `http://127.0.0.1:8787`，后端未启动时会按现有登录界面给出连接提示，而不会在安装包中携带服务端密钥。
+
+---
+
 ## 启动（开发模式）
 
 ```bash
@@ -120,6 +142,8 @@ npm run dev
 | `npm run dev` | 开发模式：Vite + Electron 一起起 |
 | `npm run build` | 编译共享包 + 主进程 + 渲染进程产物 |
 | `npm run start` | 先构建，再以生产模式打开窗口（加载 `dist/index.html`） |
+| `npm run package` | 编译桌面端并用 electron-builder 生成当前系统的安装包到 `apps/desktop/release/` |
+| `npm run package:dir` | 编译桌面端并生成 unpacked 目录（不产出安装器），用于检查包内文件布局 |
 | `npm run typecheck` | 全量 TypeScript 类型检查 |
 | `npm run clean` | 清理各包的 `dist` / `dist-electron` |
 
