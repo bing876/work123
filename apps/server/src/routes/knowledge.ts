@@ -123,7 +123,7 @@ function normalizeExtractedText(raw: string, kind: KnowledgeKind): string {
   if (visible.length < 2) {
     throw new KnowledgeInputError(
       kind === 'pdf'
-        ? '这个 PDF 没有可抽取的文字层（可能是扫描件）；请上传带文字的 PDF 或先 OCR。'
+        ? '这个 PDF 里读不到文字内容（可能是扫描件图片），请换一份带文字的 PDF 再上传。'
         : '文件没有可入库的正文。',
     );
   }
@@ -148,7 +148,7 @@ async function extractText(buffer: Buffer, kind: KnowledgeKind): Promise<string>
     } catch (err) {
       if (err instanceof KnowledgeInputError) throw err;
       // 不把 pdf-parse 的底层报错（可能含路径/细节）直接回给桌面。
-      throw new KnowledgeInputError('PDF 无法抽取可读文本；请确认文件没有损坏且含文字层。');
+      throw new KnowledgeInputError('这个 PDF 读不出文字内容；请确认文件没有损坏、且不是纯图片扫描件。');
     }
   }
 
