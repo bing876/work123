@@ -1018,6 +1018,10 @@ export default function App() {
           <button type="button" onClick={onSend} disabled={streaming}>
             {streaming ? '打字中…' : '发送'}
           </button>
+          {/* 第 10 步：结束本轮聊天并整理记忆（沿用 endConversationAndExtract 里的守卫） */}
+          <button type="button" className="inputBar__end" title="结束这轮聊天并整理记忆" onClick={() => void endConversationAndExtract()}>
+            结束
+          </button>
         </div>
       </main>
 
