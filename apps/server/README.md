@@ -1,6 +1,6 @@
 # apps/server —— AI 工作台最小后端（第 5 步 · 重做版）
 
-负责「手机号 + XYZ 号登录」、数据库表、DeepSeek 流式聊天和“一步一问”的驾驶员大脑：Node + **Fastify 5** + **PostgreSQL** + **JWT**，
+负责「手机号 + XYZ 号登录」、数据库表、DeepSeek 流式聊天和“一步一问”的驾驶员大脑，以及第 11 步资料知识库：Node + **Fastify 5** + **PostgreSQL** + **JWT**，
 接且只接 DeepSeek 聊天（只说话、不指挥浏览器），**没有邮箱登录、没有真微信**。
 （早先按邮箱/用户名做的版本已整体作废，本目录是按新账号说明重写的。）
 
@@ -59,6 +59,8 @@ node apps/server/dist/index.js   # 生产式启动（先在 .env 里 NODE_ENV=pr
 | `GET /memories` | **要 JWT** | {active:[…], pending:[…]}（「我的记忆」列表 + 确认卡数据源，均本人） |
 | `POST /memories/confirm` / `reject` | **要 JWT** | 整卡或逐条：pending→active / →rejected；**确认前绝不注入**，rejected 不再重弹 |
 | `POST /memories/forget` | **要 JWT** | active→archived，立即从注入源消失（不提供编辑） |
+| `GET /knowledge` | **要 JWT** | 第 11 步：只列当前账号自己的已入库资料元信息（解密后的文件名、类型、段数）；不回传正文 |
+| `POST /knowledge/upload` | **要 JWT** | `multipart/form-data` 的 `file` 字段，仅 `.txt/.md/.pdf`、最大 12 MB。txt/md 按 UTF-8 读取，PDF 用 `pdf-parse` 抽文字层；按段落优先、每段最多 900 字切块，文件名和正文片段均 AES-256-GCM 加密入库；原文件不落盘 |
 | `POST /agent/task/finish` | **要 JWT** | 第 8 步 done 收尾：调模型整理一次（JSON：summary/文档标题/Markdown/红点提示）；**没配 Key 或模型乱答 → 用已有字段兜底生成，绝不卡死也绝不编造**；文档 AES 密文进 `tasks.result_enc`，`unread=true`，然后调通知桩 |
 | `GET /agent/task/doc` | **要 JWT** | `?taskId=` 解密回传整份 Markdown（下载用；只认自己的任务） |
 | `POST /agent/task/read` | **要 JWT** | 看完结果标已读：`unread=false`（红点熄灭；刷新后仍是已读） |
@@ -80,6 +82,10 @@ node apps/server/dist/index.js   # 生产式启动（先在 .env 里 NODE_ENV=pr
 - `sms_codes`：`code_hash = sha256(salt$code)`——**库里只存哈希**，每行随机 salt；`expires_at`（5 分钟）/`attempts`（>5 作废）/`used`；60 秒冷却按 `MAX(created_at)` 判
 - `projects` / `agents` / `conversations` / `tasks` / `memories`：带外键 + 索引，`tasks` 有 `updated_at` 列，本步只建表不开发业务接口
 - `messages`：正文列是 `content_enc`（AES-256-GCM 密文），写入路径留给后续步骤
+- `knowledge_documents`（第 11 步，**独立于 `memories`**）：`owner_id` 账号隔离、`filename_enc`（AES 密文）、`file_kind`（txt/md/pdf）、`byte_size`、`chunk_count`、`created_at`；上传原文件不保存到磁盘或表中
+- `knowledge_chunks`（第 11 步）：`document_id`、冗余的 `owner_id`（查询隔离索引）、`chunk_index`、`content_enc`（每个资料原文段的 AES-256-GCM 密文）、`created_at`；`UNIQUE(document_id, chunk_index)`
+
+第 11 步聊天检索只在 `/chat/stream` 的系统提示词末尾追加独立的「知识库检索结果」块：从**当前用户**的加密片段在服务端内存解密后，以本轮消息中 2~6 字中文片段及英文/数字连续词做大小写无关的字面 `includes` 匹配，取最多 4 段。**没有 embedding、向量库、相似度计算，也不会把资料写入 `messages` 或 `memories`，更不会进入 `/agent/next-action` 的驾驶员 JSON。**无命中或检索失败时该块为空，普通聊天照常继续。
 
 **手机号、短信验证码、密码都不存明文**：日志只打 `[sms:mock] → 138****8000 验证码 123456（仅开发模式）`，全号与凭证不进日志、不进响应。
 
@@ -104,6 +110,9 @@ node apps/server/dist/index.js   # 生产式启动（先在 .env 里 NODE_ENV=pr
    `focus_sensitive_field` 把窗口前置、光标定位到那个框，聊天只给一句人话提示；你输完并提交，
    driver 检测到导航/标题变化或敏感框消失即自动恢复驾驶（检测不到时 2 分钟提示手动「继续」兜底，
    最长观察 10 分钟）。敏感值全程不进模型、不进 messages/memories/日志。
+10. 第 11 步：登录后点左栏「知识库」→「上传资料」，选择 `.txt`、`.md` 或带文字层的 `.pdf`；
+    成功提示会显示「已入库，共 N 个片段」，下方列表也会显示文件和段数。随后在聊天中问资料出现过的关键词，
+    `/chat/stream` 才会把当前账号命中的资料片段作为独立参考上下文给模型；换账号的资料互不可见。
 
 ## 第 9 步：字段分类的敏感关键词表（判不准就来改这里）
 

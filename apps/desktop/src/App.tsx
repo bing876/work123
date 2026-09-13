@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import type { AgentEventPayload, AuthProfile, AuthSession, BrowserAction, ChatHistoryResult, DriveResult, MemoryExtractResult, MemoryItem, MemoryListResult, TaskPhase, TaskState } from '@ai-workbench/shared';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
+import type { AgentEventPayload, AuthProfile, AuthSession, BrowserAction, ChatHistoryResult, DriveResult, KnowledgeDocument, KnowledgeListResult, KnowledgeUploadResult, MemoryExtractResult, MemoryItem, MemoryListResult, TaskPhase, TaskState } from '@ai-workbench/shared';
 
 /**
  * 第 2 步（内嵌版）「脸和门」：
@@ -314,6 +314,12 @@ export default function App() {
   const [memActive, setMemActive] = useState<MemoryItem[]>([]);
   const [memPending, setMemPending] = useState<MemoryItem[]>([]);
   const [memOpen, setMemOpen] = useState(false);
+  /** 第 11 步：知识库资料独立于 memories；只展示当前账号的文件元信息和已入库段数。 */
+  const [knowledgeDocs, setKnowledgeDocs] = useState<KnowledgeDocument[]>([]);
+  const [knowledgeOpen, setKnowledgeOpen] = useState(false);
+  const [knowledgeUploading, setKnowledgeUploading] = useState(false);
+  const [knowledgeNote, setKnowledgeNote] = useState('');
+  const knowledgeFileRef = useRef<HTMLInputElement | null>(null);
   /** 第 7 步：主进程 'agent' 事件的镜像（步摘要/文档结论），权威循环在主进程 */
   const [agentSteps, setAgentSteps] = useState<string[]>([]);
   const [agentDoc, setAgentDoc] = useState<{ title: string; outline: string[] } | null>(null);
@@ -384,6 +390,70 @@ export default function App() {
    *  用 ref 拿会话：agent 订阅 effect 是挂载时建的闭包，直接引用 session 会拿到旧的 null。 */
   const sessionRef = useRef<AuthSession | null>(null);
   sessionRef.current = session;
+
+  // ---- 第 11 步：资料上传/列表。文件直接由当前渲染进程 POST 到本机服务端，
+  // 不经过 preload，不开新窗口；multipart 的 Content-Type 必须让浏览器自己带 boundary。 ----
+  const loadKnowledge = async () => {
+    const sess = sessionRef.current;
+    if (!sess) return;
+    try {
+      const r = await authFetchJson<KnowledgeListResult>('/knowledge', {
+        headers: { authorization: `Bearer ${sess.token}` },
+      });
+      // 切号期间晚到的 A 号响应不能覆盖 B 号列表。
+      if (sessionRef.current?.token !== sess.token) return;
+      setKnowledgeDocs(r.documents);
+    } catch {
+      /* 资料列表属于辅助入口，后端暂不可达时不打扰已登录界面 */
+    }
+  };
+  const uploadKnowledgeFile = async (file: File) => {
+    const sess = sessionRef.current;
+    if (!sess || knowledgeUploading) return;
+    const supported = /\.(txt|md|pdf)$/i.test(file.name);
+    if (!supported) {
+      setKnowledgeNote('只支持 .txt、.md、.pdf 文件。');
+      return;
+    }
+    if (file.size > 12 * 1024 * 1024) {
+      setKnowledgeNote('文件超过 12 MB，本版请拆分后上传。');
+      return;
+    }
+    setKnowledgeNote('');
+    setKnowledgeUploading(true);
+    try {
+      const form = new FormData();
+      form.append('file', file, file.name);
+      let res: Response;
+      try {
+        res = await fetch(`${API_BASE()}/knowledge/upload`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${sess.token}` },
+          body: form,
+        });
+      } catch {
+        throw new Error(`连不上后端 ${API_BASE()}：先起库（npm run db:up），再起服务（npm run dev:server）`);
+      }
+      const data = (await res.json().catch(() => ({}))) as KnowledgeUploadResult & { error?: string };
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      // 若用户在上传过程中退出/切换账号，不把旧账号的成功提示带到新账号界面。
+      if (sessionRef.current?.token !== sess.token) return;
+      const doc = data.document;
+      setKnowledgeNote(`《${doc.filename}》已入库，共 ${doc.chunkCount} 个片段。`);
+      await loadKnowledge();
+    } catch (e) {
+      setKnowledgeNote(`上传没有入库：${(e as Error).message}`);
+    } finally {
+      setKnowledgeUploading(false);
+    }
+  };
+  const onChooseKnowledgeFile = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    // 清空值后，用户选择同一份文件也会再次触发 change。
+    event.currentTarget.value = '';
+    if (file) void uploadKnowledgeFile(file);
+  };
+
   const refreshTask = async () => {
     const sess = sessionRef.current;
     if (!sess) return;
@@ -446,6 +516,7 @@ export default function App() {
         setMessages(h.messages.map((m) => ({ id: m.id, role: m.role, text: m.text })));
         void refreshTask();
         void loadMemories(); // 刷新后：pending 卡与「我的记忆」都还在
+        void loadKnowledge(); // 第 11 步：只拉本人资料的文件名/段数，不把正文拉回前端
       })
       .catch((e) => {
         if (!off) setChatNote(`拉取历史失败：${(e as Error).message}`);
@@ -496,6 +567,10 @@ export default function App() {
     setMemActive([]);
     setMemPending([]);
     setMemOpen(false);
+    setKnowledgeDocs([]);
+    setKnowledgeOpen(false);
+    setKnowledgeUploading(false);
+    setKnowledgeNote('');
   };
 
   /** 浏览器区域是否可见 */
@@ -917,6 +992,44 @@ export default function App() {
                   </button>
                 </div>
               ))}
+            </div>
+          )}
+          {/* 第 11 步：同一主窗口左栏入口；标准文件选择器后 POST 到本机服务端，不创建 Electron 窗口。 */}
+          <div className="buttons-row">
+            <button type="button" className="btn" onClick={() => setKnowledgeOpen((v) => !v)}>
+              知识库（{knowledgeDocs.length}）
+            </button>
+          </div>
+          {knowledgeOpen && (
+            <div className="knowledgePanel">
+              <div className="small">上传 .txt / .md / .pdf；资料原文片段会加密入库。</div>
+              <input
+                ref={knowledgeFileRef}
+                className="knowledgePanel__file"
+                type="file"
+                accept=".txt,.md,.pdf,text/plain,text/markdown,application/pdf"
+                onChange={onChooseKnowledgeFile}
+              />
+              <div className="buttons-row">
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={knowledgeUploading}
+                  onClick={() => knowledgeFileRef.current?.click()}
+                >
+                  {knowledgeUploading ? '上传中…' : '上传资料'}
+                </button>
+              </div>
+              {knowledgeNote && <div className="small knowledgePanel__note">{knowledgeNote}</div>}
+              <div className="knowledgePanel__list" role="list" aria-label="已入库资料">
+                {knowledgeDocs.length === 0 && <div className="small">还没有上传资料。</div>}
+                {knowledgeDocs.map((doc) => (
+                  <div className="knowledgePanel__row" role="listitem" key={doc.id} title={doc.filename}>
+                    <span>{doc.filename}</span>
+                    <span className="small">{doc.kind.toUpperCase()} · {doc.chunkCount} 段</span>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>

@@ -1,6 +1,7 @@
 /**
  * pg 连接 + 幂等建表（第 5 步重做版）。除 auth 外的表本步只建结构：
- * users / projects / agents / conversations / messages(content 密文) / tasks / memories / sms_codes。
+ * users / projects / agents / conversations / messages(content 密文) / tasks / memories / sms_codes，
+ * 以及第 11 步独立的 knowledge_documents / knowledge_chunks（资料原文片段密文）。
  *
  * users 要点：
  * - xyz_id：对外账号（XYZ+数字），UNIQUE，系统生成，用户不能自选；
@@ -121,7 +122,33 @@ ALTER TABLE memories ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pend
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS needs_confirm BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
 CREATE INDEX IF NOT EXISTS idx_memories_owner ON memories (owner_id, status);
+
+-- 第 11 步：知识库和第 10 步 memories 完全分表。上传的原文件不落盘；
+-- 文件名 filename_enc 与每个资料正文片段 content_enc 均为 AES-256-GCM 密文。
+-- chunks 冗余 owner_id 以便按账号高效检索；查询仍同时校验 document.owner_id，防串号。
+CREATE TABLE IF NOT EXISTS knowledge_documents (
+  id           BIGSERIAL PRIMARY KEY,
+  owner_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  filename_enc TEXT NOT NULL,
+  file_kind    TEXT NOT NULL CHECK (file_kind IN ('txt', 'md', 'pdf')),
+  byte_size    INTEGER NOT NULL CHECK (byte_size >= 0),
+  chunk_count  INTEGER NOT NULL CHECK (chunk_count > 0),
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_documents_owner ON knowledge_documents (owner_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS knowledge_chunks (
+  id           BIGSERIAL PRIMARY KEY,
+  document_id  BIGINT NOT NULL REFERENCES knowledge_documents(id) ON DELETE CASCADE,
+  owner_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  chunk_index  INTEGER NOT NULL CHECK (chunk_index >= 0),
+  content_enc  TEXT NOT NULL,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (document_id, chunk_index)
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_owner ON knowledge_chunks (owner_id, document_id, chunk_index);
 `;
+
 
 export async function migrate(pool: Pool): Promise<void> {
   await pool.query(DDL);

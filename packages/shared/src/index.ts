@@ -344,3 +344,27 @@ export interface MemoryExtractResult {
   pending: MemoryItem[];
   skipped?: string;
 }
+
+// ---------------------------------------------------------------------------
+// 第 11 步：知识库 —— 用户上传资料的原文片段（独立于 memories，绝不混表）
+// ---------------------------------------------------------------------------
+
+/** 一份资料的前端展示元信息。正文不下发；服务端库里文件名和片段正文都是 AES 密文。 */
+export interface KnowledgeDocument {
+  id: number;
+  filename: string;
+  kind: 'txt' | 'md' | 'pdf';
+  byteSize: number;
+  chunkCount: number;
+  createdAt: string;
+}
+
+/** GET /knowledge：当前登录用户自己的资料列表及每份资料的已入库段数。 */
+export interface KnowledgeListResult {
+  documents: KnowledgeDocument[];
+}
+
+/** POST /knowledge/upload 成功响应。 */
+export interface KnowledgeUploadResult {
+  document: KnowledgeDocument;
+}

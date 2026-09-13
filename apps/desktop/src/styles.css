@@ -506,3 +506,42 @@ body {
   font-size: 12px;
   white-space: nowrap;
 }
+
+/* ---- 第 11 步：左栏知识库入口。只加在现有账户小块内，不改三栏和右侧 webview 宽度。 ---- */
+.knowledgePanel {
+  margin-top: 6px;
+  padding: 8px;
+  border: 1px dashed #9ca3af;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+.knowledgePanel__file {
+  display: none;
+}
+.knowledgePanel__note {
+  margin-top: 6px;
+  line-height: 1.45;
+  color: #2563eb;
+  word-break: break-word;
+}
+.knowledgePanel__list {
+  margin-top: 7px;
+  max-height: 132px;
+  overflow-y: auto;
+  border-top: 1px dashed #e5e7eb;
+}
+.knowledgePanel__row {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 0;
+  border-bottom: 1px dashed #e5e7eb;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow: hidden;
+}
+.knowledgePanel__row > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

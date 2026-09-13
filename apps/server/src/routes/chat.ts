@@ -24,6 +24,7 @@ import type { JsonCipher } from '../crypto';
 import { bearerFrom, verifyToken } from '../crypto';
 import { isDbUnreachable } from '../db';
 import { buildMemoryBlock } from './memories';
+import { buildKnowledgeBlock } from './knowledge';
 
 export interface ChatDeps {
   pool: Pool;
@@ -163,6 +164,11 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
       // 第 10 步：该用户已确认的档案记忆注入系统提示词（无记忆=空串，行为与第 9 步一致）
       const memBlock = await buildMemoryBlock(pool, cipher, claims.sub, message);
       const memoryBlock = memBlock ? `\n\n${memBlock}` : '';
+      // 第 11 步：知识库资料是与 memories 完全独立的、仅聊天用的上下文位置。
+      // buildKnowledgeBlock 只按当前 owner 的加密片段做关键词字面匹配；空命中/异常都返回空，
+      // 不进 agent 的驾驶员 JSON，也不触碰第 10 步的确认逻辑。
+      const knowledgeBlock = await buildKnowledgeBlock(pool, cipher, claims.sub, message);
+      const knowledgeContext = knowledgeBlock ? `\n\n${knowledgeBlock}` : '';
 
       // 2) 调 DeepSeek（OpenAI 兼容 chat/completions，stream:true）。失败/无流 → 普通 JSON 错误，不开 SSE
       const ac = new AbortController();
@@ -176,7 +182,7 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
             model: env.deepseekModel,
             stream: true,
             messages: [
-              { role: 'system', content: SYSTEM_PROMPT + memoryBlock },
+              { role: 'system', content: SYSTEM_PROMPT + memoryBlock + knowledgeContext },
               ...history,
               { role: 'user', content: message },
             ],
