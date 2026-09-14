@@ -229,14 +229,21 @@ body {
 
 /* ---------- 第 13 步：聊天里的浏览器卡片 ---------- */
 
-/* 卡片的 React 外层（消息列表的 flex 子项）；展开时让它吃掉中栏剩余高度 */
+/*
+ * 卡片的 React 外层（消息列表的 flex 子项）。
+ * 关键：.chat 是「高度确定的 overflow:auto 纵向 flex」，内容超高时默认 flex-shrink:1
+ * 会把子项**压扁**而不是产生滚动；这里必须 flex-shrink:0 + 保留自动最小尺寸，
+ * 否则整张卡片会被压成一条线（实测只剩 2px 边框）。
+ */
 .chat__card {
   display: flex;
   flex-direction: column;
-  min-height: 0;
+  flex: 0 0 auto;
+  min-height: auto;
 }
 .chat__card--expanded {
   flex: 1 1 auto;
+  min-height: 60vh;
 }
 
 .browserCard {
