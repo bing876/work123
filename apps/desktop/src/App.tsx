@@ -1,8 +1,6 @@
 import { useEffect, useRef, useState, type ChangeEvent } from 'react';
 import type { AgentEventPayload, AuthProfile, AuthSession, ChatHistoryResult, KnowledgeDocument, KnowledgeListResult, KnowledgeUploadResult, MemoryExtractResult, MemoryItem, MemoryListResult, TaskState } from '@ai-workbench/shared';
 import { BrowserCard, HOME_URL, detectOpenUrl } from './browserCard';
-import { ProfileCard } from './profileCard';
-import { addUsage, forgetAccount, rememberAccount, rememberedAccount } from './localProfile';
 
 /**
  * 第 2 步（内嵌版）「脸和门」：
@@ -52,18 +50,6 @@ import { addUsage, forgetAccount, rememberAccount, rememberedAccount } from './l
  *     状态机保留在主进程内部，不在右栏画状态；右栏只在有任务结果时出现一张结果卡；
  *   - 驾驶目标改为**卡片里这张页**（getWebviewId 拿的就是卡片的 guest），流程没变；
  *   - 敏感闸没动：聊天输入框发 123456 仍被拦下、不落库、不代填；验证码/密码请在网页里自己打。
- *
- * 第 14 步「登录页个人卡片（一点进入）」：
- *   - 登录页多了**第二种形态**：这台电脑登过某个号（有「记住的账号」标记）时，再开应用
- *     （含重启电脑）不直接进工作台，先出一张个人卡片；点「进入工作台」才放行，不用再填验证码；
- *   - 第一次登录 / 点过「退出登录」：照旧是手机验证码 mock + XYZ 号（微信仍占位）；
- *     首次登录成功仍然直接进工作台（卡片只在**下次打开**时出现）；
- *   - 卡片上可改头像（本地选图）/ 名称 / 简介，全部按 XYZ 号记在**本机**（见 localProfile.ts），
- *     服务端一行不动、仓库里不放任何图片；XYZ 号只展示，不当名称改；
- *   - 「使用时长」= 这台电脑上该账号的累计（15 秒一跳 + 退出时结算）；「学习 AI 的分数」
- *     只是时长换算的整数；「小助 × 1」写死展示——不做多员工、不做招聘/切换智能体、不做习惯学习；
- *   - 「切换账号」清 token + 记住标记回验证码页，登完出**新号**的卡片；
- *     工作台里的「退出登录」同样清掉记住标记，所以下次打开要重新验证码登录，不是直接进旧卡片。
  */
 
 type Role = 'user' | 'assistant' | 'browser';
@@ -264,38 +250,17 @@ export default function App() {
   // ---- 第 5 步：会话。JWT 从 localStorage 读回后只放内存 state；绝不 console 打全文 ----
   const [session, setSession] = useState<AuthSession | null>(null);
   const [checkingAuth, setCheckingAuth] = useState(() => Boolean(localStorage.getItem(TOKEN_KEY)));
-
-  // ---- 第 14 步：本机「记住的账号」闸 + 本次启动是否已点过「进入工作台」----
-  /** 这台电脑记住的账号（退出登录 / 切换账号会清掉）；null = 没登过，走验证码页 */
-  const [remembered, setRemembered] = useState<string | null>(() => rememberedAccount());
-  /** 本次启动是否已经点过「进入工作台」；false 且记住的号就是当前号 → 先出个人卡片 */
-  const [entered, setEntered] = useState(false);
-  /**
-   * 切换账号后登录成功也要先出新号的卡片（提示词：登另一个号后卡片换成新号）。
-   * 用 ref 而不是 state：只在登录回调里读一次，不受渲染时机影响。
-   */
-  const cardAfterLoginRef = useRef(false);
   const [pwOld, setPwOld] = useState('');
   const [pwNew, setPwNew] = useState('');
   const [pwMsg, setPwMsg] = useState('');
 
-  /**
-   * 带已存 token 调 /auth/me：能换回 profile 就静默登录，换不回来就清 token 回登录页。
-   * 第 14 步：**静默续上会话 = 这台电脑登过这个号** —— 顺手把「记住的账号」补上
-   * （从第 13 步升上来的机器只有 token、没有这个标记，补了才会先出卡片而不是验证码页），
-   * 并且**不**置 entered，于是这次启动先渲染个人卡片，点一下才进工作台。
-   */
+  /** 带已存 token 调 /auth/me：能换回 profile 就静默登录，换不回来就清 token 回登录页 */
   useEffect(() => {
     const saved = localStorage.getItem(TOKEN_KEY);
     if (!saved) return;
     let off = false; // 卸载标志：慢回来的响应不再 setState
     authFetchJson<AuthProfile>('/auth/me', { headers: { authorization: `Bearer ${saved}` } })
-      .then((p) => {
-        if (off) return;
-        rememberAccount(p.user.xyz_id);
-        setRemembered(p.user.xyz_id);
-        setSession({ ...p, token: saved });
-      })
+      .then((p) => { if (!off) setSession({ ...p, token: saved }); })
       .catch(() => {
         localStorage.removeItem(TOKEN_KEY);
         if (!off) setSession(null);
@@ -303,29 +268,6 @@ export default function App() {
       .finally(() => { if (!off) setCheckingAuth(false); });
     return () => { off = true; };
   }, []);
-
-  /**
-   * 第 14 步：本机使用时长累计（简单累计，不做行为分析）。
-   * 登录态在的时候每 15 秒把这一段时间记到当前号头上；退出/换号/关窗口时结算最后一段。
-   */
-  useEffect(() => {
-    const xyz = session?.user.xyz_id;
-    if (!xyz) return;
-    let last = Date.now();
-    const settle = () => {
-      const now = Date.now();
-      const delta = now - last;
-      last = now;
-      addUsage(xyz, delta);
-    };
-    const timer = window.setInterval(settle, 15_000);
-    window.addEventListener('beforeunload', settle);
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener('beforeunload', settle);
-      settle();
-    };
-  }, [session?.user.xyz_id]);
 
   // ---- 第 6 步：流式聊天状态（真聊天，不再是内存假数据）----
   /** 当前会话 id：登录后 /chat/history 给回，或 /chat/stream 的 meta 事件补上；只在内存，不硬编 */
@@ -582,11 +524,6 @@ export default function App() {
 
   const onLogout = () => {
     localStorage.removeItem(TOKEN_KEY);
-    // 第 14 步：连「这台电脑记住的账号」一起清掉 —— 下次打开要重新验证码登录，
-    // 而不是直接弹出旧卡片进工作台。
-    forgetAccount();
-    setRemembered(null);
-    setEntered(false);
     setSession(null);
     setPwMsg('');
     // 第 6 步：聊天痕迹也清掉（历史本来就在服务端，重启登录后由 /chat/history 还原）
@@ -613,26 +550,6 @@ export default function App() {
     setKnowledgeOpen(false);
     setKnowledgeUploading(false);
     setKnowledgeNote('');
-  };
-
-  /**
-   * 第 14 步：登录成功（AuthScreen 回调）。
-   * - 记下「这台电脑登过这个号」；
-   * - 首次登录：直接进工作台（提示词：第一次登成功进工作台，卡片只在下次打开时出现）；
-   * - 切换账号后登录：先出新号的卡片，一点再进。
-   */
-  const onAuthed = (s: AuthSession) => {
-    rememberAccount(s.user.xyz_id);
-    setRemembered(s.user.xyz_id);
-    setSession(s);
-    setEntered(!cardAfterLoginRef.current);
-    cardAfterLoginRef.current = false;
-  };
-
-  /** 第 14 步：卡片上的「切换账号」——清 token + 记住标记回验证码页，登完出新号卡片 */
-  const onSwitchAccount = () => {
-    cardAfterLoginRef.current = true;
-    onLogout();
   };
 
   // ---- 第 13 步：聊天里的浏览器卡片（整个窗口只有一张、只有一个 <webview>）----
@@ -938,22 +855,7 @@ export default function App() {
     );
   }
   if (!session) {
-    return <AuthScreen onSession={onAuthed} />;
-  }
-  /**
-   * 第 14 步：登录页的第二种形态。
-   * 这台电脑登过这个号（有记住标记）且本次启动还没点过「进入工作台」→ 先出个人卡片，
-   * 点一下才进工作台，不用再填验证码。key 绑 XYZ：换号时整张卡片重挂载，资料不会串。
-   */
-  if (!entered && remembered === session.user.xyz_id) {
-    return (
-      <ProfileCard
-        key={session.user.xyz_id}
-        session={session}
-        onEnter={() => setEntered(true)}
-        onSwitchAccount={onSwitchAccount}
-      />
-    );
+    return <AuthScreen onSession={setSession} />;
   }
 
   return (
