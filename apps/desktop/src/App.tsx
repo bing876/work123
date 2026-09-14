@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
-import type { AgentEventPayload, AuthProfile, AuthSession, BrowserAction, ChatHistoryResult, DriveResult, KnowledgeDocument, KnowledgeListResult, KnowledgeUploadResult, MemoryExtractResult, MemoryItem, MemoryListResult, TaskPhase, TaskState } from '@ai-workbench/shared';
+import { useEffect, useRef, useState, type ChangeEvent } from 'react';
+import type { AgentEventPayload, AuthProfile, AuthSession, ChatHistoryResult, KnowledgeDocument, KnowledgeListResult, KnowledgeUploadResult, MemoryExtractResult, MemoryItem, MemoryListResult, TaskState } from '@ai-workbench/shared';
+import { BrowserCard, HOME_URL, detectOpenUrl } from './browserCard';
 
 /**
  * 第 2 步（内嵌版）「脸和门」：
@@ -34,15 +35,24 @@ import type { AgentEventPayload, AuthProfile, AuthSession, BrowserAction, ChatHi
  *   - 聊天里模型说「这需要用工作台浏览器，确认后我开始操作」时，气泡下出现【确认按钮】；
  *     按钮只挂在**最后一条**确认回复上（旧按钮不再渲染），goal 取该确认之前最近的
  *     那句**用户原话**（例如「打开百度搜天气」）——不读输入框、不取更早的消息，取不到就不开车；
- *     或输入框里写好目标点「开始任务」——两个入口都把目标交给主进程的 agent 循环；
  *   - 循环在**主进程**：read_page → POST /agent/next-action（带 JWT）→ 拿【一个】动作 →
  *     走现有 driver 执行 → 记一步摘要 → 再读页……直到 done / ask_user / 你暂停；
- *   - 暂停/继续语义沿用第 4 步：暂停立刻停手，继续先读**当前真实页**，绝不重放旧动作；
- *   - 渲染层只是镜像：大字、任务卡「最近步」、聊天里的 ⚠️/✅ 都来自 'agent' 事件。
+ *   - 暂停语义沿用第 4 步：暂停立刻停手；
+ *   - 渲染层只是镜像：聊天里的 ⚠️/✅ 都来自 'agent' 事件。
+ *
+ * 第 13 步「聊天内浏览器卡片 + 收干净右栏」：
+ *   - 用户发**明确开网页指令**（打开百度 / 打开抖音 / 打开 https://… / 打开浏览器）时不再要确认：
+ *     中栏聊天里直接插一张卡片，卡片里是**真实 <webview>**（partition=persist:workbench-browser），
+ *     能点、能在页面输入框打字；卡片上只有「展开 / 收起」一个按钮，不新开窗口、不做多标签；
+ *   - 纯闲聊 / 问知识库 / 问「你是谁」：不弹卡片、不加载网页（判定见 browserCard.tsx 的 detectOpenUrl）；
+ *   - 右栏驾驶台（开始任务/暂停/继续/我来操作/复位/示例任务/黄框调试区/浏览器开关）全部撤掉，
+ *     状态机保留在主进程内部，不在右栏画状态；右栏只在有任务结果时出现一张结果卡；
+ *   - 驾驶目标改为**卡片里这张页**（getWebviewId 拿的就是卡片的 guest），流程没变；
+ *   - 敏感闸没动：聊天输入框发 123456 仍被拦下、不落库、不代填；验证码/密码请在网页里自己打。
  */
 
-type Role = 'user' | 'assistant';
-type Message = { id: number; role: Role; text: string };
+type Role = 'user' | 'assistant' | 'browser';
+type Message = { id: number; role: Role; text: string; cardUrl?: string };
 
 /** 第 8 步：GET /agent/task/current 的形态（红点/结果都认这个，不信内存假数据） */
 interface CurrentTask {
@@ -57,37 +67,12 @@ interface CurrentTask {
   outline?: string[];
 }
 
-/** 状态机 → 展示文案（主进程是唯一事实源，这里只是翻译） */
-const PHASE_LABEL: Record<TaskPhase, string> = {
-  idle: 'idle · 待命',
-  running: 'running · AI 驾驶中',
-  paused: 'paused · 你接管中',
-  done: 'done · 任务完成',
-  failed: 'failed · 任务失败',
-};
-
 /**
  * 第 6 步：不再放写死的开场白。
  * 历史一律以服务端 `/chat/history` 为准（库里的密文解密回传）；
  * 一条都没有时中间区显示一句空态提示，而不是拿假对话冒充“聊过”。
  */
 const SEED_MESSAGES: Message[] = [];
-
-/** 工作台浏览器的默认落地页 */
-const DEFAULT_BROWSER_URL = 'https://example.com';
-
-/** 调试用：驾驶目标站 */
-const DEMO_URL = 'https://www.baidu.com';
-/**
- * 调试用：搜索框 / 搜索按钮的选择器。
- *
- * 写成**逗号列表**是有意的降级策略：百度首页同时存在两套搜索 UI ——
- * 隐藏的经典搜索框（#kw / #su，祖先 display:none，量出来 0×0）排在前面，
- * 可见的新版 AI 搜索框（#chat-textarea / #chat-submit-button）排在后面。
- * 执行器会遍历所有匹配、取第一个**可见**的，所以两种版式都能命中。
- */
-const DEMO_INPUT = '#kw, textarea#chat-textarea';
-const DEMO_SUBMIT = '#su, button#chat-submit-button';
 
 // ---------------------------------------------------------------------------
 // 第 5 步（重做版）：先登录，再进工作台
@@ -239,22 +224,6 @@ function AuthScreen({ onSession }: { onSession: (s: AuthSession) => void }) {
   );
 }
 
-/** 把一次驾驶结果拍成给人看的纯文本 */
-function formatResult(res: DriveResult): string {
-  const lines: string[] = [`ok: ${res.ok}`, `action: ${res.action}`];
-  if (res.detail) lines.push(`detail: ${res.detail}`);
-  if (res.error) lines.push(`error: ${res.error}`);
-  const s = res.pageSnapshot;
-  if (s) {
-    lines.push(`url:   ${s.url}`);
-    lines.push(`title: ${s.title}`);
-    lines.push(`按钮(${s.buttons.length}):   ${s.buttons.slice(0, 8).join(' / ') || '（无）'}`);
-    lines.push(`链接(${s.links.length}):   ${s.links.slice(0, 8).join(' / ') || '（无）'}`);
-    lines.push(`输入框(${s.inputs.length}): ${s.inputs.slice(0, 8).join(' / ') || '（无）'}`);
-  }
-  return lines.join('\n');
-}
-
 export default function App() {
   /** 头像右上角红点：第 8 步起由服务端 tasks.unread 驱动（登录后拉 current，done 事件点亮，看完熄灭） */
   const [hasUnread, setHasUnread] = useState(false);
@@ -302,6 +271,12 @@ export default function App() {
   // ---- 第 6 步：流式聊天状态（真聊天，不再是内存假数据）----
   /** 当前会话 id：登录后 /chat/history 给回，或 /chat/stream 的 meta 事件补上；只在内存，不硬编 */
   const convIdRef = useRef<number | null>(null);
+  /**
+   * 第 13 步：这一轮的**用户原话**是不是「开网页指令」。
+   * 是的话，即使模型仍回了「确认后我开始操作」那句老话，也不再挂确认按钮——
+   * 网页已经在卡片里打开了，再要用户点确认就是自相矛盾。
+   */
+  const lastUserWasOpenRef = useRef(false);
   const [streaming, setStreaming] = useState(false);
   /** 打字机中的半截助手回复（done 之前只活在这里；库里只有完成的全文） */
   const [streamText, setStreamText] = useState('');
@@ -557,6 +532,9 @@ export default function App() {
     convIdRef.current = null;
     // 第 7 步：驾驶员循环和 token 一并停掉/清掉（主进程里也不留）
     void window.workbench?.agentStop();
+    // 第 13 步：聊天里的网页卡片一并清掉（换号不该看见上一个号的网页）
+    setBrowserCardId(null);
+    setCardExpanded(false);
     setAgentSteps([]);
     setAgentDoc(null);
     setCurTask(null);
@@ -573,18 +551,33 @@ export default function App() {
     setKnowledgeNote('');
   };
 
-  /** 浏览器区域是否可见 */
-  const [browserVisible, setBrowserVisible] = useState(false);
-  /** 是否已经挂载过（挂载过就保留 <webview>，隐藏时用 display 收起，避免每次开关都重新加载网页） */
-  const [browserMounted, setBrowserMounted] = useState(false);
-  const [browserUrl, setBrowserUrl] = useState(DEFAULT_BROWSER_URL);
+  // ---- 第 13 步：聊天里的浏览器卡片（整个窗口只有一张、只有一个 <webview>）----
+  /** 当前挂着网页的那条卡片消息 id；null = 还没开过网页 */
+  const [browserCardId, setBrowserCardId] = useState<number | null>(null);
+  /** 订阅 effect 是挂载时建的闭包，用 ref 读最新值，免得拿到过期的 null */
+  const browserCardIdRef = useRef<number | null>(null);
+  browserCardIdRef.current = browserCardId;
+  /** 卡片是否展开（展开后中栏以浏览器为主） */
+  const [cardExpanded, setCardExpanded] = useState(false);
+  /** 卡片里那块 <webview>：驾驶员的动作就打在它身上（不再有右栏那块网页） */
   const webviewRef = useRef<HTMLElement | null>(null);
 
-  // ---- 第 3 步调试区状态（全部只在内存里；暂停语义已并入第 4 步状态机） ----
-  /** 最近一次驾驶结果，直接摊在主窗口上 */
-  const [driveOutput, setDriveOutput] = useState('还没执行过动作。点上面的按钮试试。');
-  /** screenshot 动作的产物（内存里的 data URL，不入库） */
-  const [shot, setShot] = useState<string | null>(null);
+  /**
+   * 在中栏聊天里插一张浏览器卡片。
+   * 旧卡片自动降级成一行占位文字——**同一时刻只允许一张卡片挂 <webview>**，
+   * 否则主进程「找内嵌页」会挑错 guest，也会变成事实上的多标签。
+   */
+  const openBrowserCard = (url: string) => {
+    const id = Date.now() + Math.floor(Math.random() * 1000);
+    setMessages((prev) => prev.concat({ id, role: 'browser', text: url, cardUrl: url }));
+    setBrowserCardId(id);
+  };
+
+  /** 把焦点交给卡片里的网页（还没开过就先开一张默认主页） */
+  const focusCard = () => {
+    if (browserCardIdRef.current === null) openBrowserCard(HOME_URL);
+    window.setTimeout(() => (webviewRef.current as (HTMLElement & { focus?: () => void }) | null)?.focus?.(), 60);
+  };
 
   useEffect(() => {
     const bridge = window.workbench;
@@ -619,22 +612,15 @@ export default function App() {
       }
     });
 
+    // 第 13 步：主进程的浏览器指令一律落到**聊天卡片**上（不再有右栏那块网页）。
+    // 'open' 直接换一张卡片；'focus'（敏感字段等待时会发）确保卡片存在并把焦点给它。
+    // 'show' / 'hide' 不再有对应界面（卡片始终在聊天里），保留订阅只是不炸。
     const offOpen = bridge.on('open', (url) => {
-      if (url) setBrowserUrl(url);
-      setBrowserMounted(true);
-      setBrowserVisible(true);
+      if (url) openBrowserCard(url);
     });
-    const offShow = bridge.on('show', () => {
-      setBrowserMounted(true);
-      setBrowserVisible(true);
-    });
-    const offHide = bridge.on('hide', () => setBrowserVisible(false));
-    // 聚焦前先确保可见（沿用上一版 focusBrowser 的语义：不在就先打开）
-    const offFocus = bridge.on('focus', () => {
-      setBrowserMounted(true);
-      setBrowserVisible(true);
-      window.setTimeout(() => webviewRef.current?.focus?.(), 0);
-    });
+    const offShow = bridge.on('show', () => undefined);
+    const offHide = bridge.on('hide', () => undefined);
+    const offFocus = bridge.on('focus', () => focusCard());
 
     return () => {
       offOpen();
@@ -645,24 +631,10 @@ export default function App() {
     };
   }, []);
 
-  // running 才是「AI 正在控制」；idle / paused / done / failed 一律把控制权写给你
+  // running 才是「AI 正在控制」（第 13 步：不再在右栏画状态，只用于 running 时发消息先停手）
   const aiInControl = task.phase === 'running';
-  const bannerText = useMemo(
-    () => (aiInControl ? 'AI 正在控制' : '你正在控制'),
-    [aiInControl],
-  );
 
-  /**
-   * P0：内嵌页永远保持可接收用户输入。
-   *
-   * "AI 正在控制"只表示执行器可自动 click/type；不能把 webview 元素本身设为
-   * pointer-events:none。那会让 Chromium 的命中测试直接跳过 guest，造成暂停/我来操作
-   * 后用户仍点不进网页的假死。真正的自动驾驶开关在主进程 driver.ts 的状态机
-   * （paused 标志 + phase），不是靠 CSS 吃掉鼠标。
-   */
-  const pointerEvents = 'auto';
-
-  // 订阅主进程驾驶员事件：step 摘要进任务卡；ask/done/note 进聊天区
+  // 订阅主进程驾驶员事件：ask/done/note 进聊天区
   useEffect(() => {
     const bridge = window.workbench;
     if (!bridge) return;
@@ -723,19 +695,35 @@ export default function App() {
     // 只是提到关键词（“验证码一般几位”）不会被拦——宁可拦赋值、不问句误伤。
     if (/(密码|口令|password|passcode|验证码|校验码|captcha|otp|cvv|银行卡|卡号|身份证)[\s:：=是为]{0,3}[A-Za-z0-9*#@$%&+=.-]{6,}/i.test(value)
       || /^\s*\d{4,8}\s*$/.test(value)) {
-      setChatNote('这看起来像密码/验证码/卡号：请不要发到聊天里。直接在右侧浏览器里输入（我已确保焦点在页面上），我不会代填、也不会留存。');
+      setChatNote('这看起来像密码/验证码/卡号：请不要发到聊天里。直接点在网页卡片里的输入框上自己打（我把焦点给这张页面），我不会代填、也不会留存。');
       try {
-        void window.workbench?.focusBrowser();
+        focusCard();
       } catch {
         /* 聚焦失败不碍事 */
       }
       return;
     }
+    // 第 13 步：明确的开网页指令 → 不再要确认，聊天里直接插一张真实网页卡片。
+    // 判定纯本地（不联网、不问模型），所以后端/模型没起来时卡片照样出现。
+    const openUrl = detectOpenUrl(value);
+    lastUserWasOpenRef.current = openUrl !== null;
     if (aiInControl) {
       void window.workbench?.pauseTask();
       setChatNote('任务在 running：已先暂停自动 click/type（状态机 → paused），聊天照常发。');
     }
-    setMessages((prev) => prev.concat({ id: Date.now(), role: 'user', text: value }));
+    if (openUrl) {
+      const cardId = Date.now() + 2 + Math.floor(Math.random() * 1000);
+      setMessages((prev) =>
+        prev.concat(
+          { id: Date.now(), role: 'user', text: value },
+          { id: cardId, role: 'browser', text: openUrl, cardUrl: openUrl },
+        ),
+      );
+      setBrowserCardId(cardId);
+      setCardExpanded(false);
+    } else {
+      setMessages((prev) => prev.concat({ id: Date.now(), role: 'user', text: value }));
+    }
     setInput('');
     setHasUnread(false);
     setStreaming(true);
@@ -744,7 +732,13 @@ export default function App() {
       const res = await fetch(`${API_BASE()}/chat/stream`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
-        body: JSON.stringify({ conversationId: convIdRef.current ?? undefined, message: value }),
+        // browserOpened 只是给服务端系统提示词的一个开关：告诉小助「网页已经开好了」，
+        // 别再让用户点确认。不是网页内容、不进历史、不落库。
+        body: JSON.stringify({
+          conversationId: convIdRef.current ?? undefined,
+          message: value,
+          ...(openUrl ? { browserOpened: openUrl } : {}),
+        }),
       });
       if (!res.ok || !res.body) {
         // 服务端在开流前给的 JSON 人话（503 未配置模型 / 400 / 401…）原样贴出来
@@ -813,31 +807,8 @@ export default function App() {
     void sendChat();
   };
 
-  // 打开 / 查看浏览器：先本地显示，再走 IPC 通知主进程（不等回包，避免闪一下）
-  const onOpenBrowser = () => {
-    setBrowserMounted(true);
-    setBrowserVisible(true);
-    void window.workbench?.openBrowser(browserUrl);
-  };
-
-  const onShowBrowser = () => {
-    setBrowserMounted(true);
-    setBrowserVisible(true);
-    void window.workbench?.showBrowser();
-  };
-
-  const onHideBrowser = () => {
-    void window.workbench?.hideBrowser();
-  };
-
-  const onFocusBrowser = () => {
-    void window.workbench?.focusBrowser();
-  };
-
-  // ---- 第 3 步：驾驶相关 ----
-
   /**
-   * 拿内嵌 webview 的 guest webContents id。
+   * 拿**聊天卡片里那块 webview** 的 guest webContents id。
    * webview 还没 dom-ready 时 getWebContentsId() 会抛错，所以重试几轮。
    */
   const getWebviewId = async (): Promise<number | undefined> => {
@@ -854,76 +825,20 @@ export default function App() {
     return undefined;
   };
 
-  /** 把一个动作交给主进程，在内嵌页上执行，并把结果显示在主窗口 */
-  const runAction = async (action: BrowserAction) => {
-    const bridge = window.workbench;
-    if (!bridge) {
-      setDriveOutput('未检测到 preload 桥，无法驾驶。');
-      return;
-    }
-
-    // 驾驶前先确保内嵌页可见（看不见就谈不上“用户看得见页面在动”）
-    setBrowserMounted(true);
-    setBrowserVisible(true);
-    setDriveOutput(`执行中：${action.action} …`);
-
-    const id = await getWebviewId();
-
-    try {
-      const res = await bridge.drive(action, id);
-      if (action.action === 'open_url' && res.ok) setBrowserUrl(action.url);
-      if (action.action === 'screenshot') setShot(res.screenshot ?? null);
-      setDriveOutput(formatResult(res));
-    } catch (err) {
-      setDriveOutput(`调用失败：${(err as Error).message}`);
-    }
-  };
-
-  // ---- 第 4 步：状态机按钮。本地不记账，一切以下方 'state' 广播回来的 task 为准 ----
-
-  /** 开始 / 重新执行 demo 任务：先保证内嵌页可见（复用第 2/3 步的显示逻辑，不做新外壳） */
-  /** 第 7 步：输入框有内容 → 当作任务目标交给主进程 AI 循环；空 → 维持第 4 步 demo */
+  /**
+   * 第 7 步 + 第 13 步：把目标交给主进程的 AI 循环。
+   * 驾驶目标就是卡片里那张页——还没开过网页就先按目标里的站点开一张（拿不到站点才用默认主页），
+   * 然后等 guest 真就绪再发车，否则主进程会「没有找到内嵌 webview 的 webContents」。
+   */
   const startAgentTask = async (rawGoal?: string) => {
     const goal = (rawGoal ?? '').trim();
     if (!goal || !session) return;
-    setBrowserMounted(true);
-    setBrowserVisible(true);
-    await getWebviewId(); // 复用第 6 步补丁：先等内嵌页 guest 就绪
+    if (browserCardId === null) openBrowserCard(detectOpenUrl(goal) ?? HOME_URL);
+    await getWebviewId();
     setAgentSteps([]);
     setAgentDoc(null);
     // token 递给主进程只用于请求头；不打印
     void window.workbench?.agentStart(goal, API_BASE(), session.token);
-  };
-
-  const onStartTask = async () => {
-    setBrowserMounted(true);
-    setBrowserVisible(true);
-    // 等内嵌页 guest 真就绪再让主进程跑任务 —— 否则第一次点会出现
-    // "没有找到内嵌 webview 的 webContents"（主进程 runLoop 是同步跑到第一个 await，
-    // React 还没来得及重新挂载 <webview>，guest 也还没拿到 id）。
-    await getWebviewId();
-    if (input.trim() && session) {
-      // 第 7 步主路径：带着输入框里的目标开 AI 循环（不发送聊天、不重做 UI）
-      const goal = input.trim();
-      setInput('');
-      void startAgentTask(goal);
-      return;
-    }
-    void window.workbench?.startTask();
-  };
-
-  const onPauseDriving = () => {
-    // 「暂停 / 我来操作」= 主进程状态机 running→paused：立刻停自动 click/type，页面交还用户手点
-    void window.workbench?.pauseTask();
-  };
-
-  const onResumeDriving = () => {
-    // 「继续」= 主进程先 read_page 读当前真实页面再决定下一步（driver.runLoop 第一步就是读页）
-    void window.workbench?.resumeTask();
-  };
-
-  const onResetTask = () => {
-    void window.workbench?.resetTask();
   };
 
   // 第 5 步门控：未登录（或正在用存好的 JWT 换会话）时，工作台整体不渲染——不做“游客看假数据”
@@ -1051,39 +966,66 @@ export default function App() {
               还没有聊天记录。跟小助说句话试试——消息会加密存进库里，重启后还在。
             </div>
           )}
-          {messages.map((m, idx) => (
-            <div key={m.id}>
-              <div className={`msg ${m.role}`}>{m.text}</div>
-              {/* 第 8 步：确认按钮只挂在「最后一条」确认回复上——旧确认按钮不再渲染，
-                  免得用户点到老按钮、拿旧目标开新任务（例如用「打开百度」去搜天气）。
-                  目标一律取这条确认之前最近的那句用户原话（例如「打开百度搜天气」）：
-                  既不读输入框，也不用更早的消息；取不到就明确提示，不拿空 goal 去开车。 */}
-              {m.role === 'assistant' &&
-                m.text.includes('确认后我开始操作') &&
-                idx === messages.length - 1 &&
-                !streaming && (
-                  <div style={{ padding: '2px 4px' }}>
-                    <button
-                      type="button"
-                      className="btn"
-                      disabled={task.phase === 'running'}
-                      onClick={() => {
-                        const goal = (
-                          [...messages.slice(0, idx)].reverse().find((x) => x.role === 'user')?.text ?? ''
-                        ).trim();
-                        if (!goal) {
-                          setChatNote('这条确认没有对应的用户原话，我没有开始。请把目标再发一遍（例如「打开百度搜天气」）。');
-                          return;
-                        }
-                        void startAgentTask(goal);
-                      }}
-                    >
-                      确认 · 用工作台浏览器开始
-                    </button>
-                  </div>
+          {messages.map((m, idx) => {
+            // 第 13 步：只有**最新那张**卡片挂真 webview；更早的卡片退化成一行说明。
+            // 这样全窗口始终只有一个 <webview>——否则既是事实上的多标签，
+            // 也会让主进程「找内嵌页」挑错 guest。
+            const isLiveCard = m.role === 'browser' && m.id === browserCardId && Boolean(m.cardUrl);
+            return (
+              <div
+                key={m.id}
+                className={isLiveCard ? (cardExpanded ? 'chat__card chat__card--expanded' : 'chat__card') : undefined}
+              >
+                {m.role === 'browser' ? (
+                  isLiveCard ? (
+                    <BrowserCard
+                      ref={webviewRef}
+                      url={m.cardUrl as string}
+                      expanded={cardExpanded}
+                      onToggle={() => setCardExpanded((v) => !v)}
+                    />
+                  ) : (
+                    <div className="browserCardMoved">网页卡片：{m.text}（已移到最新那张）</div>
+                  )
+                ) : (
+                  <>
+                    <div className={`msg ${m.role}`}>{m.text}</div>
+                    {/* 第 8 步：确认按钮只挂在「最后一条」确认回复上——旧确认按钮不再渲染，
+                        免得用户点到老按钮、拿旧目标开新任务（例如用「打开百度」去搜天气）。
+                        目标一律取这条确认之前最近的那句用户原话（例如「打开百度搜天气」）：
+                        既不读输入框，也不用更早的消息；取不到就明确提示，不拿空 goal 去开车。
+                        第 13 步：本轮用户原话就是「开网页指令」时不再挂这个按钮——
+                        网页已经在卡片里打开了，再要确认就是自相矛盾。 */}
+                    {m.role === 'assistant' &&
+                      m.text.includes('确认后我开始操作') &&
+                      idx === messages.length - 1 &&
+                      !streaming &&
+                      !lastUserWasOpenRef.current && (
+                        <div style={{ padding: '2px 4px' }}>
+                          <button
+                            type="button"
+                            className="btn"
+                            disabled={task.phase === 'running'}
+                            onClick={() => {
+                              const goal = (
+                                [...messages.slice(0, idx)].reverse().find((x) => x.role === 'user')?.text ?? ''
+                              ).trim();
+                              if (!goal) {
+                                setChatNote('这条确认没有对应的用户原话，我没有开始。请把目标再发一遍（例如「打开百度搜天气」）。');
+                                return;
+                              }
+                              void startAgentTask(goal);
+                            }}
+                          >
+                            确认 · 用工作台浏览器开始
+                          </button>
+                        </div>
+                      )}
+                  </>
                 )}
-            </div>
-          ))}
+              </div>
+            );
+          })}
           {streaming && (
             <div className="msg assistant">
               {streamText || <span className="small">小助正在想…</span>}
@@ -1138,33 +1080,16 @@ export default function App() {
         </div>
       </main>
 
-      {/* 右侧：控制文案 + 任务卡片 + 调试区 + 内嵌工作台浏览器 */}
-      <aside className="right">
-        <div className="banner">{bannerText}</div>
-        <div className="small" style={{ textAlign: 'center', marginTop: -8 }}>
-          状态机 {PHASE_LABEL[task.phase]}（步 {task.step}）· {task.detail}
-        </div>
-
-        <div className="controls">
-          <button className="btn" type="button" onClick={onStartTask}>
-            开始任务
-          </button>
-          <button className="btn" type="button" onClick={onPauseDriving}>
-            暂停
-          </button>
-          <button className="btn" type="button" onClick={onResumeDriving}>
-            继续
-          </button>
-          <button className="btn" type="button" onClick={onPauseDriving}>
-            我来操作
-          </button>
-          <button className="btn" type="button" onClick={onResetTask}>
-            复位任务
-          </button>
-        </div>
-
-        {/* 第 8 步：任务收尾卡——短结论、已读/未读、下载文档都在这（不做浏览器外壳） */}
-        {curTask && (
+      {/*
+        第 13 步：右栏收干净。
+        驾驶台（开始任务 / 暂停 / 继续 / 我来操作 / 复位 / 示例任务）、黄框调试区、
+        工作台浏览器开关全部撤掉——状态机照旧跑在主进程内部，只是不在右栏画状态。
+        网页改挂在**中栏聊天卡片**里。右栏只在出了任务结果时临时出现一张结果卡，
+        没有任务时整栏不渲染（右栏允许空/隐藏，绝不拿它当浏览器用、也不加宽它）。
+      */}
+      {curTask && (
+        <aside className="right">
+          {/* 第 8 步：任务收尾卡——短结论、已读/未读、下载文档都在这（不做浏览器外壳） */}
           <div className="card">
             <h4>
               任务 #{curTask.id} · {curTask.status}{' '}
@@ -1197,130 +1122,8 @@ export default function App() {
             )}
             {docNote && <div className="small">{docNote}</div>}
           </div>
-        )}
-
-        <div className="card">
-          <h4>示例任务</h4>
-          <div className="small">
-            状态：<span className="status-running">{PHASE_LABEL[task.phase].split(' ')[0]}</span>
-          </div>
-          {agentSteps.length > 0 && (
-            <div className="agentSteps" role="log">
-              {agentSteps.map((x, i) => (
-                <div className="small" key={i}>
-                  {x}
-                </div>
-              ))}
-            </div>
-          )}
-          {agentDoc && (
-            <div className="small">
-              📄 {agentDoc.title}
-              {agentDoc.outline.length > 0 && ` · 提纲：${agentDoc.outline.slice(0, 4).join(' / ')}`}
-            </div>
-          )}
-          <div className="buttons-row">
-            <button className="btn" type="button" onClick={onOpenBrowser}>
-              打开工作台浏览器
-            </button>
-            <button className="btn" type="button" onClick={onFocusBrowser}>
-              聚焦浏览器
-            </button>
-            <button className="btn" type="button" onClick={onShowBrowser}>
-              显示
-            </button>
-            <button className="btn" type="button" onClick={onHideBrowser}>
-              隐藏
-            </button>
-          </div>
-        </div>
-
-        {/* 第 3 步调试区：丑是故意的，只为证明驾驶通了。
-            第 8 步：AI 循环 running 时**自动收起**（不是删掉，DOM 还在）——右栏本来就窄，
-            这个黄框会把网页挤矮、把搜索框挤出视口；paused / done 再自动展开。 */}
-        <div className={task.phase === 'running' ? 'debug debug--collapsed' : 'debug'}>
-          <div className="debug__title">
-            调试区 · 驾驶内嵌页（第 3 步 · 不接 AI）
-            {task.phase === 'running' && '（AI 驾驶中已自动收起——点「暂停」可展开）'}
-          </div>
-          <div className="buttons-row">
-            <button
-              className="btn"
-              type="button"
-              onClick={() => void runAction({ action: 'open_url', url: DEMO_URL })}
-            >
-              1 打开百度
-            </button>
-            <button
-              className="btn"
-              type="button"
-              onClick={() => void runAction({ action: 'type', target: DEMO_INPUT, text: 'AI 工作台' })}
-            >
-              2 在搜索框输入
-            </button>
-            <button
-              className="btn"
-              type="button"
-              onClick={() => void runAction({ action: 'click', target: DEMO_SUBMIT })}
-            >
-              3 点击搜索
-            </button>
-            <button
-              className="btn"
-              type="button"
-              onClick={() => void runAction({ action: 'scroll', direction: 'down' })}
-            >
-              4 向下滚动
-            </button>
-            <button
-              className="btn"
-              type="button"
-              onClick={() => void runAction({ action: 'read_page' })}
-            >
-              5 读取页面
-            </button>
-            <button className="btn" type="button" onClick={onPauseDriving}>
-              6 暂停驾驶
-            </button>
-            <button className="btn" type="button" onClick={onResumeDriving}>
-              7 继续驾驶
-            </button>
-            <button
-              className="btn"
-              type="button"
-              onClick={() => void runAction({ action: 'screenshot' })}
-            >
-              8 截图
-            </button>
-          </div>
-          <div className="small debug__state">
-            状态机：{PHASE_LABEL[task.phase]}（主进程权威）· 单发自动 click / type{' '}
-            {task.blocked ? '已被拒——页面已交还给你手点' : '放行中'}
-          </div>
-          <pre className="debug__out">{driveOutput}</pre>
-          {shot && <img className="debug__shot" src={shot} alt="内嵌页截图" />}
-        </div>
-
-        {/* 工作台浏览器区域：真实网页，独立会话分区 */}
-        <div className="browserArea">
-          {browserMounted ? (
-            <webview
-              ref={webviewRef as never}
-              className="browserArea__view"
-              src={browserUrl}
-              partition="persist:workbench-browser"
-              // 允许 guest 把 target=_blank 的点击请求交给主进程；主进程会 deny 新窗口并
-              // 让当前 guest 自己导航（见 main.ts），因此不会创建 BrowserWindow。
-              allowpopups
-              // display 必须是 flex：<webview> 内部靠 flex 撑开 guest 视图，
-              // 写成 block 会让 guest 卡在 150px 高（实测踩过）
-              style={{ display: browserVisible ? 'flex' : 'none', pointerEvents }}
-            />
-          ) : (
-            <div className="browserArea__empty">点击「打开工作台浏览器」后，这里会显示网页</div>
-          )}
-        </div>
-      </aside>
+        </aside>
+      )}
     </div>
   );
 }

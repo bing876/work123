@@ -123,9 +123,15 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
     const claims = authed(req, env);
     if (!claims) return errJson(reply, 401, '未登录或登录已过期（聊天需要第 5 步的 JWT）');
 
-    const body = req.body as { conversationId?: unknown; message?: unknown } | null;
+    const body = req.body as { conversationId?: unknown; message?: unknown; browserOpened?: unknown } | null;
     const message = typeof body?.message === 'string' ? body.message.trim() : '';
     if (!message) return errJson(reply, 400, 'message 不能为空');
+    /**
+     * 第 13 步：桌面判断出这是一句「开网页指令」时，会在发这句的同时把已经打开的网址带上来。
+     * 它只是系统提示词的一个开关（不是网页内容、不进历史、不落库），用来告诉小助：
+     * 网页已经在聊天卡片里打开并加载好了，别再让用户点「确认 / 开始任务」。
+     */
+    const openedUrl = typeof body?.browserOpened === 'string' ? body.browserOpened.trim().slice(0, 500) : '';
     if (message.length > MESSAGE_MAX) return errJson(reply, 400, `单条消息最长 ${MESSAGE_MAX} 字`);
     let conversationId: number | null = null;
     if (body?.conversationId !== undefined && body?.conversationId !== null && body?.conversationId !== '') {
@@ -169,6 +175,13 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
       // 不进 agent 的驾驶员 JSON，也不触碰第 10 步的确认逻辑。
       const knowledgeBlock = await buildKnowledgeBlock(pool, cipher, claims.sub, message);
       const knowledgeContext = knowledgeBlock ? `\n\n${knowledgeBlock}` : '';
+      // 第 13 步：网页已开好时的当轮补充约束（只在带上 browserOpened 的那一轮出现）
+      const browserContext = openedUrl
+        ? `\n\n（本轮补充：用户要开网页，工作台浏览器卡片已经打开并加载 ${openedUrl}，就在这句下面的聊天里。
+不要再让用户点确认、不要再说「确认后我开始操作」，直接用一句话说明你已经打开了这个网页。
+提醒他可以直接在卡片里点、可以直接把验证码/密码打在网页自己的输入框里（你不会代填、也不会留存）。
+如果他还交代了具体要做的事，说你会在卡片里接着做，不要谎称已经做完。）`
+        : '';
 
       // 2) 调 DeepSeek（OpenAI 兼容 chat/completions，stream:true）。失败/无流 → 普通 JSON 错误，不开 SSE
       const ac = new AbortController();
@@ -182,7 +195,7 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
             model: env.deepseekModel,
             stream: true,
             messages: [
-              { role: 'system', content: SYSTEM_PROMPT + memoryBlock + knowledgeContext },
+              { role: 'system', content: SYSTEM_PROMPT + memoryBlock + knowledgeContext + browserContext },
               ...history,
               { role: 'user', content: message },
             ],

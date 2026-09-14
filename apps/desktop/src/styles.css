@@ -174,31 +174,14 @@ body {
   color: #6b7280;
 }
 
-/* ---------- 右栏：控制 + 任务 + 内嵌浏览器 ---------- */
+/* ---------- 右栏：只在有任务结果时出现（第 13 步：驾驶台/调试区/浏览器全撤） ---------- */
 .right {
-  /* 浏览器区域需要占满这一栏；基准宽度取视口一半，窗口变窄时允许收缩 */
-  flex: 0 1 50vw;
-  min-width: 340px;
+  flex: 0 0 300px;
   display: flex;
   flex-direction: column;
   border-left: 1px solid var(--border);
   background: #fff;
   position: relative;
-}
-
-.banner {
-  text-align: center;
-  padding: 14px 10px;
-  font-size: 18px;
-  font-weight: 800;
-  border-bottom: 1px dashed var(--border);
-}
-
-.controls {
-  display: flex;
-  gap: 8px;
-  padding: 10px;
-  flex-wrap: wrap;
 }
 
 .btn {
@@ -244,91 +227,112 @@ body {
   flex-wrap: wrap;
 }
 
-/* ---------- 内嵌工作台浏览器区域 ---------- */
-.browserArea {
-  flex: 1;
-  min-height: 0;
+/* ---------- 第 13 步：聊天里的浏览器卡片 ---------- */
+
+/* 卡片的 React 外层（消息列表的 flex 子项）；展开时让它吃掉中栏剩余高度 */
+.chat__card {
   display: flex;
   flex-direction: column;
-  border-top: 1px dashed var(--border);
+  min-height: 0;
+}
+.chat__card--expanded {
+  flex: 1 1 auto;
+}
+
+.browserCard {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  margin: 4px 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
   background: #fff;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 6%);
+}
+
+/* 展开态：卡片本身也跟着长，中栏变成「浏览器为主」 */
+.browserCard--expanded {
+  flex: 1 1 auto;
+  min-height: 60vh;
+}
+
+.browserCard__bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  background: #fafafa;
+}
+
+.browserCard__url {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-weak);
+}
+
+/* 卡片上只有「展开 / 收起」一个按钮——不新开窗口、不做多标签 */
+.browserCard__btn {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  font-size: 12px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  border: 1px solid #ccc;
+  background: #fff;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.browserCard__btn:hover {
+  background: #f6f7f9;
 }
 
 /*
- * <webview> 是自定义元素，默认没有尺寸，必须显式给满。
- * 注意：不要在这里写 display —— Electron 的 <webview> 内部靠 flex 才能把 guest
- * 视图撑开；一旦被覆盖成 display:block，guest 会卡在默认的 150px 高（实测）。
- * 显隐由组件里的内联 style 用 display:flex / none 控制。
+ * 页面舞台：收起时按 16:10 等比例给高度，展开时吃掉卡片剩余高度。
+ * <webview> 是自定义元素、默认没尺寸，必须靠这里的绝对定位把宽高钉死。
  */
-.browserArea__view {
+.browserCard__stage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  background: #fff;
+}
+.browserCard--expanded .browserCard__stage {
+  aspect-ratio: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/*
+ * 注意：不要在 .browserCard__view 上覆盖成 display:block —— Electron 的 <webview>
+ * 内部靠 flex 才能把 guest 视图撑开，写成 block 会让 guest 卡在 150px 高（实测）。
+ */
+.browserCard__view {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
+  display: flex;
   border: 0;
 }
 
-.browserArea__empty {
-  padding: 16px;
-  color: #666;
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-/* ---------- 第 3 步调试区（故意很朴素，只为证明驾驶通了） ---------- */
-.debug {
-  margin: 10px;
-  padding: 10px;
-  border: 1px dashed #f0a020;
-  border-radius: 8px;
-  background: #fffdf5;
-}
-
-.debug__title {
+/* 被新卡片顶下去的旧卡片只留一行说明（同一时刻只允许一个 <webview>） */
+.browserCardMoved {
+  padding: 6px 10px;
   font-size: 12px;
-  font-weight: 700;
-  color: #a06a00;
-  margin-bottom: 8px;
-}
-
-.debug__state {
-  margin-top: 6px;
-}
-
-.debug__out {
-  margin: 8px 0 0 0;
-  padding: 8px;
-  max-height: 150px;
-  overflow: auto;
-  background: #f4f4f4;
-  border: 1px solid #e0e0e0;
-  border-radius: 6px;
-  font-family: Consolas, 'Courier New', monospace;
-  font-size: 11px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-
-.debug__shot {
-  display: block;
-  margin-top: 8px;
-  /* 缩略图别把内嵌浏览器区域挤没了；完整截图以 CDP 产物为准 */
-  max-width: 100%;
-  max-height: 130px;
-  width: auto;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-}
-
-/*
- * 第 8 步：AI 循环 running 时自动收起调试区（DOM 还在，只是不占高度），
- * 把右栏高度让给下面的网页 —— 右栏本来就窄，这个黄框会把网页压矮、把搜索框挤出视口。
- * paused / done 时自动展开。只收内容，标题栏留着（能看出来它只是被收起了）。
- */
-.debug--collapsed .buttons-row,
-.debug--collapsed .debug__state,
-.debug--collapsed .debug__out,
-.debug--collapsed .debug__shot {
-  display: none;
+  color: var(--text-weak);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: #fafafa;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---- 第 5 步（重做版）：登录页 + 左栏账号小块 ---- */

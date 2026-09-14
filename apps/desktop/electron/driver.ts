@@ -296,7 +296,8 @@ function resolveTarget(id?: number): Target {
   }
   const auto = findWebviewGuest();
   if (!auto) {
-    throw new Error('没有找到内嵌 webview 的 webContents —— 请先在右栏打开工作台浏览器');
+    // 第 13 步起，内嵌页挂在**中栏聊天的浏览器卡片**里（右栏那块已经撤了）
+    throw new Error('没有找到内嵌 webview 的 webContents —— 请先在聊天里打开一个网页（例如发一句「打开百度」）');
   }
   return auto;
 }
