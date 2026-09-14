@@ -5,7 +5,8 @@ import { BrowserCard, HOME_URL, detectOpenUrl } from './browserCard';
 /**
  * 第 2 步（内嵌版）「脸和门」：
  *   - 脸：主窗口做成一个能看懂的简易聊天界面（假数据 + 内存状态）
- *   - 门：右侧那一栏内嵌一个 <webview>，能直接显示真实网页（不再开独立窗口）
+ *   - 门：内嵌一个 <webview>，能直接显示真实网页（不再开独立窗口）
+ *        —— 第 13 步起这块网页从右栏搬到了中栏聊天的浏览器卡片里
  *
  * 第 3 步「遥控器先通」：
  *   - 右栏底部加一块**很丑的调试区**，用几个按钮证明程序能驾驶这块内嵌页
@@ -750,7 +751,9 @@ export default function App() {
         } catch {
           /* 非 JSON 错误体，维持 HTTP 状态码 */
         }
-        setChatNote(`没发出去：${msg}`);
+        // 第 13 步：开网页指令即使这句没发给小助，卡片也已经开好了——先说清楚，
+        // 免得用户以为「开网页」也失败了（后端/模型没起是另一回事，照实说）。
+        setChatNote(`${openUrl ? '网页已经打开在聊天卡片里；' : ''}没发出去：${msg}`);
         return;
       }
       const reader = res.body.getReader();
@@ -790,7 +793,7 @@ export default function App() {
         setChatNote((n) => n || '这轮没拿到回复（未完成，服务端不会把半截存进历史）。');
       }
     } catch (e) {
-      setChatNote(`连不上后端：${(e as Error).message}`);
+      setChatNote(`${openUrl ? '网页已经打开在聊天卡片里；' : ''}连不上后端：${(e as Error).message}`);
     } finally {
       setStreaming(false);
       setStreamText('');
