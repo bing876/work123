@@ -202,8 +202,72 @@ CREATE INDEX IF NOT EXISTS idx_agent_memories_agent ON agent_memories (agent_id,
 `;
 
 
+/**
+ * 第 16 步 fixup：**一个智能体只能有一条会话**。
+ *
+ * 起因（本机实测到的真故障）：`ensureAgentConversation` 原来是「先查后插」，
+ * 而桌面 dev 模式开着 React StrictMode，挂载 effect 会跑两遍 → 两个并发请求
+ * 同时读到「还没有会话」→ 各插一条。结果「消息进了会话 A、状态读的是会话 B」，
+ * 第 16 步的会话状态行 / 保活开关就写在了另一条会话上，核心功能在那条路径上失效。
+ *
+ * 这里做两件事，都幂等：
+ *   1) 把历史遗留的重复会话并成一条 —— 保留「消息最多的那条」（并列取 id 最小），
+ *      其余会话的消息先搬过去、再删掉空壳（删会话会级联删消息，所以必须先搬）；
+ *   2) 加**部分唯一索引**当兜底（agent_id 非空时唯一），以后并发也插不进第二条。
+ *
+ * 索引创建失败只告警、不拦启动 —— 老库里若还有脏数据，服务也不该起不来。
+ */
+async function dedupeAgentConversations(pool: Pool): Promise<void> {
+  // 「保留哪条」的判定：消息多者优先，并列取 id 最小。两条语句用同一段窗口函数，
+  // 保证判定口径完全一致。DELETE 那一步是在消息搬完之后重新算的，
+  // 此时保留的那条已经是消息最多的，所以判定稳定、可反复执行。
+  const ranked = `
+    SELECT c.id, c.agent_id,
+           row_number() OVER (
+             PARTITION BY c.agent_id
+             ORDER BY (SELECT count(*) FROM messages m WHERE m.conversation_id = c.id) DESC, c.id ASC
+           ) AS rn
+      FROM conversations c
+     WHERE c.agent_id IS NOT NULL`;
+  try {
+    const moved = await pool.query(
+      `WITH ranked AS (${ranked}),
+            keep AS (SELECT id, agent_id FROM ranked WHERE rn = 1),
+            extra AS (SELECT r.id AS drop_id, k.id AS keep_id
+                        FROM ranked r JOIN keep k ON k.agent_id = r.agent_id
+                       WHERE r.rn > 1)
+       UPDATE messages m SET conversation_id = e.keep_id FROM extra e WHERE m.conversation_id = e.drop_id`,
+    );
+    const dropped = await pool.query(`DELETE FROM conversations c USING (${ranked}) r WHERE c.id = r.id AND r.rn > 1`);
+    if ((dropped.rowCount ?? 0) > 0) {
+      console.warn(
+        `[db] 并掉重复会话 ${dropped.rowCount} 条（搬走消息 ${moved.rowCount ?? 0} 条）——` +
+          '这是「一个智能体一条会话」的幂等修复',
+      );
+    }
+  } catch (err) {
+    console.warn('[db] 重复会话归并失败（忽略，继续启动）：', (err as Error).message);
+  }
+}
+
+/** 部分唯一索引兜底：agent_id 非空时必须唯一 */
+async function ensureAgentConversationIndex(pool: Pool): Promise<void> {
+  try {
+    await pool.query(
+      'CREATE UNIQUE INDEX IF NOT EXISTS uniq_conversations_agent ON conversations (agent_id) WHERE agent_id IS NOT NULL',
+    );
+  } catch (err) {
+    console.warn(
+      '[db] 唯一索引 uniq_conversations_agent 没建上（降级为只靠事务锁保证不重复）：',
+      (err as Error).message,
+    );
+  }
+}
+
 export async function migrate(pool: Pool): Promise<void> {
   await pool.query(DDL);
+  await dedupeAgentConversations(pool);
+  await ensureAgentConversationIndex(pool);
 }
 
 export async function withTx<T>(pool: Pool, fn: (client: PoolClient) => Promise<T>): Promise<T> {

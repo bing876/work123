@@ -138,9 +138,15 @@ async function resolveConversation(
     "SELECT id FROM agents WHERE project_id = $1 AND kind = 'assistant' ORDER BY id ASC LIMIT 1",
     [p.rows[0].id],
   );
+  // 第 16 步 fixup：有「小助」就走原子的找/建（和 /chat/state、历史加载同一个入口），
+  // 免得这条兜底路径和它们并发时又插出第二条会话。
+  if (a.rowCount === 1) {
+    const conv = await ensureAgentConversation(pool, userId, Number(a.rows[0].id));
+    if (conv !== null) return { id: conv };
+  }
   const ins = await pool.query<{ id: string }>(
     'INSERT INTO conversations (project_id, agent_id, title) VALUES ($1, $2, $3) RETURNING id',
-    [p.rows[0].id, a.rowCount === 1 ? a.rows[0].id : null, seedTitle.slice(0, 24) || '小助会话'],
+    [p.rows[0].id, null, seedTitle.slice(0, 24) || '小助会话'],
   );
   return { id: Number(ins.rows[0].id) };
 }

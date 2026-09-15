@@ -138,21 +138,52 @@ async function loadOwnedAgent(pool: Pool, ownerId: number, agentId: number): Pro
   return r.rowCount === 1 ? r.rows[0] : null;
 }
 
-/** 找/建某个智能体的会话（一个智能体一份聊天，绝不复用别人的会话） */
+/**
+ * 找/建某个智能体的会话（一个智能体一份聊天，绝不复用别人的会话）。
+ *
+ * 第 16 步 fixup：**必须原子**。原来写成「先查后插」，dev 下 React StrictMode 会把挂载
+ * effect 跑两遍 → 两个并发请求都读到「还没会话」→ 各插一条，于是「消息进 A、状态读 B」，
+ * 会话状态行 / 保活就写到了另一条会话上（实测踩到）。
+ *
+ * 做法（三步都在一个事务里，顺序不能动）：
+ *   1) 先 `FOR UPDATE` 锁住 agents 那一行 —— 并发调用在这里排队；
+ *   2) **取到锁之后再另起一条语句**查有没有会话；
+ *   3) 没有才插。
+ *
+ * 第 2 步为什么不能省、也不能塞进第 1 步的 SELECT 里（这是踩过的坑）：
+ * READ COMMITTED 下快照是**按语句**取的，而 `FOR UPDATE` 等锁期间用的还是
+ * 语句开始时那个快照；EPQ 只会为被锁的那张表的行重新取版本，**不会**刷新 SELECT
+ * 列表里子查询的快照。于是后进来的事务即便排到了锁，子查询仍然「看不见」前一个事务
+ * 刚提交的会话，照样重复插入 → 撞唯一索引 500。拆成独立语句，新语句拿到新快照，才对。
+ *
+ * 兜底：conversations(agent_id) 上的部分唯一索引（见 db.ts），保证任何路径都插不进第二条。
+ */
 export async function ensureAgentConversation(pool: Pool, ownerId: number, agentId: number): Promise<number | null> {
-  const a = await loadOwnedAgent(pool, ownerId, agentId);
-  if (!a) return null;
-  if (a.conversation_id !== null) return Number(a.conversation_id);
-  const p = await pool.query<{ id: string }>(
-    'SELECT p.id FROM projects p JOIN agents a ON a.project_id = p.id WHERE a.id = $1 AND p.user_id = $2',
-    [agentId, ownerId],
-  );
-  if (p.rowCount !== 1) return null;
-  const ins = await pool.query<{ id: string }>(
-    'INSERT INTO conversations (project_id, agent_id, title) VALUES ($1, $2, $3) RETURNING id',
-    [p.rows[0].id, agentId, a.name.slice(0, 24) || '会话'],
-  );
-  return Number(ins.rows[0].id);
+  return withTx(pool, async (client) => {
+    // 1) 锁住这个智能体所在行（顺带校验归属：不是这个账号的就当不存在）
+    const a = await client.query<{ id: string; name: string; project_id: string }>(
+      `SELECT a.id, a.name, a.project_id
+         FROM agents a JOIN projects p ON p.id = a.project_id
+        WHERE a.id = $1 AND p.user_id = $2
+        FOR UPDATE OF a`,
+      [agentId, ownerId],
+    );
+    if (a.rowCount !== 1) return null;
+
+    // 2) 拿到锁之后再查一次（**新语句 = 新快照**，看得见排在前面那个事务刚提交的会话）
+    const existing = await client.query<{ id: string }>(
+      'SELECT id FROM conversations WHERE agent_id = $1 ORDER BY id DESC LIMIT 1',
+      [agentId],
+    );
+    if ((existing.rowCount ?? 0) >= 1) return Number(existing.rows[0].id);
+
+    // 3) 确实还没有，才建
+    const ins = await client.query<{ id: string }>(
+      'INSERT INTO conversations (project_id, agent_id, title) VALUES ($1, $2, $3) RETURNING id',
+      [a.rows[0].project_id, agentId, a.rows[0].name.slice(0, 24) || '会话'],
+    );
+    return Number(ins.rows[0].id);
+  });
 }
 
 // ---------------------------------------------------------------------------
