@@ -173,6 +173,19 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
      * 网页已经在聊天卡片里打开并加载好了，别再让用户点「确认 / 开始任务」。
      */
     const openedUrl = typeof body?.browserOpened === 'string' ? body.browserOpened.trim().slice(0, 500) : '';
+    /**
+     * 第 17 步：光给一长串 URL，模型会从**历史**里捡站点名 ——
+     * 实测在百度那张页上干活，它却回「好，我在当前页面（必应）搜…」（因为上一轮聊的是必应）。
+     * 这里把站点名单独算出来，明写「这一轮只操作这一张页、别提前面出现过的站点」。
+     * 纯字符串解析，不联网、不猜。
+     */
+    const openedHost = (() => {
+      try {
+        return new URL(openedUrl).host.replace(/^www\./i, '');
+      } catch {
+        return '';
+      }
+    })();
     if (message.length > MESSAGE_MAX) return errJson(reply, 400, `单条消息最长 ${MESSAGE_MAX} 字`);
     let conversationId: number | null = null;
     if (body?.conversationId !== undefined && body?.conversationId !== null && body?.conversationId !== '') {
@@ -252,8 +265,12 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
       const knowledgeBlock = await buildKnowledgeBlock(pool, cipher, claims.sub, message);
       // 第 13 步：网页已开好时的当轮补充约束（只在带上 browserOpened 的那一轮出现）
       const browserContext = openedUrl
-        ? `（本轮补充：用户要开网页，工作台浏览器卡片已经打开并加载 ${openedUrl}，就在这句下面的聊天里。
+        ? `（本轮补充：用户要开网页，工作台浏览器卡片已经打开并加载 ${openedUrl}${
+            openedHost ? `（站点：${openedHost}）` : ''
+          }，就在这句下面的聊天里。
 网页已经开好了，**不要再让用户点确认、不要再说「确认后我开始操作」**，直接用一句话说明你已经打开了这个网页。
+**这一轮你只操作这一张页（${openedHost || openedUrl}）**：说「当前页面」时必须说对站点名，
+不要提历史里出现过的别的站点（那些和这一轮无关）。
 ${
   state.already_told_user_login_themselves
     ? '登录提醒本会话已经说过，这一轮**不要再提**「密码/验证码自己在卡片里输」「我不代填」这类话。'
