@@ -24,6 +24,11 @@ export interface SessionStateLike {
   last_page_summary: string;
   already_told_user_login_themselves: boolean;
   keepalive: boolean;
+  /**
+   * 本轮是否刚发生「改口」（最新一句不是继续语，且把 current_task 换成了别的目标）。
+   * **只在本轮内存里算，不落库** —— 只是给模型一个明确的信号：旧目标作废了。
+   */
+  task_switched?: boolean;
 }
 
 /**
@@ -42,6 +47,9 @@ export const BASE_SYSTEM_PROMPT = [
   '',
   '任务切换：',
   '- 用户改口就立刻切换目标，停止提起已被覆盖的旧任务，也不要问「现在到底是 A 还是 B」。',
+  '- 用户改口后，你上一轮**还没得到回答的那个问题自动作废**：不要再原样抛回来，也不要把',
+  '  「原任务是 X」和「最新指令是 Y」并列起来让用户二选一。最新指令就是答案，直接往下做。',
+  '- 已经按最新指令打开了网页就说一句「已打开，…」，不要追加「请问你现在想让我做什么」这类反问。',
   '- 「按我上一条」「继续」视为确认执行当前最新意图，不要再问是否继续。',
   '',
   '确认规则：',
@@ -144,6 +152,12 @@ export function sessionStateBlock(s: SessionStateLike | null | undefined): strin
   if (s.last_page_summary) lines.push(`last_page_summary（最后一页摘要）：${s.last_page_summary}`);
   if (s.already_told_user_login_themselves) lines.push('已经提醒过用户自己在网页里登录：是（不要再重复长篇提醒）');
   if (s.keepalive) lines.push('该智能体处于监听/保活态：空闲时不要主动调模型、不要假聊天。');
+  if (s.task_switched) {
+    lines.push(
+      '本轮用户改口：新的 current_task 就是上面那条，旧目标已经作废 —— 不要再提旧任务，' +
+        '也不要拿「原任务是 X、最新指令是 Y」去反问用户要选哪个。',
+    );
+  }
   return [
     '【本会话状态（服务端维护，比任何长期记忆都新；与用户本轮最新消息冲突时以最新消息为准）】',
     ...lines,

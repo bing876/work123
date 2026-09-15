@@ -52,9 +52,10 @@ interface StateRow {
 
 const s = (v: string | null): string => (typeof v === 'string' ? v : '');
 
-function toState(conversationId: number, r: StateRow | undefined): ConversationState {
+function toState(conversationId: number, r: StateRow | undefined, taskSwitched = false): ConversationState {
   return {
     conversationId,
+    task_switched: taskSwitched,
     current_task: s(r?.current_task ?? null),
     latest_user_intent: s(r?.latest_user_intent ?? null),
     browser_confirmed: Boolean(r?.browser_confirmed),
@@ -102,6 +103,11 @@ export async function applyUserMessage(
   // 敏感操作按「本轮」算，不粘住：这轮没有就不带着上一轮的 true 走
   const sensitiveAction = looksLikeSensitiveAction(msg);
   const lastPageSummary = openedUrl ? `已打开 ${openedUrl}`.slice(0, 200) : cur.last_page_summary;
+  /**
+   * 本轮是否「改口」：不是继续语、原来已经有任务、且这句把任务换成了别的目标。
+   * 只在本轮内存里用（提示词里给模型一个「旧目标作废」的信号），不落库。
+   */
+  const taskSwitched = !cont && Boolean(msg) && Boolean(cur.current_task) && cur.current_task !== msg;
 
   const r = await pool.query<StateRow>(
     `UPDATE conversations
@@ -116,7 +122,7 @@ export async function applyUserMessage(
       RETURNING ${STATE_COLS}`,
     [conversationId, currentTask || null, msg || null, browserConfirmed, loginRequired, sensitiveAction, lastPageSummary || null],
   );
-  return toState(conversationId, r.rowCount === 1 ? r.rows[0] : undefined);
+  return toState(conversationId, r.rowCount === 1 ? r.rows[0] : undefined, taskSwitched);
 }
 
 /**

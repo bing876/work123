@@ -253,6 +253,12 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
        *   ⑤ 参考信息（记忆/档案/资料，全部标明可被当前指令覆盖）
        * 这样人设与长期记忆都压不住基座，也不会把第 13 步打回「确认后我开始操作」。
        */
+      /**
+       * 第 16 步 fixup（验收第 ② 条）：本轮只要 current_task 被换掉，就在状态块里明说
+       * 「旧目标作废」——模型最爱在这种情况下把旧任务搬回来，让用户在新旧目标之间二选一
+       * （实测：「请问你现在想让我做什么：继续在 YouTube 上操作，还是去抖店看订单数据？」）。
+       * task_switched 由 applyUserMessage 算好（不落库）。
+       */
       const systemParts = [
         systemPromptHead(agentCtx.agentName),
         agentCtx.personaBlock,
