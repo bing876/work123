@@ -36,19 +36,26 @@ const isDev = !app.isPackaged && Boolean(DEV_SERVER_URL);
 
 let mainWindow: BrowserWindow | null = null;
 
+/** 只允许 http(s) —— 其余协议（bytedance: / snssdk / itms-apps: / market: …）一律不进导航 */
+const isHttpUrl = (url: string): boolean => /^https?:\/\//i.test(url);
+
 /**
  * 内嵌页不允许创建新窗口：点击 target=_blank / window.open 时，改为让**同一个 guest**导航。
  *
- * 这是用户在右栏手点搜索结果、帮助链接时的必要行为；若只简单 deny，页面看起来就会“点了没反应”。
+ * 这是用户在卡片里手点搜索结果、帮助链接时的必要行为；若只简单 deny，页面看起来就会“点了没反应”。
  * 全程没有 BrowserWindow，也不会打开系统 Edge / Chrome。
+ *
+ * 第 17 步「拦住系统弹窗」：
+ *   - window.open / target=_blank 的非 http(s) 请求：直接忽略（不交给系统，不弹「获取打开此链接的应用」）；
+ *   - **整页跳转**到非 http(s)：用 will-navigate / will-redirect / will-frame-navigate 拦下并留在当前页。
+ *     抖音那类站点的「打开 App / bytedance://」按钮就是走这条路，不拦就会把当前页冲掉、
+ *     甚至弹出 Windows 的「获取打开此链接的应用」系统框。
  */
 app.on('web-contents-created', (_event, contents) => {
   if (contents.getType() !== 'webview') return;
 
   contents.setWindowOpenHandler(({ url }) => {
-    // 只放行 http(s)。about:blank / data: 之类的伪 URL 不能丢给 guest，
-    // 否则会把当前搜索页冲成空白页（表现为“点了链接反而白屏”）。
-    if (/^https?:\/\//i.test(url)) {
+    if (isHttpUrl(url)) {
       // 必须放到下一个 tick 再导航：在处理函数里同步 loadURL 会和这次 window.open
       // 的处理流程打架，导航经常被丢弃，表现就是“点了没反应”。
       setImmediate(() => {
@@ -59,9 +66,54 @@ app.on('web-contents-created', (_event, contents) => {
         }
       });
     } else {
-      console.warn('[webview] 忽略非 http(s) 的打开请求：', url);
+      console.warn('[webview] 已拦下非 http(s) 的 window.open（不弹系统框、不新开窗口）：', url);
     }
     return { action: 'deny' };
+  });
+
+  // 整页导航到自定义协议 → 取消，留在当前页
+  contents.on('will-navigate', (event, url) => {
+    if (isHttpUrl(url)) return;
+    event.preventDefault();
+    console.warn('[webview] 已拦截非 http(s) 跳转，留在当前页：', url);
+  });
+  // 3xx 重定向到自定义协议 → 同样取消
+  contents.on('will-redirect', (event, url) => {
+    if (isHttpUrl(url)) return;
+    event.preventDefault();
+    console.warn('[webview] 已拦截非 http(s) 重定向，留在当前页：', url);
+  });
+  // 子框架（iframe / 广告位）里的跳转也要拦，否则照样能唤起系统
+  contents.on('will-frame-navigate', (details: unknown) => {
+    const d = details as { url?: string; preventDefault?: () => void } | undefined;
+    const url = d?.url ?? '';
+    if (!url || isHttpUrl(url)) return;
+    d?.preventDefault?.();
+    console.warn('[webview] 已拦截子框架的非 http(s) 跳转：', url);
+  });
+
+  /**
+   * 第 17 步：让内嵌页更像普通 Chrome 桌面。
+   * 只做两件最小的事（不上整套指纹方案）：
+   *   1. UA 由 app.userAgentFallback 去掉 Electron/<版本> 与产品名 token（见文件末尾的设置）；
+   *   2. 页面里若没有 window.chrome，补一个空对象——不少站点的「是不是真 Chrome」检测就认这个。
+   */
+  contents.on('did-finish-load', () => {
+    if (contents.isDestroyed()) return;
+    void contents
+      .executeJavaScript(
+        `(() => {
+          try {
+            if (!window.chrome) {
+              Object.defineProperty(window, 'chrome', { value: {}, writable: true, configurable: true });
+            }
+          } catch (_) {}
+          return true;
+        })()`,
+      )
+      .catch(() => {
+        /* 页面脚本被禁之类的情况：不影响驾驶，忽略 */
+      });
   });
 });
 
@@ -102,7 +154,10 @@ function createMainWindow(): void {
 
   // 任何 window.open / 外链都交给系统浏览器，不在应用内开新窗口
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url);
+    // 第 17 步：只有 http(s) 才交给系统浏览器。自定义协议（bytedance: / market: …）
+    // 丢给 shell 会弹出 Windows 的「获取打开此链接的应用」——正是要拦掉的那个系统框。
+    if (isHttpUrl(url)) void shell.openExternal(url);
+    else console.warn('[main] 已拦下非 http(s) 的外链（不弹系统框）：', url);
     return { action: 'deny' };
   });
 
@@ -196,19 +251,28 @@ ipcMain.handle('workbench:task:start', () => startTask());
 ipcMain.handle('workbench:task:pause', () => pauseTask());
 // 第 7 步：有挂起的驾驶员任务时，「继续」= 重启 AI 循环（第一步仍是 read_page，按当前页决策，
 // 不重放旧动作）；没有则维持第 4 步 demo 语义。
+// 第 17 步：两路并行时「继续」= 把**所有**挂起的那几路一起重新发车（每路各读自己那张页）。
 ipcMain.handle('workbench:task:resume', () => {
   // 第 9 步：敏感等待中点「继续」= 手动兜底唤醒（和自动信号走同一条路）
-  if (sensitiveWaiters.length > 0) {
-    notifyResume();
+  if (anyLaneWaiting()) {
+    notifyAllResume();
     return getTaskState();
   }
-  return agentGoal ? startAgentLoop(agentGoal, false) : resumeTask();
+  const paused = [...pendingGoals.keys()];
+  if (paused.length > 0) {
+    for (const wcId of paused) {
+      const goal = pendingGoals.get(wcId);
+      if (goal) startAgentLoop(wcId, goal, false);
+    }
+    return getTaskState();
+  }
+  return resumeTask();
 });
 ipcMain.handle('workbench:task:reset', () => {
-  agentEpoch += 1; // 外部循环作废（下一个检查点退出）
-  agentGoal = null;
-  notifyResume();
-  pendingAnswers = [];
+  abortAllLanes();
+  notifyAllResume();
+  pendingGoals.clear();
+  pendingAnswers.clear();
   return resetTask();
 });
 ipcMain.handle('workbench:task:state', () => getTaskState());
@@ -219,50 +283,104 @@ ipcMain.handle('workbench:task:state', () => getTaskState());
 //   - 执行永远走现有 driver.ts；暂停由 driver 的 paused 闸 + 循环自查双保险；
 //   - API Key 不经过这里：它只在 apps/server/.env。
 // ---------------------------------------------------------------------------
-let agentEpoch = 0;
-// 第 9 步：敏感输入等待——loop 挂在 promise 上；自动恢复 watch / 手动继续 / 用户答复 都来唤醒
-let sensitiveWaiters: Array<() => void> = [];
-let stopSensitiveWatch: (() => void) | null = null;
-let holdNoteTimer: ReturnType<typeof setTimeout> | null = null;
-let pendingAnswers: string[] = [];
+/**
+ * 第 17 步：同时最多几路驾驶（= 最多几张活页）。
+ * 硬顶 2：多出来的开页请求在渲染层排队或顶掉最旧那张空闲页，主进程这里再兜一道。
+ */
+const MAX_LANES = 2;
 
-function notifyResume(): void {
-  stopSensitiveWatch?.();
-  stopSensitiveWatch = null;
-  if (holdNoteTimer) {
-    clearTimeout(holdNoteTimer);
-    holdNoteTimer = null;
-  }
-  const waiters = sensitiveWaiters;
-  sensitiveWaiters = [];
-  for (const resolve of waiters) resolve();
+/**
+ * 一路驾驶 = **一张内嵌页** + 一个目标 + 自己那一份循环状态。
+ *
+ * 第 16 步之前这些都是全局单例（agentEpoch / agentGoal / sensitiveWaiters …），
+ * 因为全窗口只有一张 webview。第 17 步要两路同时跑，就必须按 **guest webContents id** 拆开：
+ *   - 同一张页上的新指令 → 覆盖这一路的旧指令（第 16 步「最新指令优先」的忠实推广）；
+ *   - 不同页上的指令 → 互不打扰（第二句不会把第一张降级成不能动的占位）。
+ */
+interface Lane {
+  wcId: number;
+  goal: string;
+  /** 被作废（新指令顶掉 / 用户放下 / 登出）时置 true，循环在下一个检查点自己退出 */
+  aborted: boolean;
+  running: boolean;
+  /** 敏感输入等待：loop 挂在 promise 上；自动恢复 watch / 手动继续 / 用户答复 都来唤醒 */
+  waiters: Array<() => void>;
+  stopWatch: (() => void) | null;
+  holdTimer: ReturnType<typeof setTimeout> | null;
+  /** 这一路正在聊天里等用户答复（答复只喂给它，不串到别路） */
+  awaiting: boolean;
+  answers: string[];
 }
 
-/** 敏感等待态：前置窗口 + 聚焦内嵌页（字段本身 driver 已 focus）+ 挂自动恢复观察 */
-function sensitiveHold(): Promise<void> {
-  mainWindow?.show();
-  mainWindow?.focus();
-  sendToMainWindow('workbench:browser:focus'); // 渲染层：显示内嵌页并把焦点交给 webview
-  stopSensitiveWatch = startSensitiveAutoResume(() => notifyResume());
-  // 2 分钟还没动静：提示手动兜底，等待继续挂着（不算失败，只是没自动化）
-  holdNoteTimer = setTimeout(() => {
-    emitAgent({
-      kind: 'note',
-      level: 'info',
-      text: '没检测到页面变化。若你已完成输入并提交，点右侧「继续」即可恢复驾驶。',
-    });
-  }, 120_000);
-  return new Promise<void>((resolve) => {
-    sensitiveWaiters.push(resolve);
-  });
-}
-/** 非 null = 有一轮驾驶员任务挂着（done/failed/stop 后置 null；paused 时保留供「继续」） */
-let agentGoal: string | null = null;
+/** 正在跑的那几路 */
+const lanes = new Map<number, Lane>();
+/** 跑完一段但还没结束的那几路（ask_user / 暂停 / 步数上限）：留着目标等「继续」或答复 */
+const pendingGoals = new Map<number, string>();
+/** 用户答复按「哪张页」分开暂存 */
+const pendingAnswers = new Map<number, string[]>();
+
 let agentApiBase = 'http://127.0.0.1:8787';
 let agentJwt = '';
 
-function emitAgent(payload: AgentEventPayload): void {
-  sendToMainWindow('workbench:browser:agent', JSON.stringify(payload));
+function anyLaneWaiting(): boolean {
+  for (const lane of lanes.values()) if (lane.waiters.length > 0) return true;
+  return false;
+}
+
+/** 唤醒**这一路**挂着的等待（敏感输入 / 答复） */
+function notifyResume(lane: Lane): void {
+  if (lane.stopWatch) {
+    lane.stopWatch();
+    lane.stopWatch = null;
+  }
+  if (lane.holdTimer) {
+    clearTimeout(lane.holdTimer);
+    lane.holdTimer = null;
+  }
+  const waiters = lane.waiters;
+  lane.waiters = [];
+  for (const resolve of waiters) resolve();
+}
+
+function notifyAllResume(): void {
+  for (const lane of [...lanes.values()]) notifyResume(lane);
+}
+
+function abortAllLanes(): void {
+  for (const lane of [...lanes.values()]) {
+    lane.aborted = true;
+    lane.running = false;
+    notifyResume(lane);
+  }
+  lanes.clear();
+}
+
+/** 敏感等待态（第 9 步语义保留，第 17 步按路隔离）：前置窗口 + 聚焦**这一路那张页** + 挂自动恢复观察 */
+function sensitiveHold(lane: Lane): Promise<void> {
+  mainWindow?.show();
+  mainWindow?.focus();
+  // 渲染层：把焦点交给这一路那张页（两路并行时必须点名，不能瞎给）
+  sendToMainWindow('workbench:browser:focus', String(lane.wcId));
+  lane.stopWatch = startSensitiveAutoResume(() => notifyResume(lane), lane.wcId);
+  // 2 分钟还没动静：提示手动兜底，等待继续挂着（不算失败，只是没自动化）
+  lane.holdTimer = setTimeout(() => {
+    emitAgent({
+      kind: 'note',
+      level: 'info',
+      text: '没检测到页面变化。若你已完成输入并提交，点「继续」即可恢复驾驶。',
+    });
+  }, 120_000);
+  return new Promise<void>((resolve) => {
+    lane.waiters.push(resolve);
+  });
+}
+
+/**
+ * 第 17 步：事件里带上 wcId —— 两路可能属于不同智能体，
+ * 渲染层靠它把步摘要/问话/结论落回**发起时那个智能体**的聊天里，绝不串。
+ */
+function emitAgent(payload: AgentEventPayload, wcId?: number): void {
+  sendToMainWindow('workbench:browser:agent', JSON.stringify(wcId === undefined ? payload : { ...payload, wcId }));
 }
 
 async function agentPost<T>(path: string, body: unknown): Promise<T> {
@@ -287,25 +405,67 @@ async function agentPost<T>(path: string, body: unknown): Promise<T> {
   return data;
 }
 
-function startAgentLoop(goal: string, fresh: boolean): ReturnType<typeof getTaskState> {
-  const epoch = ++agentEpoch;
-  agentGoal = goal;
-  const state = takeoverRun(fresh ? `AI 驾驶中 · 任务：${goal.slice(0, 36)}` : `继续任务（先读当前页）：${goal.slice(0, 36)}`);
+/**
+ * 第 17 步：在某一张内嵌页上发车（或改道）。
+ *
+ * - 这张页上已经有一路在跑 → **最新指令优先**：旧循环作废，用新目标重发（第一步仍是 read_page）；
+ * - 这张页上没有 → 新起一路；已经满 2 路则拒绝（渲染层本该先顶掉/排队，这里只是兜底）；
+ * - 别路（别的页）**完全不动** —— 第二句不会把第一张降级成不能动的占位。
+ */
+function startAgentLoop(wcId: number, goal: string, fresh: boolean): ReturnType<typeof getTaskState> {
+  const prev = lanes.get(wcId);
+  if (prev) {
+    prev.aborted = true;
+    prev.running = false;
+    notifyResume(prev);
+  } else if (lanes.size >= MAX_LANES) {
+    emitAgent({
+      kind: 'note',
+      level: 'error',
+      text: `已经有 ${MAX_LANES} 路在跑了（硬顶 ${MAX_LANES} 张活页）。等一路停下来，或者先关掉一张卡片再让我开。`,
+    });
+    return getTaskState();
+  }
+
+  const lane: Lane = {
+    wcId,
+    goal,
+    aborted: false,
+    running: true,
+    waiters: [],
+    stopWatch: null,
+    holdTimer: null,
+    awaiting: false,
+    answers: pendingAnswers.get(wcId) ?? [],
+  };
+  pendingAnswers.delete(wcId);
+  pendingGoals.set(wcId, goal);
+  lanes.set(wcId, lane);
+
+  const detail = fresh
+    ? `AI 驾驶中 · 任务：${goal.slice(0, 36)}`
+    : `继续任务（先读当前页）：${goal.slice(0, 36)}`;
+  const state = takeoverRun(lanes.size > 1 ? `${lanes.size} 路驾驶中 · 本路任务：${goal.slice(0, 30)}` : detail);
+
   void runAgentLoop(goal, {
     nextAction: (body: { taskId: number | null; goal: string; stepsSummary: string[]; snapshot: PageSnapshot }) =>
       agentPost<AgentActionResponse>('/agent/next-action', body).then((r) => {
         if (!r || typeof (r.action as { action?: string })?.action !== 'string') throw new Error('大脑回了畸形 JSON');
         return r;
       }),
-    exec: (action) => drive(action),
+    // 第 17 步：动作一律打到**这一路自己的那张页**上（两路并行时绝不能盲选 guest）
+    exec: (action) => drive(action, wcId),
     readSnapshot: async () => {
-      const r = await drive({ action: 'read_page' });
+      const r = await drive({ action: 'read_page' }, wcId);
       if (!r.ok || !r.pageSnapshot) throw new Error(r.error ?? 'read_page 没拿到快照');
       return r.pageSnapshot;
     },
     isPaused: () => isDrivingPaused(),
-    aborted: () => epoch !== agentEpoch,
-    emit: emitAgent,
+    aborted: () => lane.aborted,
+    emit: (payload) => {
+      if (payload.kind === 'ask' || payload.kind === 'sensitive') lane.awaiting = true;
+      emitAgent(payload, wcId);
+    },
     phase: setExternalPhase,
     taskStart: async (g) => {
       try {
@@ -323,10 +483,11 @@ function startAgentLoop(goal: string, fresh: boolean): ReturnType<typeof getTask
       if (id === null) return;
       await agentPost('/agent/task/status', { taskId: id, status }).catch(() => undefined);
     },
-    sensitiveHold,
+    sensitiveHold: () => sensitiveHold(lane),
     takeAnswers: () => {
-      const list = pendingAnswers;
-      pendingAnswers = [];
+      const list = lane.answers;
+      lane.answers = [];
+      lane.awaiting = false;
       return list;
     },
     // 第 8 步：done 收尾（服务端整理文档 + unread=true + 调通知桩；这里失败不卡 done）
@@ -342,29 +503,63 @@ function startAgentLoop(goal: string, fresh: boolean): ReturnType<typeof getTask
     },
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   })
-    .then((reason) => {
-      if (epoch !== agentEpoch) return; // 已被新任务/复位顶掉，别动全局
-      if (reason === 'done' || reason === 'read_failed' || reason === 'brain_failed') agentGoal = null;
-      // paused / ask_user / stuck / budget：留着 agentGoal，「继续」从这里重启
-      console.log(`[agent] 循环结束：${reason}`);
-    })
+    .then((reason) => finishLane(lane, reason))
     .catch((err) => {
       // 循环本体不抛穿（内部都 catch 了）；真到这就是编程错误，也得说人话而不是崩
       console.error('[agent] 循环异常：', err);
-      emitAgent({ kind: 'note', level: 'error', text: `驾驶员内部错误：${(err as Error).message}` });
+      emitAgent({ kind: 'note', level: 'error', text: `驾驶员内部错误：${(err as Error).message}` }, wcId);
       setExternalPhase('failed', `驾驶员内部错误 — ${(err as Error).message}`);
-      agentGoal = null;
+      finishLane(lane, 'brain_failed');
     });
   return state;
 }
 
-ipcMain.handle('workbench:agent:start', (_event, goal: unknown, apiBase: unknown, token: unknown) => {
-  const g = typeof goal === 'string' ? goal.trim().slice(0, 200) : '';
-  if (!g) return getTaskState();
-  if (typeof apiBase === 'string' && apiBase) agentApiBase = apiBase;
-  if (typeof token === 'string') agentJwt = token; // 只存内存；绝不 console
-  return startAgentLoop(g, true);
-});
+/** 一路循环收尾：从运行表里摘掉，并按剩余路数决定全局状态机怎么显示 */
+function finishLane(lane: Lane, reason: string): void {
+  lane.running = false;
+  notifyResume(lane);
+  if (lanes.get(lane.wcId) === lane) lanes.delete(lane.wcId);
+  console.log(`[agent] 第 ${lane.wcId} 路循环结束：${reason}`);
+  if (lane.aborted) {
+    pendingGoals.delete(lane.wcId); // 被新指令顶掉：旧目标不再提起
+    return;
+  }
+  if (reason === 'done' || reason === 'read_failed' || reason === 'brain_failed') {
+    pendingGoals.delete(lane.wcId);
+  } else {
+    // paused / ask_user / stuck / budget：留着目标等「继续」或用户答复
+    pendingGoals.set(lane.wcId, lane.goal);
+  }
+  if (lanes.size > 0) {
+    setExternalPhase('running', `${lanes.size} 路仍在驾驶中（另一路已停：${reason}）`);
+    return;
+  }
+  if (reason === 'done') setExternalPhase('done', `完成 — ${lane.goal.slice(0, 40)}`);
+  else if (reason === 'paused' || reason === 'ask_user' || reason === 'stuck' || reason === 'budget') {
+    setExternalPhase('paused', `等你的下一步：${lane.goal.slice(0, 30)}`);
+  } else setExternalPhase('failed', `驾驶员已停止（${reason}）`);
+}
+
+ipcMain.handle(
+  'workbench:agent:start',
+  (_event, goal: unknown, apiBase: unknown, token: unknown, targetRaw: unknown) => {
+    const g = typeof goal === 'string' ? goal.trim().slice(0, 200) : '';
+    if (!g) return getTaskState();
+    // 第 17 步：两路并行时必须点名「驾驶哪一张页」——不点名就宁可不开车，
+    // 也绝不让主进程自己瞎挑一张（那会把动作打到另一路正在跑的页面上）。
+    const wcId = Number(targetRaw);
+    if (!Number.isInteger(wcId)) {
+      emitAgent({ kind: 'note', level: 'error', text: '这一路没有指定要驾驶哪张内嵌页，没有发车。' });
+      return getTaskState();
+    }
+    if (typeof apiBase === 'string' && apiBase) agentApiBase = apiBase;
+    if (typeof token === 'string') agentJwt = token; // 只存内存；绝不 console
+    return startAgentLoop(wcId, g, true);
+  },
+);
+
+/** 第 17 步：当前正在驾驶的 webview guest id 列表（渲染层开第 3 张页时用来挑「没在跑的那张」） */
+ipcMain.handle('workbench:agent:lanes', () => [...lanes.keys()]);
 
 // 第 8 步：结果文档下载。渲染层把 apiBase+token 传进来（刷新后主进程可能没会话）；
 // 拿到 Markdown 后：先本地脱敏兜底，再弹系统“保存为”对话框（只有 1 个窗口，不新增窗）。
@@ -405,24 +600,40 @@ ipcMain.handle('workbench:doc:download', async (_event, taskIdRaw: unknown, apiB
 
 // 第 9 步：用户对「补资料」提问的回答。只许普通资料（模型层+执行层双闸挡敏感值）；
 // 只进内存与步摘要，不进 messages/memories。等待中收到答复 = 自动唤醒继续。
-ipcMain.handle('workbench:agent:answer', (_event, text: unknown) => {
+// 第 17 步：两路并行时答复只喂给**提问的那一路**（带 targetWebContentsId），不串到别路。
+ipcMain.handle('workbench:agent:answer', (_event, text: unknown, targetRaw: unknown) => {
   const t = typeof text === 'string' ? text.trim().slice(0, 200) : '';
   if (!t) return getTaskState();
-  pendingAnswers.push(t);
-  if (sensitiveWaiters.length > 0) {
-    notifyResume();
-    return getTaskState();
+  const asked = Number(targetRaw);
+  const targets = new Set<number>();
+  if (Number.isInteger(asked)) {
+    targets.add(asked);
+  } else {
+    // 没点名：优先给正在等答复的那几路；一路都没有就按挂起的目标猜
+    for (const lane of lanes.values()) if (lane.awaiting) targets.add(lane.wcId);
+    if (targets.size === 0) for (const wcId of pendingGoals.keys()) targets.add(wcId);
   }
-  if (agentGoal) return startAgentLoop(agentGoal, false); // 上一轮以 ask_user 停了：带答复重启（仍先读当前页）
+  for (const wcId of targets) {
+    const lane = lanes.get(wcId);
+    if (lane && lane.awaiting && lane.waiters.length > 0) {
+      lane.answers.push(t); // 循环还挂在敏感等待上：喂进去 + 唤醒
+      notifyResume(lane);
+      continue;
+    }
+    const goal = lane?.goal ?? pendingGoals.get(wcId);
+    if (!goal) continue;
+    pendingAnswers.set(wcId, [...(pendingAnswers.get(wcId) ?? []), t]);
+    startAgentLoop(wcId, goal, false); // 上一轮以 ask_user 停了：带答复重启（仍先读当前页）
+  }
   return getTaskState();
 });
 
 ipcMain.handle('workbench:agent:stop', () => {
-  agentEpoch += 1;
-  agentGoal = null;
+  abortAllLanes();
   agentJwt = '';
-  notifyResume(); // 别让挂在敏感等待上的循环僵住
-  pendingAnswers = [];
+  notifyAllResume(); // 别让挂在敏感等待上的循环僵住
+  pendingGoals.clear();
+  pendingAnswers.clear();
   emitAgent({ kind: 'note', level: 'info', text: '驾驶员循环已中止（登出/停止）。' });
 });
 
@@ -430,14 +641,32 @@ ipcMain.handle('workbench:agent:stop', () => {
  * 第 16 步：**放下**当前任务但保留登录凭证 —— 用户改口时用。
  *
  * 场景：正在做任务 A（例如看旧店铺后台），用户直接说「打开油管」。
- * 最新指令优先级最高：旧循环立刻作废（epoch 自增），旧目标清空（不会被「继续」重新捡起来），
+ * 最新指令优先级最高：旧循环立刻作废，旧目标清空（不会被「继续」重新捡起来），
  * 状态机回 idle。凭证保留，所以新任务不用重新登录。
+ *
+ * 第 17 步：带 targetWebContentsId 时**只放下那一路**（那一张页），
+ * 另一路在别的页上继续跑 —— 这正是「第二句不会把第一张废掉」。
+ * 不带则放下全部（登出 / 停止）。
  */
-ipcMain.handle('workbench:agent:drop', () => {
-  agentEpoch += 1;
-  agentGoal = null;
-  notifyResume();
-  pendingAnswers = [];
+ipcMain.handle('workbench:agent:drop', (_event, targetRaw: unknown) => {
+  const wcId = Number(targetRaw);
+  if (Number.isInteger(wcId)) {
+    const lane = lanes.get(wcId);
+    if (lane) {
+      lane.aborted = true;
+      lane.running = false;
+      notifyResume(lane);
+      lanes.delete(wcId);
+    }
+    pendingGoals.delete(wcId);
+    pendingAnswers.delete(wcId);
+    if (lanes.size === 0) resetTask();
+    return;
+  }
+  abortAllLanes();
+  notifyAllResume();
+  pendingGoals.clear();
+  pendingAnswers.clear();
   resetTask();
   emitAgent({ kind: 'note', level: 'info', text: '按你的最新指令：已经放下上一件事（旧任务不再提起）。' });
 });
@@ -458,6 +687,23 @@ if (!gotTheLock) {
   });
 
   void app.whenReady().then(() => {
+    /**
+     * 第 17 步：让内嵌页的 UA 像**普通 Chrome 桌面**——只去掉 `Electron/<版本>` 与产品名 token。
+     * 目的很窄：少一眼被站点认成「内嵌壳」。明确**不做**指纹浏览器那一套（不改 Canvas/WebGL/字体…）。
+     */
+    const rawUa = app.userAgentFallback || '';
+    if (rawUa) {
+      const clean = rawUa
+        .replace(/\sElectron\/[^\s]+/g, '')
+        .replace(/\s(ai-workbench|AI\s*工作台)\/[^\s]+/gi, '')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+      if (clean && clean !== rawUa) {
+        app.userAgentFallback = clean;
+        console.log('[main] 内嵌页 UA 已去掉 Electron token（贴近普通 Chrome 桌面）。');
+      }
+    }
+
     createMainWindow();
 
     // macOS：点 Dock 图标且无窗口时重建

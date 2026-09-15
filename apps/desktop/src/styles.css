@@ -120,6 +120,21 @@ body {
   word-break: break-word;
 }
 
+/* ---- 第 17 步：任务结果行（右栏整栏不渲染了，结果挂这里）---- */
+.taskResult {
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  border-radius: 8px;
+  background: #f1f5f9;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.taskResult .buttons-row {
+  margin-top: 4px;
+}
+
 .avatar {
   width: 40px;
   height: 40px;
@@ -291,67 +306,101 @@ body {
   flex-wrap: wrap;
 }
 
-/* ---------- 第 13 步：聊天里的浏览器卡片 ---------- */
+/* ---------- 第 17 步：中栏浏览器区（顶栏 tab + URL 栏 + 页，最多 2 张活页） ---------- */
 
 /*
- * 卡片的 React 外层（消息列表的 flex 子项）。
- * 关键：.chat 是「高度确定的 overflow:auto 纵向 flex」，内容超高时默认 flex-shrink:1
- * 会把子项**压扁**而不是产生滚动；这里必须 flex-shrink:0 + 保留自动最小尺寸，
- * 否则整张卡片会被压成一条线（实测只剩 2px 边框）。
+ * 这一块是 .middle（纵向 flex）的**兄弟**节点，不在 .chat 的滚动区里。
+ * 好处：切智能体时它不会被卸载，正在跑的那两路驾驶不会断。
+ * 高度写死（不参与 flex 伸缩），免得被聊天内容挤成一条线。
  */
-.chat__card {
-  display: flex;
-  flex-direction: column;
+.browserPanel {
   flex: 0 0 auto;
-  min-height: auto;
-}
-.chat__card--expanded {
-  flex: 1 1 auto;
-  min-height: 60vh;
-}
-
-.browserCard {
-  align-self: stretch;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
-  margin: 4px 0;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: #fff;
-  box-shadow: 0 1px 3px rgb(0 0 0 / 6%);
+  border-bottom: 1px solid var(--border);
+  background: #f7f7f8;
 }
 
-/* 展开态：卡片本身也跟着长，中栏变成「浏览器为主」 */
-.browserCard--expanded {
-  flex: 1 1 auto;
-  min-height: 60vh;
-}
-
-.browserCard__bar {
+/* ---- 顶栏：一张页一个 tab（最多 2 个）+ 「＋」+ 展开/收起 ---- */
+.browserPanel__tabs {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   padding: 6px 8px;
-  border-bottom: 1px solid var(--border);
-  background: #fafafa;
 }
 
-.browserCard__url {
-  flex: 1 1 auto;
-  min-width: 0;
+.browserTab {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 190px;
+  padding: 3px 4px 3px 6px;
+  border: 1px solid #dcdcdc;
+  border-radius: 8px 8px 0 0;
+  background: #efeff1;
+}
+.browserTab--on {
+  background: #fff;
+  border-color: var(--accent);
+}
+
+.browserTab__label {
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  max-width: 140px;
+  padding: 0;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12px;
-  color: var(--text-weak);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+/* 驾驶员正在这张页上操作 */
+.browserTab__run {
+  color: #0a7;
+  font-size: 10px;
 }
 
-/* 卡片上只有「展开 / 收起」一个按钮——不新开窗口、不做多标签 */
-.browserCard__btn {
+.browserTab__x {
+  border: none;
+  background: transparent;
+  color: var(--text-weak);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 3px;
+  border-radius: 4px;
+}
+.browserTab__x:hover {
+  background: #e5e5e6;
+  color: #b91c1c;
+}
+
+.browserTab__add {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  border: 1px solid #dcdcdc;
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+.browserTab__add:hover {
+  background: #f0f0f1;
+}
+
+.browserPanel__toggle {
+  margin-left: auto;
   flex: 0 0 auto;
   padding: 4px 10px;
-  font-size: 12px;
   font: inherit;
   font-size: 12px;
   color: var(--text);
@@ -360,47 +409,107 @@ body {
   border-radius: 6px;
   cursor: pointer;
 }
-.browserCard__btn:hover {
-  background: #f6f7f9;
+.browserPanel__toggle:hover {
+  background: #f0f0f1;
+}
+
+/* ---- URL 栏 ---- */
+.browserPanel__urlbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 6px;
+}
+.browserPanel__scheme {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-weak);
+}
+.browserPanel__url {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 5px 9px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: #fff;
+  border: 1px solid #dcdcdc;
+  border-radius: 999px;
+  outline: none;
+}
+.browserPanel__url:focus {
+  border-color: var(--accent);
+}
+.browserPanel__count {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-weak);
 }
 
 /*
- * 页面舞台：收起时按 16:10 等比例给高度，展开时吃掉卡片剩余高度。
- * <webview> 是自定义元素、默认没尺寸，必须靠这里的绝对定位把宽高钉死。
+ * 舞台：**所有** tab 的 webview 都在这里铺满，只靠 z-index 分层。
+ * 切到后面那张必须仍然活着、仍然有真实尺寸——尺寸为 0 时驾驶在它上面点不中任何元素。
  */
-.browserCard__stage {
+.browserPanel__stage {
   position: relative;
   width: 100%;
-  aspect-ratio: 16 / 10;
   background: #fff;
+  /* 收起也留一块看得见的页面（不是 2px） */
+  height: 180px;
 }
-.browserCard--expanded .browserCard__stage {
-  aspect-ratio: auto;
-  flex: 1 1 auto;
-  min-height: 0;
+.browserPanel--expanded .browserPanel__stage {
+  height: min(56vh, 620px);
+}
+
+.browserPanel__empty {
+  padding: 12px;
+  color: var(--text-weak);
 }
 
 /*
- * 注意：不要在 .browserCard__view 上覆盖成 display:block —— Electron 的 <webview>
- * 内部靠 flex 才能把 guest 视图撑开，写成 block 会让 guest 卡在 150px 高（实测）。
+ * 注意：不要把 <webview> 设成 display:block —— Electron 的 webview 靠 flex 才能把
+ * guest 视图撑开，写成 block 会让 guest 卡在 150px 高（实测）。
  */
-.browserCard__view {
+.browserPanel__view {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
   display: flex;
   border: 0;
+  z-index: 1;
+}
+/* 当前那张放到最前面（切换 tab = 换 z-index，不新开 BrowserWindow） */
+.browserPanel__view--on {
+  z-index: 2;
 }
 
-/* 被新卡片顶下去的旧卡片只留一行说明（同一时刻只允许一个 <webview>） */
-.browserCardMoved {
-  padding: 6px 10px;
-  font-size: 12px;
+/* ---- 聊天里那一行「网页」记录（可点：把那张页切到前面；网页本体在上面浏览器区）---- */
+.browserLine {
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 70%;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+.browserLine:hover {
+  background: #f6f7f9;
+}
+.browserLine--dead {
   color: var(--text-weak);
-  border: 1px dashed var(--border);
-  border-radius: 8px;
-  background: #fafafa;
+  border-style: dashed;
+  cursor: default;
+}
+.browserLine__txt {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

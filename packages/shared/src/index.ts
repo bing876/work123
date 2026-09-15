@@ -130,6 +130,12 @@ export interface DriveResult {
   pageSnapshot?: PageSnapshot;
   /** 失败原因（可读文本，直接贴给用户看） */
   error?: string;
+  /**
+   * 第 17 步：动作执行了，但页面看不出任何变化（地址/标题/节点数都没动）。
+   * 用来兑现「点了 2~3 次仍无变化 → 给原因 + 一个下一步」这条，
+   * 不是失败（ok 仍为 true），只是给驾驶循环一个「这次多半没点中」的信号。
+   */
+  noChange?: boolean;
   /** screenshot 动作的产物：data URL，只放内存，不落库 */
   screenshot?: string;
 }
@@ -183,19 +189,38 @@ export interface WorkbenchBridge {
    * @param goal   用户确认过的任务目标
    * @param apiBase 后端地址（http://127.0.0.1:8787）
    * @param token  第 5 步的 JWT——只递给主进程用于请求头，绝不打印
+   * @param targetWebContentsId 第 17 步：这次驾驶**哪一张**内嵌页的 guest id。
+   *        两路并行时主进程按它分路——同一张页上的新指令覆盖旧指令，
+   *        不同页上的指令互不干扰（第二句不会把第一张废掉）。
    */
-  agentStart: (goal: string, apiBase: string, token: string) => Promise<TaskState>;
-  /** 中止驾驶员循环并清 token（退出登录时也要调） */
+  agentStart: (
+    goal: string,
+    apiBase: string,
+    token: string,
+    targetWebContentsId?: number,
+  ) => Promise<TaskState>;
+  /** 中止**所有**驾驶员循环并清 token（退出登录时也要调） */
   agentStop: () => Promise<void>;
   /**
    * 第 16 步：**放下**当前驾驶员任务但保留登录凭证。
    * 用户改口（例如「打开油管」）时用它：旧任务立刻作废，不再被「继续」重启，
    * 也不会在下一轮把旧目标重新捡起来。
+   *
+   * 第 17 步：带 targetWebContentsId 时只放下**那一路**（那张页），别路的任务照跑；
+   * 不带则放下全部（登出 / 停止）。
    */
-  agentDrop: () => Promise<void>;
+  agentDrop: (targetWebContentsId?: number) => Promise<void>;
+  /**
+   * 第 17 步：当前正在驾驶的 webview guest id 列表。
+   * 开第 3 张页时用它挑「没在跑的那张」顶掉——跑着的那张不能动。
+   */
+  agentLanes: () => Promise<number[]>;
 
-  /** 第 9 步：把用户对「补资料」提问的回答交给主进程（仅普通资料；敏感值别走这里） */
-  agentAnswer: (text: string) => Promise<void>;
+  /**
+   * 第 9 步：把用户对「补资料」提问的回答交给主进程（仅普通资料；敏感值别走这里）。
+   * 第 17 步：带 targetWebContentsId 时只喂给**那一路**（那张页），别路不串。
+   */
+  agentAnswer: (text: string, targetWebContentsId?: number) => Promise<void>;
 
   /**
    * 第 8 步：下载任务结果文档（.md）。走主进程存盘对话框；内容里由主进程再做一道

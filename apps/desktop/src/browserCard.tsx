@@ -1,4 +1,4 @@
-import { forwardRef } from 'react';
+import { useEffect, useState } from 'react';
 
 /**
  * 第 13 步「聊天内浏览器卡片」：
@@ -179,45 +179,206 @@ export function detectBrowseIntent(raw: string): string | null {
   return t;
 }
 
-interface BrowserCardProps {
+// ---------------------------------------------------------------------------
+// 第 17 步：中栏「浏览器区」（顶栏 tab + URL 栏 + 页）
+//
+// 硬约束（本步钉死）：
+//   - 仍是 Electron 的 <webview>，**不套 Edge / Chrome / CEF，不用 Playwright**；
+//   - 同一时刻最多 2 张**活着的** <webview>（都是 partition=persist:workbench-browser）；
+//   - 切 tab = 把对应那张 webview 放到最前面（z-index），**不为每个 tab 开 BrowserWindow**；
+//   - 收起不是把页面藏没：舞台仍留一块高度（webview 尺寸为 0 会让驾驶点不中任何元素）。
+// ---------------------------------------------------------------------------
+
+/** 一张活页在前端的样子 */
+export interface BrowserTabView {
+  id: number;
+  /** 初次加载的地址：**建好之后不再变**（React 反复改 src 会让 webview 重新加载） */
+  bootUrl: string;
+  /** 当前地址（跟着页面自己走，只用于 URL 栏显示） */
   url: string;
-  expanded: boolean;
-  onToggle: () => void;
+  /** 标签文字：优先页面标题，拿不到就用域名 */
+  title: string;
+}
+
+/** 取主机名（用于标签兜底显示、以及判断「是不是同一个站」） */
+export function hostLabel(url: string): string {
+  try {
+    return new URL(url).host.replace(/^www\./, '');
+  } catch {
+    return url.replace(/^https?:\/\//i, '').split('/')[0] || url;
+  }
 }
 
 /**
- * 聊天里的浏览器卡片。
- *
- * 关键点：
- *   - 里面是**真的 <webview>**，不是截图、不是 iframe 占位；
- *   - 卡片头部只有「展开 / 收起」一个按钮，不新开窗口、不做多标签；
- *   - 收起时 webview 仍然挂载（只是高度按 16:10 收着），不重新加载网页；
- *   - 页面永远 pointer-events:auto：用户在里面点击/打字都算操作网页，不算发聊天。
+ * 是不是同一个站（同一主机）。
+ * 用途：用户对同一个站点再说一次「打开百度搜天气」时**复用**那张页并改道，
+ * 而不是又开一张——这也让第 16 步「最新指令优先」在同站场景下自然成立。
  */
-export const BrowserCard = forwardRef<HTMLElement, BrowserCardProps>(function BrowserCard(
-  { url, expanded, onToggle },
-  ref,
-) {
+export function sameSite(a: string, b: string): boolean {
+  const h = (u: string): string => {
+    try {
+      return new URL(u).host.toLowerCase();
+    } catch {
+      return '';
+    }
+  };
+  const ha = h(a);
+  const hb = h(b);
+  return Boolean(ha) && ha === hb;
+}
+
+/** 只允许 http(s)：其它协议（bytedance: / snssdk / market: …）不进导航，也不弹系统框 */
+export function toHttpUrl(raw: string): string | null {
+  const t = (raw ?? '').trim();
+  if (!t) return null;
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(t) ? t : `https://${t}`;
+  return /^https?:\/\//i.test(withScheme) ? withScheme : null;
+}
+
+interface BrowserPanelProps {
+  tabs: BrowserTabView[];
+  activeId: number | null;
+  expanded: boolean;
+  /** 正在被驾驶员操作的那几张（tabId）——标签上点一个小圆点，一眼看出哪两张在跑 */
+  drivingIds: number[];
+  onActivate: (id: number) => void;
+  onClose: (id: number) => void;
+  onNewTab: () => void;
+  onToggle: () => void;
+  onNavigate: (id: number, url: string) => void;
+  registerRef: (id: number, el: HTMLElement | null) => void;
+  /** 页面自己改了地址/标题（点链接、SPA 跳转）时回报，用来更新标签与 URL 栏 */
+  onPageInfo: (id: number, info: { url?: string; title?: string }) => void;
+}
+
+/**
+ * 中栏浏览器区。它挂在窗口级（不在某一条聊天消息里）——
+ * 这样切智能体去聊别的时，正在跑的两路驾驶不会因为 webview 被卸载而断掉。
+ */
+export function BrowserPanel({
+  tabs,
+  activeId,
+  expanded,
+  drivingIds,
+  onActivate,
+  onClose,
+  onNewTab,
+  onToggle,
+  onNavigate,
+  registerRef,
+  onPageInfo,
+}: BrowserPanelProps) {
+  const active = tabs.find((t) => t.id === activeId) ?? tabs[0] ?? null;
+  /** URL 栏的草稿：用户正在编辑时不跟页面走，免得打字打到一半被覆盖 */
+  const [draft, setDraft] = useState('');
+  const [editing, setEditing] = useState(false);
+
+  useEffect(() => {
+    if (editing) return;
+    setDraft(active?.url ?? '');
+  }, [active?.url, active?.id, editing]);
+
+  /**
+   * 给 webview 挂「页面自己动了」的监听（React 不会告诉我们这些）：
+   * 点站内链接、SPA 路由跳转、标题变化都要反映到标签和 URL 栏上。
+   * 元素卸载时把监听摘掉（用元素上的私有字段记住卸载函数）。
+   */
+  const bindRef = (id: number, el: HTMLElement | null): void => {
+    registerRef(id, el);
+    if (!el) return;
+    const anyEl = el as HTMLElement & { __wbOff?: () => void };
+    anyEl.__wbOff?.();
+    const onTitle = (e: Event): void => {
+      const title = String((e as Event & { title?: string }).title ?? '');
+      if (title) onPageInfo(id, { title });
+    };
+    const onNav = (e: Event): void => {
+      const url = String((e as Event & { url?: string }).url ?? '');
+      if (url) onPageInfo(id, { url });
+    };
+    el.addEventListener('page-title-updated', onTitle);
+    el.addEventListener('did-navigate', onNav);
+    el.addEventListener('did-navigate-in-page', onNav);
+    anyEl.__wbOff = () => {
+      el.removeEventListener('page-title-updated', onTitle);
+      el.removeEventListener('did-navigate', onNav);
+      el.removeEventListener('did-navigate-in-page', onNav);
+    };
+  };
+
   return (
-    <div className={expanded ? 'browserCard browserCard--expanded' : 'browserCard'}>
-      <div className="browserCard__bar">
-        <span className="browserCard__url" title={url}>
-          {url}
-        </span>
-        <button type="button" className="browserCard__btn" onClick={onToggle}>
+    <div className={expanded ? 'browserPanel browserPanel--expanded' : 'browserPanel'}>
+      {/* 顶栏：一张页一个 tab（最多 2 个）+ 「＋」+ 展开/收起 */}
+      <div className="browserPanel__tabs" role="tablist" aria-label="打开的网页">
+        {tabs.map((t) => (
+          <div key={t.id} className={t.id === active?.id ? 'browserTab browserTab--on' : 'browserTab'}>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={t.id === active?.id}
+              className="browserTab__label"
+              title={t.url}
+              onClick={() => onActivate(t.id)}
+            >
+              {drivingIds.includes(t.id) && <span className="browserTab__run" title="驾驶员正在这张页上操作">●</span>}
+              {t.title || hostLabel(t.url) || t.bootUrl}
+            </button>
+            <button type="button" className="browserTab__x" aria-label="关闭这张页" onClick={() => onClose(t.id)}>
+              ✕
+            </button>
+          </div>
+        ))}
+        <button type="button" className="browserTab__add" title="新开一张（最多 2 张同时活着）" onClick={onNewTab}>
+          ＋
+        </button>
+        <button type="button" className="browserPanel__toggle" onClick={onToggle}>
           {expanded ? '收起' : '展开'}
         </button>
       </div>
-      <div className="browserCard__stage">
-        <webview
-          ref={ref as never}
-          className="browserCard__view"
-          src={url}
-          partition="persist:workbench-browser"
-          // target=_blank 由主进程拦下并让同一个 guest 导航，不会创建 BrowserWindow
-          allowpopups
+
+      {/* URL 栏：跟着当前 tab 走；改了回车即导航（只允许 http/https） */}
+      <div className="browserPanel__urlbar">
+        <span className="browserPanel__scheme" aria-hidden="true">
+          {/^https:/i.test(active?.url ?? '') ? '🔒' : '🌐'}
+        </span>
+        <input
+          className="browserPanel__url"
+          value={draft}
+          spellCheck={false}
+          placeholder="输入网址后回车（只允许 http / https）"
+          onFocus={() => setEditing(true)}
+          onBlur={() => setEditing(false)}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter' || !active) return;
+            const next = toHttpUrl(draft);
+            if (next) onNavigate(active.id, next);
+            setEditing(false);
+            (e.target as HTMLInputElement).blur();
+          }}
         />
+        <span className="browserPanel__count">{tabs.length}/2 张活页</span>
+      </div>
+
+      {/*
+        舞台：**所有** tab 的 webview 都挂在这里（绝对定位铺满，只靠 z-index 分层）。
+        为什么要都挂着：第 17 步要求「两张页都能动」——被切到后面的那张必须仍然活着、
+        仍然有真实尺寸，否则驾驶在它上面点不中任何元素（rect 会变成 0）。
+      */}
+      <div className="browserPanel__stage">
+        {tabs.length === 0 && <div className="browserPanel__empty small">还没有打开网页</div>}
+        {tabs.map((t) => (
+          <webview
+            key={t.id}
+            ref={(el) => bindRef(t.id, el as unknown as HTMLElement | null)}
+            className={t.id === active?.id ? 'browserPanel__view browserPanel__view--on' : 'browserPanel__view'}
+            src={t.bootUrl}
+            partition="persist:workbench-browser"
+            // target=_blank 由主进程拦下并让同一个 guest 导航，不会创建 BrowserWindow
+            allowpopups
+          />
+        ))}
       </div>
     </div>
   );
-});
+}

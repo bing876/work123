@@ -136,6 +136,8 @@ export async function runAgentLoop(goal: string, hooks: AgentLoopHooks): Promise
     taskId = null; // 记账失败不拦驾驶
   }
   let fails = 0;
+  /** 第 17 步：连着几次「点了但页面没动」——到 3 次就不再盲点，给原因 + 一个下一步 */
+  let staleClicks = 0;
   for (let step = 1; step <= MAX_AGENT_STEPS; step += 1) {
     if (hooks.aborted()) return 'aborted';
     if (hooks.isPaused()) {
@@ -251,6 +253,33 @@ export async function runAgentLoop(goal: string, hooks: AgentLoopHooks): Promise
     hooks.emit({ kind: 'step', step, summary, ok: res.ok });
     await hooks.taskStep(taskId, summary, res.ok).catch(() => undefined);
     if (res.ok) {
+      if (res.noChange) {
+        // 第 17 步：动作执行了，但地址/标题/节点数都没动 —— 大概率是没点中、或被弹层挡住、
+        // 或这颗按钮本来就只为了唤起手机 App。第 3 次不再盲点，按第 16 步的话术给「原因 + 下一步」。
+        staleClicks += 1;
+        if (staleClicks === FAILS_BEFORE_ASK) {
+          hooks.emit({
+            kind: 'note',
+            level: 'info',
+            text: '点了两次页面都没有可见变化：可能没点中、被弹层挡住，或者这颗按钮只是用来唤起手机 App。我再试一次，不行就停下来问你。',
+          });
+        }
+        if (staleClicks >= 3) {
+          hooks.emit({
+            kind: 'ask',
+            reason: 'no_page_change',
+            question:
+              `连着 3 次点了页面都没动静（最后一次：${summary.replace(/\s+/g, ' ').slice(0, 200)}）。我不再盲点了，给你两条路：` +
+              '① 这一页可能需要你先登录，或者这颗按钮只是「打开手机 App」（网页里点不了）——那就在卡片里换一个能在网页里完成的操作；' +
+              '② 把按钮上的准确文字告诉我，我再试一次；或者你自己在卡片里点一下，然后点「继续」——我会先读你当前停留的页面再接着做。',
+          });
+          hooks.phase('paused', '连点三次页面无变化，等用户指导');
+          await hooks.taskStatus(taskId, 'paused').catch(() => undefined);
+          return 'stuck';
+        }
+        continue;
+      }
+      staleClicks = 0;
       fails = 0;
       continue;
     }
@@ -269,6 +298,7 @@ export async function runAgentLoop(goal: string, hooks: AgentLoopHooks): Promise
         await hooks.taskStep(taskId, fbSummary, fallback.ok).catch(() => undefined);
         if (fallback.ok) {
           fails = 0;
+          staleClicks = 0;
           continue;
         }
         res = fallback;

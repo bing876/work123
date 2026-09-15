@@ -286,13 +286,17 @@ function findWebviewGuest(): Target | null {
 
 /**
  * 解析驾驶目标。
- * 渲染层传来的 id 是首选（精确、不受“有多个 webview”影响），
- * 拿不到或已失效时回退到自动寻找内嵌 webview。
+ *
+ * 第 17 步：同时最多 2 张活页，所以**传了 id 就必须用那张**——
+ * 以前 id 失效会静默退回「随便挑第一个 webview」，两路并行时那等于把动作打到别人那张页上
+ * （一路在抖音搜索、另一路却在 B 站页面上点），是必须 fail-fast 的。
+ * 只有调用方**根本没给 id**（第 4 步的 demo 循环）才允许自动寻找。
  */
 function resolveTarget(id?: number): Target {
   if (typeof id === 'number') {
     const wc = webContents.fromId(id);
     if (wc && !wc.isDestroyed() && wc.getType() === 'webview') return wc;
+    throw new Error(`指定的内嵌页已经不在了（webContents ${id} 已关闭或不是内嵌页），这一路停止。`);
   }
   const auto = findWebviewGuest();
   if (!auto) {
@@ -353,7 +357,7 @@ function sleep(ms: number): Promise<void> {
 // ---------------------------------------------------------------------------
 
 const PAGE_HELPERS = `(() => {
-  if (window.__wbHelper && window.__wbHelper.__v === 7) return;
+  if (window.__wbHelper && window.__wbHelper.__v === 9) return;
   const visible = (el) => {
     if (!el) return false;
     const r = el.getBoundingClientRect();
@@ -411,6 +415,16 @@ const PAGE_HELPERS = `(() => {
    * 老实现到这一步就放弃、报「找不到输入框」，循环连败两次就转 ask_user。
    * 这里按「搜索语义 > 在视口内 > 面积大」挑一个，之后统一 scrollIntoView 再输入。
    */
+  /**
+   * 第 17 步：视口尺寸。**换页途中 document.documentElement 会是 null**
+   * （上一页已拆、下一页还没建），直接读 .clientWidth 会把整条动作链炸成
+   * 「读不到内嵌页：TypeError … at overlayish」——那是白烧一步。
+   * 这里统一走这个口子，拿不到就回 0（调用方本来就按 0 处理成「不可用」）。
+   */
+  const viewport = () => {
+    const de = document.documentElement;
+    return de ? { w: de.clientWidth, h: de.clientHeight } : { w: 0, h: 0 };
+  };
   const findInput = (target) => {
     const hit = find(target);
     if (hit) {
@@ -427,8 +441,7 @@ const PAGE_HELPERS = `(() => {
     };
     const cands = Array.prototype.filter.call(document.querySelectorAll(sel), usable);
     if (!cands.length) return null;
-    const vw = document.documentElement.clientWidth;
-    const vh = document.documentElement.clientHeight;
+    const { w: vw, h: vh } = viewport();
     const inView = (el) => {
       const r = el.getBoundingClientRect();
       return r.bottom > 0 && r.top < vh && r.right > 0 && r.left < vw;
@@ -514,8 +527,7 @@ const PAGE_HELPERS = `(() => {
     const sel = '[class*=mask],[class*=overlay],[class*=modal],[class*=dialog],[class*=popup],[class*=layer],[id*=mask],[id*=overlay],[id*=modal],[id*=dialog]';
     let els;
     try { els = Array.prototype.slice.call(document.querySelectorAll(sel)); } catch (_) { return false; }
-    const vw = document.documentElement.clientWidth;
-    const vh = document.documentElement.clientHeight;
+    const { w: vw, h: vh } = viewport();
     if (!vw || !vh) return false;
     return els.some((el) => {
       if (!visible(el)) return false;
@@ -525,6 +537,28 @@ const PAGE_HELPERS = `(() => {
       const r = el.getBoundingClientRect();
       return r.width * r.height > vw * vh * 0.35;
     });
+  };
+  /**
+   * 第 17 步：判断「这次点击到底有没有让页面动一下」。
+   * 只取三个便宜又稳定的量：地址、标题、节点总数。
+   * 宁可漏报「没变化」（当成有变化），也不要误报——误报会把正常点击判成没点中。
+   */
+  const pageKey = () => location.href + '|' + document.title + '|' + document.querySelectorAll('*').length;
+  /**
+   * 第 17 步：找元素身上（或最近的祖先）那个 <a>，看它要打开什么协议。
+   * 抖音这类站点的「打开 App」按钮就是 bytedance:// / snssdk 之类的自定义协议，
+   * 在网页里点不动（只能唤起手机 App）——要能明确告诉用户「这颗按钮网页里点不了」，
+   * 而不是让他一直点、一直没反应。
+   */
+  const schemeOf = (el) => {
+    try {
+      const a = el && el.closest ? el.closest('a[href]') : null;
+      const href = a ? String(a.getAttribute('href') || '') : '';
+      const m = href.match(/^([a-z][a-z0-9+.-]*):/i);
+      if (!m) return '';
+      const scheme = m[1].toLowerCase();
+      return (scheme === 'http' || scheme === 'https') ? '' : scheme;
+    } catch (_) { return ''; }
   };
   const snapshot = () => ({
     url: location.href,
@@ -547,7 +581,7 @@ const PAGE_HELPERS = `(() => {
     fields: Array.prototype.filter.call(document.querySelectorAll(INPUT_SEL), visible)
       .map(fieldOf).slice(0, 40),
   });
-  window.__wbHelper = { __v: 7, visible, text, find, findInput, findClickable, pick, fieldOf, sensitiveish, loginish, overlayish, snapshot };
+  window.__wbHelper = { __v: 9, visible, text, find, findInput, findClickable, pick, fieldOf, sensitiveish, loginish, overlayish, pageKey, schemeOf, snapshot };
 })();`;
 
 /** 组合一段「注入 helper + 执行动作」的脚本 */
@@ -669,8 +703,14 @@ async function navigate(wc: Target, url: string): Promise<void> {
   await sleep(500);
 }
 
+/** click 的三种结局：没找到 / 是 App 唤起链接（网页里点不了）/ 点了（附有没有让页面动一下） */
+type ClickOutcome =
+  | { kind: 'notfound' }
+  | { kind: 'applink'; scheme: string; label: string }
+  | { kind: 'done'; label: string; method: string; hittable: boolean; noChange: boolean };
+
 /**
- * click：优先用 CDP 发真实鼠标事件点元素中心（最接近真人操作）。
+ * click：优先用 CDP 发**真实鼠标事件**（先短距离移动再按下+抬起）点元素中心，最接近真人操作。
  *
  * ⚠️ 但**坐标必须落在视口内**才算数。实测踩到过：内嵌页视口只有 551px 宽，
  * 而百度首页那排搜索 UI 固定 771px 宽、把「百度一下」按钮挤到了视口右侧外面，
@@ -678,13 +718,19 @@ async function navigate(wc: Target, url: string): Promise<void> {
  * 但回执看起来还是 ok:true，属于典型的"假成功"。
  * 所以这里先做一次命中测试（elementFromPoint），命中不了就退化为页面侧 `el.click()`，
  * 并把实际用的方式写进 detail 回报。
+ *
+ * 第 17 步补两件事：
+ *   1. 点之前先看这颗按钮是不是 `bytedance://` 这类 App 唤起链接——是的话直接说清楚
+ *      「网页里点不了」，不让用户白点十次；
+ *   2. 点完比对地址/标题/节点数，页面一点没动就带上 noChange，让驾驶循环能给出
+ *      「原因 + 一个下一步」，而不是无限重试。
  */
 async function clickTarget(
   wc: Target,
   target: string,
   /** 第 4 步：任务循环传入的存活检查；每个鼠标动作发出前复查，暂停即中止本步 */
   shouldAbort?: () => boolean,
-): Promise<{ label: string; method: string; hittable: boolean } | null> {
+): Promise<ClickOutcome> {
   const tick = (): void => {
     if (shouldAbort && !shouldAbort()) throw new TaskAborted();
   };
@@ -694,11 +740,14 @@ async function clickTarget(
     tag: string;
     label: string;
     hittable: boolean;
+    blockedScheme: string;
+    before: string;
   } | null>(
     wc,
     pageScript(`(() => {
       const el = window.__wbHelper.findClickable(${JSON.stringify(target)});
       if (!el) return null;
+      const scheme = window.__wbHelper.schemeOf(el);
       try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
       const r = el.getBoundingClientRect();
       if (r.width <= 0 || r.height <= 0) return null;
@@ -715,26 +764,44 @@ async function clickTarget(
         x: Math.round(cx), y: Math.round(cy),
         tag: el.tagName, label: window.__wbHelper.text(el).slice(0, 60),
         hittable: hittable,
+        blockedScheme: scheme,
+        before: window.__wbHelper.pageKey(),
       };
     })()`),
   );
 
-  if (!hit) return null;
+  if (!hit) return { kind: 'notfound' };
+  if (hit.blockedScheme) return { kind: 'applink', scheme: hit.blockedScheme, label: hit.label };
+
+  /** 点完再看一眼页面动没动（地址 / 标题 / 节点数） */
+  const changed = async (): Promise<boolean> => {
+    try {
+      const after = await evaluate<string>(wc, pageScript('(() => window.__wbHelper.pageKey())()'));
+      return after !== hit.before;
+    } catch {
+      return true; // 读不到（正在导航）＝页面确实在动
+    }
+  };
 
   if (hit.hittable) {
     tick();
     const dbg = ensureAttached(wc);
+    // 真实鼠标：先挪到旁边一点点，再挪到目标上，然后按下 + 抬起（比瞬移一次更像人）
+    await dbg.sendCommand('Input.dispatchMouseEvent', {
+      type: 'mouseMoved', x: Math.max(0, hit.x - 3), y: Math.max(0, hit.y - 2), button: 'none', clickCount: 0,
+    });
     await dbg.sendCommand('Input.dispatchMouseEvent', {
       type: 'mouseMoved', x: hit.x, y: hit.y, button: 'none', clickCount: 0,
     });
     await dbg.sendCommand('Input.dispatchMouseEvent', {
-      type: 'mousePressed', x: hit.x, y: hit.y, button: 'left', clickCount: 1,
+      type: 'mousePressed', x: hit.x, y: hit.y, button: 'left', buttons: 1, clickCount: 1,
     });
     await dbg.sendCommand('Input.dispatchMouseEvent', {
-      type: 'mouseReleased', x: hit.x, y: hit.y, button: 'left', clickCount: 1,
+      type: 'mouseReleased', x: hit.x, y: hit.y, button: 'left', buttons: 0, clickCount: 1,
     });
     await sleep(900);
-    return { label: `${hit.tag}「${hit.label}」`, method: 'cdp-mouse', hittable: true };
+    const moved = await changed();
+    return { kind: 'done', label: `${hit.tag}「${hit.label}」`, method: 'cdp-mouse', hittable: true, noChange: !moved };
   }
 
   // 元素不在视口内（或被别的东西盖住）：真实鼠标点不到，退化为页面侧 click()
@@ -749,9 +816,9 @@ async function clickTarget(
     })()`),
   );
   await sleep(1200);
-  return done
-    ? { label: `${hit.tag}「${hit.label}」`, method: 'page-el.click', hittable: false }
-    : null;
+  if (!done) return { kind: 'notfound' };
+  const moved = await changed();
+  return { kind: 'done', label: `${hit.tag}「${hit.label}」`, method: 'page-el.click', hittable: false, noChange: !moved };
 }
 
 /**
@@ -839,7 +906,30 @@ async function typeInto(
   await sleep(250);
   if (await written()) method = 'cdp-insertText';
 
-  // 2) 页面侧 execCommand：仍走 Chromium 编辑管线，beforeinput / input 事件都正常
+  // 2) 第 17 步：逐字符真实键盘事件（keyDown → char → keyUp）。
+  //    有些站点的搜索框只在 keydown/keypress 上做防抖与联想，insertText 一次灌进去它不认；
+  //    短文本走这条路最像真人打字（长文本太慢，跳过）。
+  if (method === 'none' && value.length > 0 && value.length <= 30) {
+    tick();
+    await evaluate(
+      wc,
+      pageScript(`(() => {
+        const el = window.__wbHelper.pick(${JSON.stringify(target)});
+        if (el && el.focus) { try { el.focus(); } catch (_) {} }
+        return true;
+      })()`),
+    );
+    for (const ch of Array.from(value)) {
+      await dbg.sendCommand('Input.dispatchKeyEvent', { type: 'keyDown', key: ch, text: ch });
+      await dbg.sendCommand('Input.dispatchKeyEvent', { type: 'char', key: ch, text: ch });
+      await dbg.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', key: ch });
+      await sleep(35);
+    }
+    await sleep(250);
+    if (await written()) method = 'cdp-keys';
+  }
+
+  // 3) 页面侧 execCommand：仍走 Chromium 编辑管线，beforeinput / input 事件都正常
   if (method === 'none') {
     tick();
     await evaluate(
@@ -855,7 +945,7 @@ async function typeInto(
     if (await written()) method = 'page-execCommand';
   }
 
-  // 3) 原生 setter + InputEvent：对 React 受控组件最稳的兜底
+  // 4) 原生 setter + InputEvent：对 React 受控组件最稳的兜底
   if (method === 'none') {
     tick();
     await evaluate(
@@ -947,17 +1037,49 @@ async function typeInto(
   return { ok: true, label: `${found.tag}「${found.label}」`, method };
 }
 
-/** scroll：整屏滚动 */
+/**
+ * scroll：优先发**真实滚轮事件**（CDP Input.dispatchMouseEvent type=mouseWheel），
+ * 页面的 wheel 监听器、懒加载、虚拟列表都会像真人滚动一样被触发；
+ * 只有滚轮没让页面动（例如滚动的是某个内层容器）才退回 window.scrollBy。
+ */
 async function scrollPage(wc: Target, direction: 'up' | 'down'): Promise<void> {
-  await evaluate(
-    wc,
-    pageScript(`(() => {
-      const step = Math.round(window.innerHeight * 0.85) * ${direction === 'down' ? 1 : -1};
-      window.scrollBy({ top: step, behavior: 'smooth' });
-      return true;
-    })()`),
-  );
-  await sleep(500);
+  const deltaY = direction === 'down' ? 640 : -640;
+  const readY = async (): Promise<number> => {
+    try {
+      return await evaluate<number>(wc, pageScript('(() => Math.round(window.scrollY))()'));
+    } catch {
+      return -1;
+    }
+  };
+  const beforeY = await readY();
+  try {
+    const geo = await evaluate<{ x: number; y: number }>(
+      wc,
+      pageScript(`(() => ({
+        x: Math.round(document.documentElement.clientWidth / 2),
+        y: Math.round(document.documentElement.clientHeight / 2),
+      }))()`),
+    );
+    const x = geo?.x && geo.x > 0 ? geo.x : 200;
+    const y = geo?.y && geo.y > 0 ? geo.y : 200;
+    const dbg = ensureAttached(wc);
+    await dbg.sendCommand('Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: 0, deltaY });
+    await sleep(650);
+  } catch {
+    /* 滚轮发不出去就走下面的兜底 */
+  }
+  const afterY = await readY();
+  if (afterY === beforeY) {
+    await evaluate(
+      wc,
+      pageScript(`(() => {
+        const step = Math.round(window.innerHeight * 0.85) * ${direction === 'down' ? 1 : -1};
+        window.scrollBy({ top: step, behavior: 'smooth' });
+        return true;
+      })()`),
+    );
+    await sleep(500);
+  }
 }
 
 /** screenshot：CDP 截图，只回内存里的 data URL */
@@ -999,6 +1121,8 @@ export async function drive(action: BrowserAction, targetWebContentsId?: number)
   try {
     /** 补充说明（例如 type 实际用了哪种写入方式），会一路带到调试区 */
     let detail: string | undefined;
+    /** 第 17 步：动作做了但页面没动（点了几次都没反应时给「原因 + 下一步」） */
+    let noChange = false;
 
     switch (action.action) {
       case 'open_url': {
@@ -1012,7 +1136,7 @@ export async function drive(action: BrowserAction, targetWebContentsId?: number)
           return { ok: false, action: actionName, error: pay, pageSnapshot: await readSnapshot(wc) };
         }
         const hit = await clickTarget(wc, action.target);
-        if (!hit) {
+        if (hit.kind === 'notfound') {
           // 第 16 步：click 是最常见的失败，必须给「可能原因 + 一个下一步」，
           // 不能只甩一句「没找到」——那会让模型/用户都只能干瞪眼。
           const snap = await readSnapshot(wc);
@@ -1023,9 +1147,24 @@ export async function drive(action: BrowserAction, targetWebContentsId?: number)
             pageSnapshot: snap,
           };
         }
+        if (hit.kind === 'applink') {
+          // 第 17 步：抖音这类站点的「打开 App」按钮是 bytedance:// 之类的唤起链接，
+          // 网页里点了也不会有效果——直接说清楚，并给一个能在网页里做的下一步，不换内核。
+          const snap = await readSnapshot(wc);
+          return {
+            ok: false,
+            action: actionName,
+            error:
+              `「${hit.label}」是 App 唤起链接（${hit.scheme}:），网页里点不了，` +
+              '它只能在手机上打开 App。下一步：换一个能在网页里完成的操作（例如用网页版登录后再操作），或者你自己在卡片里点。',
+            pageSnapshot: snap,
+          };
+        }
+        noChange = hit.noChange;
         detail = hit.hittable
           ? `已用真实鼠标点击 ${hit.label}`
           : `点击了 ${hit.label}（该元素不在视口内，真实鼠标点不到，改用页面侧 click()）`;
+        if (hit.noChange) detail += '；页面暂时没有可见变化';
         break;
       }
       case 'type': {
@@ -1132,7 +1271,7 @@ export async function drive(action: BrowserAction, targetWebContentsId?: number)
       }
     }
 
-    return { ok: true, action: actionName, detail, pageSnapshot: await readSnapshot(wc) };
+    return { ok: true, action: actionName, detail, pageSnapshot: await readSnapshot(wc), ...(noChange ? { noChange: true } : {}) };
   } catch (err) {
     return { ok: false, action: actionName, error: (err as Error).message };
   }
@@ -1150,11 +1289,12 @@ export async function drive(action: BrowserAction, targetWebContentsId?: number)
 const SENSITIVE_WATCH_POLL_MS = 1_200;
 const SENSITIVE_WATCH_CAP_MS = 10 * 60_000;
 
-export function startSensitiveAutoResume(onDone: () => void): () => void {
+export function startSensitiveAutoResume(onDone: () => void, targetWebContentsId?: number): () => void {
   let settled = false;
   let wc: Target | null = null;
   try {
-    wc = resolveTarget(undefined);
+    // 第 17 步：两路并行时必须盯**这一路那张页**，不能盲选第一个 webview
+    wc = resolveTarget(targetWebContentsId);
   } catch {
     /* 内嵌页不在：只靠轮询也起不来，直接让调用方等手动继续 */
   }

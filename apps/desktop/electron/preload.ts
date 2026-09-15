@@ -40,12 +40,17 @@ const bridge: WorkbenchBridge = {
   getTaskState: () => ipcRenderer.invoke('workbench:task:state'),
 
   // ---- 第 7 步：云端驾驶员循环（编排就在主进程；token 只递给主进程用，不打印）----
-  agentStart: (goal: string, apiBase: string, token: string) =>
-    ipcRenderer.invoke('workbench:agent:start', goal, apiBase, token),
+  // 第 17 步：多带一个 targetWebContentsId —— 这次驾驶**哪一张**内嵌页（两路并行必须点名）
+  agentStart: (goal: string, apiBase: string, token: string, targetWebContentsId?: number) =>
+    ipcRenderer.invoke('workbench:agent:start', goal, apiBase, token, targetWebContentsId),
   agentStop: () => ipcRenderer.invoke('workbench:agent:stop'),
   // 第 16 步：用户改口时放下当前任务（保留凭证），旧目标不会被「继续」重新捡起来
-  agentDrop: () => ipcRenderer.invoke('workbench:agent:drop'),
-  agentAnswer: (text: string) => ipcRenderer.invoke('workbench:agent:answer', text),
+  // 第 17 步：带 id 只放下那一路（那张页），别路照跑；不带则全部放下
+  agentDrop: (targetWebContentsId?: number) => ipcRenderer.invoke('workbench:agent:drop', targetWebContentsId),
+  /** 第 17 步：正在驾驶哪几张内嵌页（guest id 列表）——开第 3 张页时用来挑空闲的那张 */
+  agentLanes: () => ipcRenderer.invoke('workbench:agent:lanes'),
+  agentAnswer: (text: string, targetWebContentsId?: number) =>
+    ipcRenderer.invoke('workbench:agent:answer', text, targetWebContentsId),
 
   // ---- 第 8 步：结果文档下载 + 服务端任务快照（红点以它为准）----
   downloadDoc: (taskId: number, apiBase: string, token: string) =>

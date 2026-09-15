@@ -18,7 +18,16 @@ import type {
   MemoryLayerList,
   TaskState,
 } from '@ai-workbench/shared';
-import { BrowserCard, HOME_URL, detectBrowseIntent, detectOpenUrl } from './browserCard';
+import {
+  BrowserPanel,
+  HOME_URL,
+  detectBrowseIntent,
+  detectOpenUrl,
+  hostLabel,
+  sameSite,
+  toHttpUrl,
+  type BrowserTabView,
+} from './browserCard';
 
 /**
  * 第 2 步（内嵌版）「脸和门」：
@@ -91,7 +100,8 @@ import { BrowserCard, HOME_URL, detectBrowseIntent, detectOpenUrl } from './brow
  */
 
 type Role = 'user' | 'assistant' | 'browser';
-type Message = { id: number; role: Role; text: string; cardUrl?: string };
+/** 第 17 步：浏览器那行消息记下它对应的 tab，点一下就能把那张页切到前面 */
+type Message = { id: number; role: Role; text: string; cardUrl?: string; tabId?: number };
 /** 第 15 步：一个智能体 = 一份聊天（自己的消息列表 + 自己的会话号） */
 type AgentChat = { messages: Message[]; convId: number | null };
 /** 空列表用同一个常量：切智能体时引用稳定，不会每次渲染都造新数组 */
@@ -466,6 +476,8 @@ export default function App() {
    */
   const [agentAwaitInfo, setAgentAwaitInfo] = useState(false);
   const [agentAwaitAgent, setAgentAwaitAgent] = useState<number | null>(null);
+  /** 第 17 步：提问来自**哪一张页**（答复只喂给那一路，不串到另一路） */
+  const [agentAwaitWcId, setAgentAwaitWcId] = useState<number | null>(null);
   /** 当前这个智能体在等驾驶员提问吗（切到别的智能体就不提示） */
   const awaitHere = agentAwaitInfo && agentAwaitAgent === curAgentId;
   /** 第 15 步：左栏智能体列表（服务端为准）。personaStatus==='pending' 时聊天里摆引导表 */
@@ -501,6 +513,18 @@ export default function App() {
   /** 聊天里追加一条「小助之外」的系统泡（driver 循环的问话/结论/报错），只进内存展示 */
   const pushChatLine = (text: string) => {
     setMessages((prev) => prev.concat({ id: Date.now() + Math.floor(Math.random() * 1000), role: 'assistant', text }));
+  };
+
+  /**
+   * 第 17 步：按智能体落桶的系统泡。
+   * 两路驾驶可能分属两个智能体，事件里的 wcId 决定这条话进谁的聊天 ——
+   * 绝不按「此刻正在看的那个智能体」乱写（那正是「聊天串了」）。
+   */
+  const pushChatLineFor = (agentId: number, text: string) => {
+    patchChat(agentId, (c) => ({
+      ...c,
+      messages: c.messages.concat({ id: Date.now() + Math.floor(Math.random() * 1000), role: 'assistant', text }),
+    }));
   };
 
   /**
@@ -730,7 +754,8 @@ export default function App() {
         setProjMem([]);
         if (first && !historyLoadedRef.current.has(first.id)) void loadAgentHistory(first);
       }
-      setBrowserCardId(null);
+      // 第 17 步：这个智能体开的那些网页一并关掉（它那几路驾驶也一起放下）
+      for (const t of tabsRef.current) if (tabAgentRef.current[t.id] === agentId) closeTab(t.id);
       setChatNote('已删掉这个智能体（它的聊天和项目记忆一并清掉，没碰别的智能体）。');
     } catch (e) {
       setChatNote(`删除没成：${(e as Error).message}`);
@@ -958,9 +983,10 @@ export default function App() {
     setKeepaliveBusy(false);
     // 第 7 步：驾驶员循环和 token 一并停掉/清掉（主进程里也不留）
     void window.workbench?.agentStop();
-    // 第 13 步：聊天里的网页卡片一并清掉（换号不该看见上一个号的网页）
-    setBrowserCardId(null);
-    setCardExpanded(false);
+    // 第 17 步：所有网页一并关掉（换号不该看见上一个号的网页）
+    for (const t of tabsRef.current) closeTab(t.id);
+    setTabQueue([]);
+    setDrivingTabIds([]);
     setAgentSteps([]);
     setAgentDoc(null);
     setCurTask(null);
@@ -975,41 +1001,199 @@ export default function App() {
     setKnowledgeNote('');
   };
 
-  // ---- 第 13 步：聊天里的浏览器卡片（整个窗口只有一张、只有一个 <webview>）----
-  /** 当前挂着网页的那条卡片消息 id；null = 还没开过网页 */
-  const [browserCardId, setBrowserCardId] = useState<number | null>(null);
-  /** 订阅 effect 是挂载时建的闭包，用 ref 读最新值，免得拿到过期的 null */
-  const browserCardIdRef = useRef<number | null>(null);
-  browserCardIdRef.current = browserCardId;
-  /** 卡片是否展开（展开后中栏以浏览器为主） */
-  const [cardExpanded, setCardExpanded] = useState(false);
-  /** 卡片里那块 <webview>：驾驶员的动作就打在它身上（不再有右栏那块网页） */
-  const webviewRef = useRef<HTMLElement | null>(null);
+  // ---- 第 17 步：中栏浏览器区（顶栏 tab + URL 栏 + 页；同时最多 2 张活页）----
+  /**
+   * 打开着的网页。**窗口级**状态（不是某条聊天消息里的卡片）：
+   * 这样切到别的智能体去聊别的时，正在跑的两路驾驶不会因为 webview 被卸载而断掉。
+   */
+  const [tabs, setTabs] = useState<BrowserTabView[]>([]);
+  const tabsRef = useRef<BrowserTabView[]>([]);
+  tabsRef.current = tabs;
+  /** 当前切到前面的那张 */
+  const [activeTabId, setActiveTabId] = useState<number | null>(null);
+  const activeTabRef = useRef<number | null>(null);
+  activeTabRef.current = activeTabId;
+  /** 满了 2 张、而且两张都在被驾驶时，第 3 个开页请求先排队（空出来再开） */
+  const [tabQueue, setTabQueue] = useState<Array<{ agentId: number; url: string }>>([]);
+  /** 浏览器区是否展开。收起也留一块高度——webview 尺寸为 0 会让驾驶点不中任何元素 */
+  const [cardExpanded, setCardExpanded] = useState(true);
+  /** tabId → <webview> 元素 */
+  const webviewRefs = useRef<Record<number, HTMLElement | null>>({});
+  /** 正在被驾驶员操作的那几张（tabId）：标签上点一个小圆点 */
+  const [drivingTabIds, setDrivingTabIds] = useState<number[]>([]);
+  /** tabId → 发起它的智能体（把驾驶事件落回正确的聊天，不串） */
+  const tabAgentRef = useRef<Record<number, number>>({});
+
+  /** 主进程当前在驾驶哪几张页 → 映射成 tabId（标签圆点 + 第 3 张页该顶谁） */
+  const refreshDriving = async () => {
+    const list = await window.workbench?.agentLanes?.();
+    if (!list) return;
+    const ids: number[] = [];
+    for (const t of tabsRef.current) {
+      const el = webviewRefs.current[t.id] as unknown as { getWebContentsId?: () => number } | null;
+      let wcId: number | undefined;
+      try {
+        wcId = el?.getWebContentsId?.();
+      } catch {
+        wcId = undefined;
+      }
+      if (typeof wcId === 'number' && list.includes(wcId)) ids.push(t.id);
+    }
+    setDrivingTabIds(ids);
+  };
+
+  const wcIdOfTab = (tabId: number): number | undefined => {
+    const el = webviewRefs.current[tabId] as unknown as { getWebContentsId?: () => number } | null;
+    try {
+      return el?.getWebContentsId?.();
+    } catch {
+      return undefined;
+    }
+  };
 
   /**
-   * 在中栏聊天里插一张浏览器卡片。
-   * 旧卡片自动降级成一行占位文字——**同一时刻只允许一张卡片挂 <webview>**，
-   * 否则主进程「找内嵌页」会挑错 guest，也会变成事实上的多标签。
-   *
-   * 第 16 步：按**发起时那个智能体**落桶（切走之后卡片不会插进别人的聊天）。
+   * 拿某张 tab 里 <webview> 的 guest webContents id。
+   * webview 还没 dom-ready 时 getWebContentsId() 会抛错，所以重试几轮。
+   * 第 17 步：**必须点名是哪张页**——主进程不会再自己瞎挑一张。
    */
-  const openBrowserCardFor = (agentId: number, url: string) => {
-    const id = Date.now() + Math.floor(Math.random() * 1000);
-    patchChat(agentId, (c) => ({ ...c, messages: c.messages.concat({ id, role: 'browser', text: url, cardUrl: url }) }));
-    setBrowserCardId(id);
-    setCardExpanded(false);
-  };
-  const openBrowserCard = (url: string) => {
-    const id = curAgentRef.current;
-    if (id === null) return;
-    openBrowserCardFor(id, url);
+  const getTabWebviewId = async (tabId: number): Promise<number | undefined> => {
+    for (let i = 0; i < 25; i += 1) {
+      const id = wcIdOfTab(tabId);
+      if (typeof id === 'number' && id >= 0) return id;
+      await new Promise((resolve) => window.setTimeout(resolve, 120));
+    }
+    return undefined;
   };
 
-  /** 把焦点交给卡片里的网页（还没开过就先开一张默认主页） */
-  const focusCard = () => {
-    if (browserCardIdRef.current === null) openBrowserCard(HOME_URL);
-    window.setTimeout(() => (webviewRef.current as (HTMLElement & { focus?: () => void }) | null)?.focus?.(), 60);
+  /** 反过来：主进程报的 guest id → 是哪张 tab */
+  const tabIdByWcId = (wcId: number): number | null => {
+    for (const t of tabsRef.current) if (wcIdOfTab(t.id) === wcId) return t.id;
+    return null;
   };
+
+  /** 往聊天里记一行「网页」（可点：把那张页切到前面） */
+  const pushBrowserLine = (agentId: number, tabId: number, url: string) => {
+    const id = Date.now() + Math.floor(Math.random() * 1000);
+    patchChat(agentId, (c) => ({
+      ...c,
+      messages: c.messages.concat({ id, role: 'browser', text: url, cardUrl: url, tabId }),
+    }));
+  };
+
+  /** 导航某张页（URL 栏回车 / 同站改道）：走 <webview>.loadURL，不经过主进程 */
+  const navigateTab = (tabId: number, url: string) => {
+    const el = webviewRefs.current[tabId] as unknown as { loadURL?: (u: string) => void } | null;
+    try {
+      el?.loadURL?.(url);
+    } catch {
+      /* 页面还没就绪，等它自己加载 */
+    }
+    setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, url, title: hostLabel(url) } : t)));
+  };
+
+  /** 切到某张页（把它的 webview 放到最前面）+ 把键盘焦点给它 */
+  const activateTab = (tabId: number) => {
+    setActiveTabId(tabId);
+    setCardExpanded(true);
+    window.setTimeout(() => {
+      const el = webviewRefs.current[tabId] as unknown as { focus?: () => void } | null;
+      el?.focus?.();
+    }, 60);
+  };
+
+  /**
+   * 关掉一张页（用户点 ✕，或为了给第 3 张腾地方顶掉最旧那张）。
+   * 这张页上如果正有一路在跑，先**只**放下那一路——别路照跑（第 17 步「第二句不废第一张」）。
+   */
+  const closeTab = (tabId: number) => {
+    const wcId = wcIdOfTab(tabId);
+    if (typeof wcId === 'number') void window.workbench?.agentDrop?.(wcId);
+    delete webviewRefs.current[tabId];
+    delete tabAgentRef.current[tabId];
+    setTabs((prev) => prev.filter((t) => t.id !== tabId));
+    setActiveTabId((cur) => (cur === tabId ? null : cur));
+    window.setTimeout(() => {
+      void refreshDriving();
+    }, 150);
+  };
+
+  /**
+   * 打开一张页（第 17 步的核心约束都在这里）：
+   *   1. 同站已有 → **复用**那张页改道，不新开；
+   *   2. 还没满 2 张 → 直接开；
+   *   3. 已满 2 张 → 顶掉最旧那张**没在跑**的活页；两张都在跑 → 排队等空位。
+   * 无论哪条路，都**不会**出现第 3 张同时活着的 webview。
+   */
+  const openTabFor = async (agentId: number, rawUrl: string): Promise<number | null> => {
+    const url = toHttpUrl(rawUrl) ?? HOME_URL;
+    const cur = tabsRef.current;
+    const same = cur.find((t) => sameSite(t.url, url) || sameSite(t.bootUrl, url));
+    if (same) {
+      activateTab(same.id);
+      if (same.url !== url) navigateTab(same.id, url);
+      pushBrowserLine(agentId, same.id, url);
+      return same.id;
+    }
+    if (cur.length >= 2) {
+      const busy = (await window.workbench?.agentLanes?.()) ?? [];
+      const victim = cur.find((t) => {
+        const id = wcIdOfTab(t.id);
+        return typeof id !== 'number' || !busy.includes(id);
+      });
+      if (!victim) {
+        setTabQueue((q) => q.concat({ agentId, url }));
+        setChatNote('已经有 2 张页在被驾驶（硬顶 2 张活页）：这一张先排队，等一路停下来再打开。');
+        void refreshDriving(); // 同步一次「到底哪几张在跑」，等它们停下来再自动顶掉
+        return null;
+      }
+      setChatNote(`最多同时 2 张活页：先把最旧的「${victim.title || hostLabel(victim.url)}」关掉，再开这一张。`);
+      closeTab(victim.id);
+    }
+    const id = Date.now() + Math.floor(Math.random() * 1000);
+    tabAgentRef.current[id] = agentId;
+    setTabs((prev) => prev.concat({ id, bootUrl: url, url, title: hostLabel(url) }));
+    setActiveTabId(id);
+    setCardExpanded(true);
+    pushBrowserLine(agentId, id, url);
+    return id;
+  };
+
+  /** 用户点「＋」：开一张默认主页（不自动发车，等他给指令） */
+  const openNewTab = () => {
+    const agentId = curAgentRef.current;
+    if (agentId === null) return;
+    void openTabFor(agentId, HOME_URL);
+  };
+
+  const openBrowserCard = (url: string) => {
+    const agentId = curAgentRef.current;
+    if (agentId === null) return;
+    void openTabFor(agentId, url);
+  };
+
+  /** 把焦点交给当前那张页（还没开过就先开一张默认主页） */
+  const focusCard = () => {
+    const cur = activeTabRef.current;
+    if (cur === null) openBrowserCard(HOME_URL);
+    else activateTab(cur);
+  };
+
+  /** 排队中的开页请求：一有空位就打开（用户关掉一张、或某一路跑完） */
+  useEffect(() => {
+    if (tabQueue.length === 0) return;
+    // 满 2 张、而且两张都还在被驾驶 → 继续等（等 drivingTabIds 变化再试一次）
+    if (tabs.length >= 2 && drivingTabIds.length >= 2) return;
+    const [next] = tabQueue;
+    setTabQueue((q) => q.slice(1));
+    void openTabFor(next.agentId, next.url);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabs, tabQueue, drivingTabIds]);
+
+  /** 活页变化（新开/关闭）后同步一次「哪几张正在被驾驶」 */
+  useEffect(() => {
+    void refreshDriving();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabs]);
 
   useEffect(() => {
     const bridge = window.workbench;
@@ -1052,7 +1236,13 @@ export default function App() {
     });
     const offShow = bridge.on('show', () => undefined);
     const offHide = bridge.on('hide', () => undefined);
-    const offFocus = bridge.on('focus', () => focusCard());
+    // 第 17 步：主进程发来的 focus 带 guest id —— 焦点要给**那一张**页（两路并行时不能瞎给）
+    const offFocus = bridge.on('focus', (payload) => {
+      const wcId = Number(payload);
+      const tabId = Number.isInteger(wcId) ? tabIdByWcId(wcId) : null;
+      if (tabId !== null) activateTab(tabId);
+      else focusCard();
+    });
 
     return () => {
       offOpen();
@@ -1063,9 +1253,6 @@ export default function App() {
     };
   }, []);
 
-  // running 才是「AI 正在控制」（第 13 步：不再在右栏画状态，只用于 running 时发消息先停手）
-  const aiInControl = task.phase === 'running';
-
   // 订阅主进程驾驶员事件：ask/done/note 进聊天区
   useEffect(() => {
     const bridge = window.workbench;
@@ -1073,39 +1260,68 @@ export default function App() {
     let off = false;
     const offAgent = bridge.on('agent', (payload) => {
       if (!payload) return;
-      let p: AgentEventPayload;
+      let p: AgentEventPayload & { wcId?: number };
       try {
-        p = JSON.parse(payload) as AgentEventPayload;
+        p = JSON.parse(payload) as AgentEventPayload & { wcId?: number };
       } catch {
         return;
       }
       if (off) return;
+      /**
+       * 第 17 步：事件里带着 guest id —— 先认它属于**哪张页**、那张页是**哪个智能体**开的，
+       * 再把话落回那个智能体的聊天里。两路分属两个智能体时，绝不把 A 的步摘要写进 B。
+       */
+      const tabId = typeof p.wcId === 'number' ? tabIdByWcId(p.wcId) : null;
+      const ownerAgent = (tabId !== null ? tabAgentRef.current[tabId] : undefined) ?? curAgentRef.current;
+      const say = (text: string) => {
+        if (ownerAgent !== null && ownerAgent !== undefined) pushChatLineFor(ownerAgent, text);
+      };
+      const here = ownerAgent === curAgentRef.current;
       if (p.kind === 'step') {
         setAgentSteps((prev) => prev.concat(`${p.summary}${p.ok ? '' : ' ❌'}`).slice(-6));
       } else if (p.kind === 'ask') {
         setAgentSteps([]);
-        pushChatLine(`⚠️ ${p.question}`);
+        say(`⚠️ ${p.question}`);
         const needInfo = p.reason === 'need_info';
         setAgentAwaitInfo(needInfo);
         // 第 15 步：记下「是哪个智能体在等这句话」，答复才不会串到别的智能体
-        setAgentAwaitAgent(needInfo ? curAgentRef.current : null);
-        if (needInfo) setChatNote('小助在等你答这句话——直接在下面输入框回答即可，发出后会自动继续（不用点「继续」）。');
+        setAgentAwaitAgent(needInfo ? (ownerAgent ?? null) : null);
+        // 第 17 步：再记下「是哪张页在等」，答复只喂给那一路
+        setAgentAwaitWcId(needInfo && typeof p.wcId === 'number' ? p.wcId : null);
+        if (needInfo && here) setChatNote('小助在等你答这句话——直接在下面输入框回答即可，发出后会自动继续（不用点「继续」）。');
+        void refreshDriving();
       } else if (p.kind === 'sensitive') {
-        pushChatLine(`🔒 ${p.message}`);
+        say(`🔒 ${p.message}`);
+        void refreshDriving();
       } else if (p.kind === 'done') {
         setAgentAwaitInfo(false);
         setAgentAwaitAgent(null);
-        pushChatLine(`✅ 任务完成：${p.summary}${p.docReady ? ` · ${p.unreadHint ?? '结果文档已生成'}` : '（文档未就绪：后端未配置模型或库未起，见后端日志）'}`);
+        setAgentAwaitWcId(null);
+        say(`✅ 任务完成：${p.summary}${p.docReady ? ` · ${p.unreadHint ?? '结果文档已生成'}` : '（文档未就绪：后端未配置模型或库未起，见后端日志）'}`);
         setAgentDoc({ title: p.documentTitle, outline: p.documentOutline });
         // 第 8 步：红点由服务端确认（finish 已置 unread=true），这里点亮并刷新卡片
         setHasUnread(true);
         void refreshTask();
+        void refreshDriving();
       } else if (p.kind === 'note') {
-        pushChatLine(`${p.level === 'error' ? '⚠️' : 'ℹ️'} ${p.text}`);
+        say(`${p.level === 'error' ? '⚠️' : 'ℹ️'} ${p.text}`);
         if (/继续|恢复驾驶/.test(p.text)) {
           setAgentAwaitInfo(false);
           setAgentAwaitAgent(null);
+          setAgentAwaitWcId(null);
         }
+        if (p.level === 'error') void refreshDriving();
+      }
+      /**
+       * 第 17 步：循环收尾时主进程是「**先把事件发出来、再从运行表里摘掉这一路**」，
+       * 所以收到事件这一刻 agentLanes() 往往还看得到它 —— 标签上那个「● 正在驾驶」
+       * 就会一直亮着（明明已经没有一路在跑了）。
+       * 隔一拍再刷一次，圆点才会跟着灭。step 事件太频繁，不参与这次补刷。
+       */
+      if (p.kind !== 'step') {
+        window.setTimeout(() => {
+          void refreshDriving();
+        }, 1200);
       }
     });
     return () => {
@@ -1150,21 +1366,18 @@ export default function App() {
       }
       return;
     }
-    // 第 13 步：明确的开网页指令 → 不再要确认，聊天里直接插一张真实网页卡片。
-    // 判定纯本地（不联网、不问模型），所以后端/模型没起来时卡片照样出现。
+    // 第 13 步：明确的开网页指令 → 不再要确认，中栏浏览器区直接开一张真实网页。
+    // 判定纯本地（不联网、不问模型），所以后端/模型没起来时页面照样打开。
     const openUrl = detectOpenUrl(value);
     /**
-     * 第 16 步缺项修复：**已有网页卡片**时，「普通浏览指令」（在这个页面搜一下 AI / 读一下当前页 /
-     * 往下滚…）必须交给**现有驾驶员**去动**这一张** webview —— 不能再只回一句口头「稍等」。
+     * 第 16 步缺项修复：**已经有打开的网页**时，「普通浏览指令」（在这个页面搜一下 AI / 读一下当前页 /
+     * 往下滚…）必须交给**驾驶员**去动**当前切到前面的那张**页 —— 不能再只回一句口头「稍等」。
      *
-     * 判定纯本地（不联网、不问模型）：没有活卡片就不发车（不开第二张卡、不新窗口），
+     * 判定纯本地（不联网、不问模型）：一张页都没开就不发车（不开第二张、不新窗口），
      * 闲聊（你好 / 谢谢 / 你是谁）也不发车。
      */
-    const liveCard = (chatsRef.current[myAgent]?.messages ?? []).find(
-      (m) => m.role === 'browser' && m.id === browserCardId,
-    );
-    const cardLive = browserCardId !== null && Boolean(liveCard);
-    const browseGoal = openUrl === null && cardLive ? detectBrowseIntent(value) : null;
+    const activeTab = tabsRef.current.find((t) => t.id === activeTabRef.current) ?? tabsRef.current[0] ?? null;
+    const browseGoal = openUrl === null && activeTab ? detectBrowseIntent(value) : null;
     /**
      * 第 16 步：确认是**例外**不是默认。
      * 「继续 / 可以」这类回答只有在**本会话确实有一个待确认的浏览器任务**时才算同意：
@@ -1188,46 +1401,51 @@ export default function App() {
     const confirmedByThisMessage = openUrl !== null || goNow || browseGoal !== null;
     lastUserWasOpenRef.current[myAgent] = confirmedByThisMessage;
 
-    if (aiInControl) {
-      if (openUrl) {
-        /**
-         * 用户改口（最新指令优先级最高）：旧任务**立刻放下**——
-         * 循环作废、旧目标清空，之后「继续」也不会把旧任务重新捡起来，
-         * 更不会去问「现在到底是旧任务还是新任务」。
-         */
-        void window.workbench?.agentDrop();
-        setChatNote('按你的最新指令：已经放下上一件事（旧任务不再提起）。');
-      } else if (!browseGoal) {
-        void window.workbench?.pauseTask();
-        setChatNote('任务在 running：已先暂停自动 click/type（状态机 → paused），聊天照常发。');
-      }
-    }
-    // 用户这句话先落桶（按发起时的智能体），卡片紧随其后
+    /**
+     * 第 17 步（用户拍板）：**纯闲聊不打断两路驾驶**。
+     *
+     * 旧行为是「发一句话就把驾驶员暂停」，但本步要求两路任务能在你聊别的事时继续跑、
+     * 不用你盯着点「继续」——所以这里不再全局 pauseTask。
+     * 「停手」只发生在**这条指令指向的那一路**上：
+     * 同一张页再来一条新指令 → 主进程 agentStart 让那一路的旧循环作废（最新指令优先），
+     * 别的页上正在跑的那一路完全不动。
+     */
+    // 用户这句话先落桶（按发起时的智能体），网页行紧随其后
     patchChat(myAgent, (c) => ({ ...c, messages: c.messages.concat({ id: Date.now(), role: 'user', text: value }) }));
-    const cardUrl = openUrl ?? (goNow ? (detectOpenUrl(pendingGoal) ?? HOME_URL) : null);
-    if (cardUrl) openBrowserCardFor(myAgent, cardUrl);
-    if (goNow) {
-      // 「继续」= 直接执行：等 webview 就绪后立刻把目标交给主进程的驾驶员循环
+
+    /**
+     * 在**某一张**页上发车（第 17 步：必须点名哪张页；主进程不再自己瞎挑一张）。
+     * 别路不动 —— 这就是「第二句不会把第一张降级成不能动的占位」。
+     */
+    const startOnTab = async (tabId: number, goal: string, note: string) => {
+      const wcId = await getTabWebviewId(tabId);
+      if (typeof wcId !== 'number') {
+        setChatNote('这张页还没准备好（拿不到内嵌页句柄），没有发车。');
+        return;
+      }
       setAgentSteps([]);
       setAgentDoc(null);
-      void (async () => {
-        await getWebviewId();
-        void window.workbench?.agentStart(pendingGoal, API_BASE(), session.token);
-      })();
-    }
-    if (browseGoal) {
-      /**
-       * 第 16 步缺项修复：普通浏览指令 → **复用同一张卡片**发车。
-       * 不开新卡片、不新窗口；主进程 agentStart 会 epoch++ 让上一个循环自己退出，
-       * 所以「最新指令优先」在驾驶员这一侧同样成立。
-       */
-      setAgentSteps([]);
-      setAgentDoc(null);
-      setChatNote('已把这条指令交给驾驶员，在**当前这张**网页上执行（不新开卡片）。');
-      void (async () => {
-        await getWebviewId();
-        void window.workbench?.agentStart(browseGoal, API_BASE(), session.token);
-      })();
+      setChatNote(note);
+      // token 递给主进程只用于请求头；不打印
+      void window.workbench?.agentStart(goal, API_BASE(), session.token, wcId);
+      window.setTimeout(() => {
+        void refreshDriving();
+      }, 400);
+    };
+
+    if (openUrl) {
+      // 明确开页指令 → 打开（同站则复用）那张页，并把这一路发到它身上
+      const tabId = await openTabFor(myAgent, openUrl);
+      if (tabId !== null) {
+        await startOnTab(tabId, value, '已把这条指令交给驾驶员，在刚打开的那张页上执行（不新开窗口）。');
+      }
+    } else if (goNow) {
+      // 「继续」= 直接执行：打开目标站点后立刻把目标交给驾驶员循环
+      const tabId = await openTabFor(myAgent, detectOpenUrl(pendingGoal) ?? HOME_URL);
+      if (tabId !== null) await startOnTab(tabId, pendingGoal, '按你的确认开始执行。');
+    } else if (browseGoal && activeTab) {
+      // 普通浏览指令 → 复用**当前这张**页发车（同页新指令 = 最新指令优先，旧动作当场停）
+      await startOnTab(activeTab.id, browseGoal, '已把这条指令交给驾驶员，在**当前这张**网页上执行（不新开页）。');
     }
     setInput('');
     setHasUnread(false);
@@ -1247,9 +1465,7 @@ export default function App() {
           message: value,
           // 明确开页指令 → 报新开的地址；在当前这张页面上干活 → 报这张页的地址。
           // 两者都是「网页已经开好了」，让基座别再让用户点确认（与驾驶员路径同一套）。
-          ...(openUrl || (browseGoal && liveCard?.cardUrl)
-            ? { browserOpened: openUrl ?? liveCard?.cardUrl }
-            : {}),
+          ...(openUrl || (browseGoal && activeTab?.url) ? { browserOpened: openUrl ?? activeTab?.url } : {}),
         }),
       });
       if (!res.ok || !res.body) {
@@ -1317,12 +1533,13 @@ export default function App() {
       void loadAgentState(myAgent);
     }
     // 第 9 步：刚才是回答驾驶员的「补资料」提问 → 把答案递给主进程并自动恢复循环
-    // 第 15 步：只有「正在等的那个智能体」的回答才转给它；别的智能体聊天里的话不串过去。
+    // 第 15/17 步：只有「正在等的那个智能体 + 那一张页」的回答才转给它；别处的话不串过去。
     if (agentAwaitInfo && agentAwaitAgent === myAgent) {
       setAgentAwaitInfo(false);
       setAgentAwaitAgent(null);
       setChatNote('已把答复转给小助，继续驾驶中…');
-      void window.workbench?.agentAnswer(value);
+      void window.workbench?.agentAnswer(value, agentAwaitWcId ?? undefined);
+      setAgentAwaitWcId(null);
     }
   };
 
@@ -1331,40 +1548,31 @@ export default function App() {
   };
 
   /**
-   * 拿**聊天卡片里那块 webview** 的 guest webContents id。
-   * webview 还没 dom-ready 时 getWebContentsId() 会抛错，所以重试几轮。
-   */
-  const getWebviewId = async (): Promise<number | undefined> => {
-    for (let i = 0; i < 25; i += 1) {
-      const el = webviewRef.current as unknown as { getWebContentsId?: () => number } | null;
-      try {
-        const id = el?.getWebContentsId?.();
-        if (typeof id === 'number' && id >= 0) return id;
-      } catch {
-        /* guest 尚未就绪，继续等 */
-      }
-      await new Promise((resolve) => window.setTimeout(resolve, 120));
-    }
-    return undefined;
-  };
-
-  /**
-   * 第 7 步 + 第 13 步：把目标交给主进程的 AI 循环。
-   * 驾驶目标就是卡片里那张页——还没开过网页就先按目标里的站点开一张（拿不到站点才用默认主页），
+   * 第 7 步 + 第 13/17 步：把目标交给主进程的 AI 循环。
+   * 驾驶目标就是**某一张打开的页**；还没开过就先按目标里的站点开一张（拿不到站点才用默认主页），
    * 然后等 guest 真就绪再发车，否则主进程会「没有找到内嵌 webview 的 webContents」。
+   * 第 17 步：别路（别的页）不动 —— 两路可以同时跑。
    */
   const startAgentTask = async (rawGoal?: string) => {
     const goal = (rawGoal ?? '').trim();
     if (!goal || !session) return;
-    // 第 15 步：只有当**当前这个智能体**手里真有一张活着的卡片时才复用它。
-    // 别的智能体开过卡片不算（那张卡此刻根本没挂载，webview 也不在，主进程会找不到 guest）。
-    const hasLiveCardHere = browserCardId !== null && messages.some((m) => m.role === 'browser' && m.id === browserCardId);
-    if (!hasLiveCardHere) openBrowserCard(detectOpenUrl(goal) ?? HOME_URL);
-    await getWebviewId();
+    const cur = tabsRef.current.find((t) => t.id === activeTabRef.current) ?? tabsRef.current[0] ?? null;
+    const owner = curAgentRef.current;
+    if (owner === null) return;
+    const tabId = cur ? cur.id : await openTabFor(owner, detectOpenUrl(goal) ?? HOME_URL);
+    if (tabId === null) return;
+    const wcId = await getTabWebviewId(tabId);
+    if (typeof wcId !== 'number') {
+      setChatNote('这张页还没准备好（拿不到内嵌页句柄），没有发车。');
+      return;
+    }
     setAgentSteps([]);
     setAgentDoc(null);
     // token 递给主进程只用于请求头；不打印
-    void window.workbench?.agentStart(goal, API_BASE(), session.token);
+    void window.workbench?.agentStart(goal, API_BASE(), session.token, wcId);
+    window.setTimeout(() => {
+      void refreshDriving();
+    }, 400);
   };
 
   // 第 5 步门控：未登录（或正在用存好的 JWT 换会话）时，工作台整体不渲染——不做“游客看假数据”
@@ -1401,6 +1609,11 @@ export default function App() {
   const curAgent = sidebarAgents.find((a) => a.id === curAgentId) ?? null;
   /** 第 16 步：当前智能体的会话状态（服务端为准）——状态行与保活按钮都读它 */
   const curState = curAgentId === null ? undefined : agentStates[curAgentId];
+  /** 第 17 步：某张页的标签文字（标题优先，兜底用域名） */
+  const tabLabel = (tabId?: number): string => {
+    const t = tabs.find((x) => x.id === tabId);
+    return t ? t.title || hostLabel(t.url) : '';
+  };
   /**
    * 当前智能体这一轮用户原话**本身**就是确认（明确开页指令，或对确认提问回了「继续/可以」）。
    * 是的话就不再挂确认按钮——事情已经在做了，再要确认就是自相矛盾（第 13 步的规矩）。
@@ -1575,8 +1788,37 @@ export default function App() {
         <div className="sidebar__footer">桥：{bridgeInfo}</div>
       </aside>
 
-      {/* 中间：聊天区（第 6 步：真流式；第 15 步：**一个智能体一份**，切换即换聊天） */}
+      {/* 中间：浏览器区（第 17 步：顶栏 tab + URL 栏 + 页，最多 2 张活页）+ 聊天区 */}
       <main className="middle">
+        {/*
+          第 17 步：浏览器区挂在**窗口级**，不塞在某一条聊天消息里。
+          这样切到别的智能体去聊别的时，正在跑的两路驾驶不会被卸载掉。
+        */}
+        {tabs.length > 0 && (
+          <BrowserPanel
+            tabs={tabs}
+            activeId={activeTabId}
+            expanded={cardExpanded}
+            drivingIds={drivingTabIds}
+            onActivate={activateTab}
+            onClose={closeTab}
+            onNewTab={openNewTab}
+            onToggle={() => setCardExpanded((v) => !v)}
+            onNavigate={(id, url) => navigateTab(id, url)}
+            registerRef={(id, el) => {
+              webviewRefs.current[id] = el;
+            }}
+            onPageInfo={(id, info) => {
+              setTabs((prev) =>
+                prev.map((t) =>
+                  t.id === id
+                    ? { ...t, ...(info.url ? { url: info.url } : {}), ...(info.title ? { title: info.title } : {}) }
+                    : t,
+                ),
+              );
+            }}
+          />
+        )}
         <div className="chat">
           {/*
             第 16 步：会话状态行（服务端 conversations 表为准）。
@@ -1588,6 +1830,44 @@ export default function App() {
               <span>{curState.keepalive ? '● 监听中（保活：空闲不调模型）' : '○ 未保活'}</span>
               {curState.current_task && <span> · 当前任务：{curState.current_task}</span>}
               {curState.browser_confirmed && <span> · 本会话已同意用浏览器</span>}
+            </div>
+          )}
+          {/*
+            第 17 步：任务结果从右栏搬到这里（右栏整栏不渲染了）。
+            只留「查看结果 / 下载文档」两个动作——结论正文在聊天里以「✅ 任务完成」给出。
+          */}
+          {curTask && (
+            <div className="taskResult">
+              <div className="small">
+                任务 #{curTask.id} · {curTask.status}
+                {curTask.unread ? <span className="unreadTag"> ● 未读</span> : <span className="readTag"> ✓ 已读</span>}
+                {curTask.goal ? ` · 目标：${curTask.goal}` : ''}
+              </div>
+              {taskDetailOpen && curTask.summary && <div className="small taskSummary">{curTask.summary}</div>}
+              {taskDetailOpen && curTask.outline && curTask.outline.length > 0 && (
+                <div className="small">
+                  📄 {curTask.docTitle || '任务记录'} · {curTask.outline.slice(0, 4).join(' / ')}
+                </div>
+              )}
+              <div className="buttons-row">
+                <button
+                  className="btn"
+                  type="button"
+                  onClick={() => {
+                    if (taskDetailOpen) setTaskDetailOpen(false);
+                    else void openTaskResult();
+                  }}
+                >
+                  {taskDetailOpen ? '收起结果' : '查看结果'}
+                </button>
+                {/* 第 8 步：任务 done 后的「下载文档」——不经过右栏，也不必先点「查看结果」 */}
+                {(task.phase === 'done' || curTask.status === 'done') && (
+                  <button className="btn docDownload" type="button" onClick={() => void downloadTaskDoc()}>
+                    下载文档（.md）
+                  </button>
+                )}
+              </div>
+              {docNote && <div className="small">{docNote}</div>}
             </div>
           )}
           {/*
@@ -1608,27 +1888,30 @@ export default function App() {
             </div>
           )}
           {messages.map((m, idx) => {
-            // 第 13 步：只有**最新那张**卡片挂真 webview；更早的卡片退化成一行说明。
-            // 这样全窗口始终只有一个 <webview>——否则既是事实上的多标签，
-            // 也会让主进程「找内嵌页」挑错 guest。
-            // 第 15 步：切智能体后，上一个智能体那张卡片自然落到「非最新」分支 → 降级成占位。
-            const isLiveCard = m.role === 'browser' && m.id === browserCardId && Boolean(m.cardUrl);
+            /**
+             * 第 17 步：网页**不再长在消息里**——中栏顶部那块浏览器区才是它所在的地方，
+             * 聊天里只留一行可点的记录（点一下把那张页切到前面）。
+             * 关键原因：网页挂在窗口级，切到别的智能体去聊别的时它不会被卸载，
+             * 正在跑的那两路驾驶才不会断（第 17 步 C 项要求「可以聊别的，不必盯着」）。
+             */
+            const tabAlive = m.tabId !== undefined && tabs.some((t) => t.id === m.tabId);
             return (
-              <div
-                key={m.id}
-                className={isLiveCard ? (cardExpanded ? 'chat__card chat__card--expanded' : 'chat__card') : undefined}
-              >
+              <div key={m.id}>
                 {m.role === 'browser' ? (
-                  isLiveCard ? (
-                    <BrowserCard
-                      ref={webviewRef}
-                      url={m.cardUrl as string}
-                      expanded={cardExpanded}
-                      onToggle={() => setCardExpanded((v) => !v)}
-                    />
-                  ) : (
-                    <div className="browserCardMoved">网页卡片：{m.text}（已移到最新那张）</div>
-                  )
+                  <button
+                    type="button"
+                    className={tabAlive ? 'browserLine' : 'browserLine browserLine--dead'}
+                    title={tabAlive ? '点一下把这张页切到前面' : '这张页已经关掉了'}
+                    onClick={() => {
+                      if (tabAlive && m.tabId !== undefined) activateTab(m.tabId);
+                    }}
+                  >
+                    <span className="browserLine__ico" aria-hidden="true">
+                      🌐
+                    </span>
+                    <span className="browserLine__txt">{tabLabel(m.tabId) || m.text}</span>
+                    <span className="small">{tabAlive ? '在上面浏览器区' : '已关闭'}</span>
+                  </button>
                 ) : (
                   <>
                     <div className={`msg ${m.role}`}>{m.text}</div>
@@ -1718,49 +2001,11 @@ export default function App() {
       </main>
 
       {/*
-        第 13 步：右栏收干净。
-        驾驶台（开始任务 / 暂停 / 继续 / 我来操作 / 复位 / 示例任务）、黄框调试区、
-        工作台浏览器开关全部撤掉——状态机照旧跑在主进程内部，只是不在右栏画状态。
-        网页改挂在**中栏聊天卡片**里。右栏只在出了任务结果时临时出现一张结果卡，
-        没有任务时整栏不渲染（右栏允许空/隐藏，绝不拿它当浏览器用、也不加宽它）。
+        第 13/17 步：右栏整个撤掉 —— 驾驶台、调试区、**任务卡**一律不画。
+        第 17 步验收第 1 条就是「右栏驾驶台/任务卡看不见」，所以这里不是隐藏，是根本不渲染；
+        任务结果改挂在聊天顶部那一行（结论本身早就在聊天里以「✅ 任务完成」给出了），
+        第 8 步的「下载文档」能力不丢，右栏也不再占地方、更不会被当浏览器用。
       */}
-      {curTask && (
-        <aside className="right">
-          {/* 第 8 步：任务收尾卡——短结论、已读/未读、下载文档都在这（不做浏览器外壳） */}
-          <div className="card">
-            <h4>
-              任务 #{curTask.id} · {curTask.status}{' '}
-              {curTask.unread ? <span className="unreadTag">● 未读</span> : <span className="readTag">✓ 已读</span>}
-            </h4>
-            <div className="small">目标：{curTask.goal}</div>
-            {curTask.status === 'done' && !taskDetailOpen && (
-              <div className="buttons-row">
-                <button className="btn" type="button" onClick={() => void openTaskResult()}>
-                  查看结果{curTask.unread ? '（红点在这）' : ''}
-                </button>
-              </div>
-            )}
-            {taskDetailOpen && (
-              <>
-                {curTask.summary && <div className="small taskSummary">{curTask.summary}</div>}
-                {curTask.outline && curTask.outline.length > 0 && (
-                  <div className="small">📄 {curTask.docTitle || '任务记录'} · {curTask.outline.slice(0, 4).join(' / ')}</div>
-                )}
-              </>
-            )}
-            {/* 第 8 步：任务 done 后「下载文档」直接摆在右栏，不必先点「查看结果」。
-                判定用「主进程状态机 done」或「服务端任务 done」——两者任一为 done 就给按钮。 */}
-            {(task.phase === 'done' || curTask.status === 'done') && (
-              <div className="buttons-row">
-                <button className="btn btn--go docDownload" type="button" onClick={() => void downloadTaskDoc()}>
-                  下载文档（.md）
-                </button>
-              </div>
-            )}
-            {docNote && <div className="small">{docNote}</div>}
-          </div>
-        </aside>
-      )}
     </div>
   );
 }
