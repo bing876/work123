@@ -306,7 +306,7 @@ body {
   flex-wrap: wrap;
 }
 
-/* ---------- 第 17 步：中栏浏览器区（顶栏 tab + URL 栏 + 页，最多 2 张活页） ---------- */
+/* ---------- 第 17 步：中栏浏览器区（顶栏 tab + URL 栏 + 页，最多 10 张活页） ---------- */
 
 /*
  * 这一块是 .middle（纵向 flex）的**兄弟**节点，不在 .chat 的滚动区里。
@@ -321,7 +321,7 @@ body {
   background: #f7f7f8;
 }
 
-/* ---- 顶栏：一张页一个 tab（最多 2 个）+ 「＋」+ 展开/收起 ---- */
+/* ---- 顶栏：一张页一个 tab（最多 10 个）+ 「＋」+ 展开/收起 ---- */
 .browserPanel__tabs {
   display: flex;
   align-items: center;
@@ -333,6 +333,10 @@ body {
   display: flex;
   align-items: center;
   gap: 2px;
+  /* 活页上限 10：张数一多就按比例收窄（min-width 兜底），
+     否则一排 tab 会把右边的「＋ / 收起」顶出可视区、鼠标够不到。 */
+  flex: 0 1 auto;
+  min-width: 56px;
   max-width: 190px;
   padding: 3px 4px 3px 6px;
   border: 1px solid #dcdcdc;
@@ -351,6 +355,9 @@ body {
   font-size: 12px;
   color: var(--text);
   cursor: pointer;
+  /* min-width:0 才能让省略号真的生效（flex 子项的自动最小宽度是 min-content，
+     nowrap 文字会顶住不收窄）。 */
+  min-width: 0;
   max-width: 140px;
   padding: 0;
   white-space: nowrap;

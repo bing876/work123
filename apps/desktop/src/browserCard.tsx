@@ -184,10 +184,22 @@ export function detectBrowseIntent(raw: string): string | null {
 //
 // 硬约束（本步钉死）：
 //   - 仍是 Electron 的 <webview>，**不套 Edge / Chrome / CEF，不用 Playwright**；
-//   - 同一时刻最多 2 张**活着的** <webview>（都是 partition=persist:workbench-browser）；
+//   - 同一时刻最多 MAX_LIVE_PAGES 张**活着的** <webview>（都是 partition=persist:workbench-browser）；
 //   - 切 tab = 把对应那张 webview 放到最前面（z-index），**不为每个 tab 开 BrowserWindow**；
 //   - 收起不是把页面藏没：舞台仍留一块高度（webview 尺寸为 0 会让驾驶点不中任何元素）。
 // ---------------------------------------------------------------------------
+
+/**
+ * 同时真正加载、智能体能点的活页上限（第 17 步修订：2 → 10）。
+ *
+ * 一张活页 = 一套真实 Chromium 渲染进程，所以这是个**资源硬顶**，不是推荐值。
+ * 第 3 张起不再顶掉别的页，一直到第 MAX_LIVE_PAGES 张；第 MAX_LIVE_PAGES + 1 张才顶掉
+ * 「最旧且没在跑」的那一张（两张以上都在跑就排队）。
+ *
+ * ⚠️ 主进程 `apps/desktop/electron/main.ts` 里有一个同值的 `MAX_LANES` 兜底
+ * （渲染层算错了也不会真跑出第 11 路），**改这里必须同时改那里**。
+ */
+export const MAX_LIVE_PAGES = 10;
 
 /** 一张活页在前端的样子 */
 export interface BrowserTabView {
@@ -308,7 +320,7 @@ export function BrowserPanel({
 
   return (
     <div className={expanded ? 'browserPanel browserPanel--expanded' : 'browserPanel'}>
-      {/* 顶栏：一张页一个 tab（最多 2 个）+ 「＋」+ 展开/收起 */}
+      {/* 顶栏：一张页一个 tab（最多 MAX_LIVE_PAGES 个）+ 「＋」+ 展开/收起 */}
       <div className="browserPanel__tabs" role="tablist" aria-label="打开的网页">
         {tabs.map((t) => (
           <div key={t.id} className={t.id === active?.id ? 'browserTab browserTab--on' : 'browserTab'}>
@@ -328,7 +340,7 @@ export function BrowserPanel({
             </button>
           </div>
         ))}
-        <button type="button" className="browserTab__add" title="新开一张（最多 2 张同时活着）" onClick={onNewTab}>
+        <button type="button" className="browserTab__add" title={`新开一张（最多 ${MAX_LIVE_PAGES} 张同时活着）`} onClick={onNewTab}>
           ＋
         </button>
         <button type="button" className="browserPanel__toggle" onClick={onToggle}>
@@ -357,7 +369,7 @@ export function BrowserPanel({
             (e.target as HTMLInputElement).blur();
           }}
         />
-        <span className="browserPanel__count">{tabs.length}/2 张活页</span>
+        <span className="browserPanel__count">{tabs.length}/{MAX_LIVE_PAGES} 张活页</span>
       </div>
 
       {/*

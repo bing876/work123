@@ -21,6 +21,7 @@ import type {
 import {
   BrowserPanel,
   HOME_URL,
+  MAX_LIVE_PAGES,
   detectBrowseIntent,
   detectOpenUrl,
   hostLabel,
@@ -1001,7 +1002,7 @@ export default function App() {
     setKnowledgeNote('');
   };
 
-  // ---- 第 17 步：中栏浏览器区（顶栏 tab + URL 栏 + 页；同时最多 2 张活页）----
+  // ---- 第 17 步：中栏浏览器区（顶栏 tab + URL 栏 + 页；同时最多 MAX_LIVE_PAGES 张活页）----
   /**
    * 打开着的网页。**窗口级**状态（不是某条聊天消息里的卡片）：
    * 这样切到别的智能体去聊别的时，正在跑的两路驾驶不会因为 webview 被卸载而断掉。
@@ -1013,7 +1014,7 @@ export default function App() {
   const [activeTabId, setActiveTabId] = useState<number | null>(null);
   const activeTabRef = useRef<number | null>(null);
   activeTabRef.current = activeTabId;
-  /** 满了 2 张、而且两张都在被驾驶时，第 3 个开页请求先排队（空出来再开） */
+  /** 满了 MAX_LIVE_PAGES 张、而且全都在被驾驶时，下一个开页请求先排队（空出来再开） */
   const [tabQueue, setTabQueue] = useState<Array<{ agentId: number; url: string }>>([]);
   /** 浏览器区是否展开。收起也留一块高度——webview 尺寸为 0 会让驾驶点不中任何元素 */
   const [cardExpanded, setCardExpanded] = useState(true);
@@ -1120,9 +1121,9 @@ export default function App() {
   /**
    * 打开一张页（第 17 步的核心约束都在这里）：
    *   1. 同站已有 → **复用**那张页改道，不新开；
-   *   2. 还没满 2 张 → 直接开；
-   *   3. 已满 2 张 → 顶掉最旧那张**没在跑**的活页；两张都在跑 → 排队等空位。
-   * 无论哪条路，都**不会**出现第 3 张同时活着的 webview。
+   *   2. 还没满 MAX_LIVE_PAGES 张 → 直接开（第 3 张起不再顶掉任何页）；
+   *   3. 已满 MAX_LIVE_PAGES 张 → 顶掉最旧那张**没在跑**的活页；全都在跑 → 排队等空位。
+   * 无论哪条路，都**不会**出现第 MAX_LIVE_PAGES + 1 张同时活着的 webview。
    */
   const openTabFor = async (agentId: number, rawUrl: string): Promise<number | null> => {
     const url = toHttpUrl(rawUrl) ?? HOME_URL;
@@ -1134,7 +1135,7 @@ export default function App() {
       pushBrowserLine(agentId, same.id, url);
       return same.id;
     }
-    if (cur.length >= 2) {
+    if (cur.length >= MAX_LIVE_PAGES) {
       const busy = (await window.workbench?.agentLanes?.()) ?? [];
       const victim = cur.find((t) => {
         const id = wcIdOfTab(t.id);
@@ -1142,11 +1143,11 @@ export default function App() {
       });
       if (!victim) {
         setTabQueue((q) => q.concat({ agentId, url }));
-        setChatNote('已经有 2 张页在被驾驶（硬顶 2 张活页）：这一张先排队，等一路停下来再打开。');
+        setChatNote(`已经有 ${MAX_LIVE_PAGES} 张页在被驾驶（硬顶 ${MAX_LIVE_PAGES} 张活页）：这一张先排队，等一路停下来再打开。`);
         void refreshDriving(); // 同步一次「到底哪几张在跑」，等它们停下来再自动顶掉
         return null;
       }
-      setChatNote(`最多同时 2 张活页：先把最旧的「${victim.title || hostLabel(victim.url)}」关掉，再开这一张。`);
+      setChatNote(`最多同时 ${MAX_LIVE_PAGES} 张活页：先把最旧的「${victim.title || hostLabel(victim.url)}」关掉，再开这一张。`);
       closeTab(victim.id);
     }
     const id = Date.now() + Math.floor(Math.random() * 1000);
@@ -1181,8 +1182,8 @@ export default function App() {
   /** 排队中的开页请求：一有空位就打开（用户关掉一张、或某一路跑完） */
   useEffect(() => {
     if (tabQueue.length === 0) return;
-    // 满 2 张、而且两张都还在被驾驶 → 继续等（等 drivingTabIds 变化再试一次）
-    if (tabs.length >= 2 && drivingTabIds.length >= 2) return;
+    // 满 MAX_LIVE_PAGES 张、而且全都在被驾驶 → 继续等（等 drivingTabIds 变化再试一次）
+    if (tabs.length >= MAX_LIVE_PAGES && drivingTabIds.length >= MAX_LIVE_PAGES) return;
     const [next] = tabQueue;
     setTabQueue((q) => q.slice(1));
     void openTabFor(next.agentId, next.url);
@@ -1788,7 +1789,7 @@ export default function App() {
         <div className="sidebar__footer">桥：{bridgeInfo}</div>
       </aside>
 
-      {/* 中间：浏览器区（第 17 步：顶栏 tab + URL 栏 + 页，最多 2 张活页）+ 聊天区 */}
+      {/* 中间：浏览器区（第 17 步：顶栏 tab + URL 栏 + 页，最多 MAX_LIVE_PAGES 张活页）+ 聊天区 */}
       <main className="middle">
         {/*
           第 17 步：浏览器区挂在**窗口级**，不塞在某一条聊天消息里。
