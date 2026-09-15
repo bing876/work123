@@ -611,7 +611,8 @@ function failureHint(snap: PageSnapshot | undefined): string {
   return `可能原因：${reasons.join(' / ')}。${next}`;
 }
 
-/** 第 9 步：click 的支付确认守卫——收银台最终确认永远由用户点 */async function payClickGuard(wc: Target, target: string): Promise<string | null> {
+/** 第 9 步：click 的支付确认守卫——收银台最终确认永远由用户点 */
+async function payClickGuard(wc: Target, target: string): Promise<string | null> {
   const hit = await evaluate<{ label: string } | null>(
     wc,
     pageScript(`(() => {

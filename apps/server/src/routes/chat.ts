@@ -437,21 +437,23 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
     const q = req.query as { conversationId?: unknown; agentId?: unknown } | null;
     const convIdRaw = Number(q?.conversationId);
     const agentIdRaw = Number(q?.agentId);
+    const hasConvId = Number.isInteger(convIdRaw) && convIdRaw > 0;
+    const hasAgentId = Number.isInteger(agentIdRaw) && agentIdRaw > 0;
+    /**
+     * 一个 id 都没带就**直接回空**，不往下走 resolveConversation：
+     * 那条兜底分支在账号还没有会话时会 INSERT 一条（GET 产生写副作用，不能接受）。
+     * 桌面的 loadAgentState 永远带 agentId，所以这里只是堵住口子。
+     */
+    if (!hasConvId && !hasAgentId) return { conversationId: null, state: null } satisfies ChatStateResult;
     try {
       const conv = await resolveConversation(
         pool,
         claims.sub,
-        Number.isInteger(convIdRaw) && convIdRaw > 0 ? convIdRaw : null,
+        hasConvId ? convIdRaw : null,
         '',
-        Number.isInteger(agentIdRaw) && agentIdRaw > 0 ? agentIdRaw : null,
+        hasAgentId ? agentIdRaw : null,
       );
-      if ('err' in conv) {
-        // 一条会话都还没有时宽容返回空状态（和 /chat/history 一致）
-        if (!Number.isInteger(convIdRaw) && !Number.isInteger(agentIdRaw)) {
-          return { conversationId: null, state: null } satisfies ChatStateResult;
-        }
-        return errJson(reply, conv.status, conv.err);
-      }
+      if ('err' in conv) return errJson(reply, conv.status, conv.err);
       const state = await loadConversationState(pool, conv.id);
       return { conversationId: conv.id, state } satisfies ChatStateResult;
     } catch (err) {

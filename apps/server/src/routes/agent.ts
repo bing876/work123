@@ -387,21 +387,16 @@ export function registerAgentRoutes(app: FastifyInstance, { pool, env, cipher }:
       let problem: 'bad_json' | 'empty_action' | 'early_done' | 'none' = 'bad_json';
       for (let attempt = 1; attempt <= 2; attempt += 1) {
         const hint = attempt === 1 ? '' : problem === 'early_done' ? RETRY_HINT_EARLY_DONE : RETRY_HINT_BLANK;
-        const r = await fetch(`${env.deepseekBaseUrl.replace(/\/+$/, '')}/chat/completions`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', authorization: `Bearer ${env.deepseekApiKey}` },
-          body: JSON.stringify({
-            model: env.deepseekModel,
-            stream: false,
-            response_format: { type: 'json_object' },
-            temperature: 0.2,
-            messages: [
-              { role: 'system', content: DRIVER_PROMPT },
-              { role: 'user', content: hint ? `${userMsg}\n\n${hint}` : userMsg },
-            ],
-          }),
-          signal: AbortSignal.timeout(60_000),
-        });
+        // 第 16 步：走唯一的模型出口，驾驶员循环的每一次调用都进 /health 的 llmCalls
+        // （这是调用最频繁的接口——不计数的话「空闲不调模型」就没法用计数证明了）。
+        const r = await llmFetch(
+          env,
+          [
+            { role: 'system', content: DRIVER_PROMPT },
+            { role: 'user', content: hint ? `${userMsg}\n\n${hint}` : userMsg },
+          ],
+          { tag: `agent/next-action#${attempt}`, json: true, temperature: 0.2 },
+        );
         if (!r.ok) {
           const brief = (await r.text().catch(() => '')).slice(0, 200).replace(/\s+/g, ' ');
           console.error('[agent] 上游 HTTP', r.status, brief);
