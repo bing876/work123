@@ -48,12 +48,53 @@ body {
 }
 
 .contact {
+  /* 第 15 步：左栏一行一个智能体，这一行是 <button>——先把浏览器默认按钮样式清掉 */
+  width: 100%;
+  border: 1px solid transparent;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 8px;
   border-radius: 8px;
   position: relative;
+}
+
+.contact:hover {
+  background: #f6f7f9;
+}
+
+/* 当前正在聊的那个智能体 */
+.contact--on {
+  background: #eef2ff;
+  border-color: #c7d2fe;
+}
+
+/* ---- 第 15 步：左栏智能体列表 + 「＋ 添加」 ---- */
+.agentList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 44vh;
+  overflow-y: auto;
+}
+.agentList__add {
+  margin-top: 4px;
+}
+/* 删自建智能体（「小助」不会出现这个按钮） */
+.agentList__del {
+  color: #b91c1c;
+}
+.agentList__note {
+  margin-top: 2px;
+  line-height: 1.45;
+  color: #b45309;
+  word-break: break-word;
 }
 
 .avatar {
@@ -516,6 +557,64 @@ body {
   cursor: pointer;
   font-size: 12px;
   white-space: nowrap;
+}
+.memList__title {
+  margin-bottom: 4px;
+  color: #6b7280;
+}
+
+/* ---- 第 15 步：聊天里的「引导表」。
+   它不是后台配置页、也不是独立窗口，就是新会话里的一张四行小表（名称/它是谁/怎么说话/干什么）。
+   宽度跟消息一样撑满中栏，不碰右栏宽度。 ---- */
+.guide {
+  align-self: stretch;
+  flex: 0 0 auto;
+  margin: 4px 0 8px;
+  padding: 12px;
+  border: 1px solid #c7d2fe;
+  border-radius: 10px;
+  background: #f8faff;
+}
+.guide__head {
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+.guide__table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0 2px;
+}
+.guide__table th {
+  width: 84px;
+  padding: 4px 8px 4px 0;
+  text-align: left;
+  vertical-align: middle;
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--text-weak);
+}
+.guide__table td {
+  padding: 3px 0;
+}
+.guide__input {
+  width: 100%;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: #fff;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  outline: none;
+}
+.guide__input:focus {
+  border-color: var(--accent);
+}
+.guide__ok {
+  width: auto;
+}
+.guide__del {
+  color: #b91c1c;
 }
 
 /* ---- 第 11 步：左栏知识库入口。只加在现有账户小块内，不改三栏和右侧 webview 宽度。 ---- */

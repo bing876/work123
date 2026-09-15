@@ -1,5 +1,21 @@
 import { useEffect, useRef, useState, type ChangeEvent } from 'react';
-import type { AgentEventPayload, AuthProfile, AuthSession, ChatHistoryResult, KnowledgeDocument, KnowledgeListResult, KnowledgeUploadResult, MemoryExtractResult, MemoryItem, MemoryListResult, TaskState } from '@ai-workbench/shared';
+import type {
+  AgentCreateResult,
+  AgentEventPayload,
+  AgentListResult,
+  AgentPersona,
+  AgentTidyResult,
+  AgentView,
+  AuthProfile,
+  AuthSession,
+  ChatHistoryResult,
+  KnowledgeDocument,
+  KnowledgeListResult,
+  KnowledgeUploadResult,
+  MemoryEntry,
+  MemoryLayerList,
+  TaskState,
+} from '@ai-workbench/shared';
 import { BrowserCard, HOME_URL, detectOpenUrl } from './browserCard';
 
 /**
@@ -50,10 +66,24 @@ import { BrowserCard, HOME_URL, detectOpenUrl } from './browserCard';
  *     状态机保留在主进程内部，不在右栏画状态；右栏只在有任务结果时出现一张结果卡；
  *   - 驾驶目标改为**卡片里这张页**（getWebviewId 拿的就是卡片的 guest），流程没变；
  *   - 敏感闸没动：聊天输入框发 123456 仍被拦下、不落库、不代填；验证码/密码请在网页里自己打。
+ *
+ * 第 15 步「添加智能体 + 引导表 + 两层记忆」：
+ *   - 左栏是**智能体列表**（自带「小助」+ 用户点「添加」建的），点「添加」不发弹窗、不开新窗口：
+ *     服务端建一个智能体 + 立刻给它建一条空会话，界面直接切到那个新会话；
+ *   - 新会话里第一张就是**引导表**（名称 / 它是谁 / 怎么说话 / 干什么，四行简单表格），
+ *     确认后这个智能体才按这份描述干活；没填完也能留着这个会话，模型只引导、不空人设乱聊；
+ *   - **会话隔离**：一个智能体一份聊天（各自的 conversation + 各自的消息列表），
+ *     切智能体 = 换聊天；流式回包按**发起时那个智能体**落桶，绝不写进别的智能体；
+ *   - 网页卡片仍是第 13 步那一张：谁当前在聊谁用，切换后旧卡片降级成一行占位（全窗口恒 1 个 webview）；
+ *   - 两层记忆：用户记忆库（账号级，所有智能体都读）/ 项目记忆（智能体级，绝不串）。
  */
 
 type Role = 'user' | 'assistant' | 'browser';
 type Message = { id: number; role: Role; text: string; cardUrl?: string };
+/** 第 15 步：一个智能体 = 一份聊天（自己的消息列表 + 自己的会话号） */
+type AgentChat = { messages: Message[]; convId: number | null };
+/** 空列表用同一个常量：切智能体时引用稳定，不会每次渲染都造新数组 */
+const EMPTY_MESSAGES: Message[] = [];
 
 /** 第 8 步：GET /agent/task/current 的形态（红点/结果都认这个，不信内存假数据） */
 interface CurrentTask {
@@ -72,8 +102,8 @@ interface CurrentTask {
  * 第 6 步：不再放写死的开场白。
  * 历史一律以服务端 `/chat/history` 为准（库里的密文解密回传）；
  * 一条都没有时中间区显示一句空态提示，而不是拿假对话冒充“聊过”。
+ * 第 15 步：这份历史是**按智能体**分开的——每个智能体只拉自己那条会话。
  */
-const SEED_MESSAGES: Message[] = [];
 
 // ---------------------------------------------------------------------------
 // 第 5 步（重做版）：先登录，再进工作台
@@ -225,6 +255,92 @@ function AuthScreen({ onSession }: { onSession: (s: AuthSession) => void }) {
   );
 }
 
+/** 左栏头像里的那个字：小助固定「助」，自建智能体取名字首字（还没名字就是「新」） */
+function agentGlyph(a: AgentView): string {
+  if (a.kind === 'assistant') return '助';
+  const n = (a.persona?.name || a.name || '').trim();
+  return n ? n.slice(0, 1) : '新';
+}
+
+/**
+ * 第 15 步：聊天里的「引导表」。
+ *
+ * 用户点「添加」后，**新会话里先摆这张表**（不是先弹一个独立设置窗、更不是后台配置页）：
+ * 四行简单表格——名称 / 它是谁 / 怎么说话 / 干什么，加一个确认按钮。
+ * 确认 → 服务端存人设 → personaStatus 变 ready，这个智能体才按这份描述干活；
+ * 没填完也可以先留着这个会话（服务端这时只让模型引导用户填表，不空人设乱聊）。
+ */
+function AgentGuide({
+  agent,
+  onSave,
+  onDelete,
+}: {
+  agent: AgentView;
+  onSave: (p: AgentPersona) => Promise<void>;
+  onDelete: () => void;
+}) {
+  const [name, setName] = useState(agent.persona?.name ?? '');
+  const [who, setWho] = useState(agent.persona?.who ?? '');
+  const [tone, setTone] = useState(agent.persona?.tone ?? '');
+  const [duty, setDuty] = useState(agent.persona?.duty ?? '');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  const rows: Array<{ label: string; value: string; ph: string; set: (v: string) => void; max: number }> = [
+    { label: '名称', value: name, ph: '它叫什么？', set: setName, max: 24 },
+    { label: '它是谁', value: who, ph: '例如：一个只懂电商运营的老手', set: setWho, max: 120 },
+    { label: '怎么说话', value: tone, ph: '例如：短句、直接、别客套', set: setTone, max: 120 },
+    { label: '干什么', value: duty, ph: '例如：帮我盯店铺数据、写商品标题', set: setDuty, max: 120 },
+  ];
+
+  const submit = async () => {
+    if (!name.trim() || busy) return;
+    setErr('');
+    setBusy(true);
+    try {
+      await onSave({ name: name.trim(), who: who.trim(), tone: tone.trim(), duty: duty.trim() });
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="guide">
+      <div className="guide__head">先给这个智能体定个样子</div>
+      <div className="small">填完点确认，它才按这份描述干活；没填完也能先留着这个会话。</div>
+      <table className="guide__table">
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.label}>
+              <th>{r.label}</th>
+              <td>
+                <input
+                  className="guide__input"
+                  value={r.value}
+                  placeholder={r.ph}
+                  maxLength={r.max}
+                  onChange={(e) => r.set(e.target.value)}
+                />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="buttons-row">
+        <button type="button" className="btn btn--go guide__ok" disabled={busy || !name.trim()} onClick={() => void submit()}>
+          {busy ? '保存中…' : '确认，就按这个来'}
+        </button>
+        <button type="button" className="btn guide__del" onClick={onDelete}>
+          删掉这个智能体
+        </button>
+      </div>
+      {err && <div className="authErr">{err}</div>}
+    </div>
+  );
+}
+
 export default function App() {
   /** 头像右上角红点：第 8 步起由服务端 tasks.unread 驱动（登录后拉 current，done 事件点亮，看完熄灭） */
   const [hasUnread, setHasUnread] = useState(false);
@@ -243,7 +359,39 @@ export default function App() {
     blocked: false,
   });
   const [input, setInput] = useState('');
-  const [messages, setMessages] = useState<Message[]>(SEED_MESSAGES);
+  /**
+   * 第 15 步：**一个智能体一份聊天**。
+   * chats[agentId] = { messages, convId }；切换智能体只是换渲染哪一份，
+   * 绝不把两个智能体的消息揉成一条时间线。
+   */
+  const [chats, setChats] = useState<Record<number, AgentChat>>({});
+  /** 异步回包里读最新 chats（闭包里拿 state 会拿到旧的） */
+  const chatsRef = useRef<Record<number, AgentChat>>({});
+  chatsRef.current = chats;
+  /** 左栏选中的那个智能体；null = 还没拿到列表 */
+  const [curAgentId, setCurAgentId] = useState<number | null>(null);
+  /** 异步回调里读「此刻是哪个智能体」——直接用 state 会拿到挂载时的旧闭包值 */
+  const curAgentRef = useRef<number | null>(null);
+  curAgentRef.current = curAgentId;
+  /** 已经拉过历史的智能体，来回切换不反复请求 */
+  const historyLoadedRef = useRef<Set<number>>(new Set());
+
+  /** 只改**某一个**智能体的那份聊天。异步回包（尤其是流式）必须用它，别用下面的 setMessages */
+  const patchChat = (agentId: number, patch: (c: AgentChat) => AgentChat) => {
+    setChats((prev) => {
+      const cur = prev[agentId] ?? { messages: [], convId: null };
+      const next = patch(cur);
+      return next === cur ? prev : { ...prev, [agentId]: next };
+    });
+  };
+  const curChat = curAgentId === null ? undefined : chats[curAgentId];
+  const messages = curChat?.messages ?? EMPTY_MESSAGES;
+  /** 往「当前智能体」那份聊天里追加/替换消息（沿用第 6 步以来的调用点写法） */
+  const setMessages = (updater: Message[] | ((prev: Message[]) => Message[])) => {
+    const id = curAgentRef.current;
+    if (id === null) return;
+    patchChat(id, (c) => ({ ...c, messages: typeof updater === 'function' ? updater(c.messages) : updater }));
+  };
   /** 第 1 步的 IPC 自检，留着当回归哨兵 */
   const [bridgeInfo, setBridgeInfo] = useState('检测中…');
 
@@ -270,26 +418,40 @@ export default function App() {
   }, []);
 
   // ---- 第 6 步：流式聊天状态（真聊天，不再是内存假数据）----
-  /** 当前会话 id：登录后 /chat/history 给回，或 /chat/stream 的 meta 事件补上；只在内存，不硬编 */
-  const convIdRef = useRef<number | null>(null);
   /**
    * 第 13 步：这一轮的**用户原话**是不是「开网页指令」。
    * 是的话，即使模型仍回了「确认后我开始操作」那句老话，也不再挂确认按钮——
    * 网页已经在卡片里打开了，再要用户点确认就是自相矛盾。
+   * 第 15 步：按智能体分别记（否则在 A 里开的网页会压掉 B 里的确认按钮）。
    */
-  const lastUserWasOpenRef = useRef(false);
+  const lastUserWasOpenRef = useRef<Record<number, boolean>>({});
   const [streaming, setStreaming] = useState(false);
+  /** 第 15 步：这轮流式是**哪个**智能体在打字——切走后不该在别的智能体里冒出打字气泡 */
+  const [streamingAgentId, setStreamingAgentId] = useState<number | null>(null);
   /** 打字机中的半截助手回复（done 之前只活在这里；库里只有完成的全文） */
   const [streamText, setStreamText] = useState('');
   /** 聊天区一条可关闭的提示（未配置模型 / 出错 / 已先行暂停等），不冒充 AI 的话 */
   const [chatNote, setChatNote] = useState('');
 
-  /** 第 9 步：驾驶员在聊天里等用户回答普通资料（need_info）——回答后自动继续，不用点「继续」 */
+  /**
+   * 第 9 步：驾驶员在聊天里等用户回答普通资料（need_info）——回答后自动继续，不用点「继续」。
+   * 第 15 步：驾驶员的循环是**全进程一个**（第 7 步的设计），但「这句答复该不该喂给它」要按智能体判——
+   * agentAwaitAgent 记住这个提问是**哪个智能体**在等，别的智能体聊天里的回答不会串进去。
+   */
   const [agentAwaitInfo, setAgentAwaitInfo] = useState(false);
-  /** 第 10 步：用户档案记忆（active 列表 + 待确认卡）——一切以服务端为准 */
-  const [memActive, setMemActive] = useState<MemoryItem[]>([]);
-  const [memPending, setMemPending] = useState<MemoryItem[]>([]);
-  const [memOpen, setMemOpen] = useState(false);
+  const [agentAwaitAgent, setAgentAwaitAgent] = useState<number | null>(null);
+  /** 当前这个智能体在等驾驶员提问吗（切到别的智能体就不提示） */
+  const awaitHere = agentAwaitInfo && agentAwaitAgent === curAgentId;
+  /** 第 15 步：左栏智能体列表（服务端为准）。personaStatus==='pending' 时聊天里摆引导表 */
+  const [agents, setAgents] = useState<AgentView[]>([]);
+  const [agentBusy, setAgentBusy] = useState(false);
+  const [agentNote, setAgentNote] = useState('');
+  /** 第 15 步 · 第一层：用户记忆库（账号级，所有智能体都能读，界面上也列出来） */
+  const [userMem, setUserMem] = useState<MemoryEntry[]>([]);
+  const [userMemOpen, setUserMemOpen] = useState(false);
+  /** 第 15 步 · 第二层：**当前智能体**的项目记忆（智能体级，切智能体就整块换掉） */
+  const [projMem, setProjMem] = useState<MemoryEntry[]>([]);
+  const [projMemOpen, setProjMemOpen] = useState(false);
   /** 第 11 步：知识库资料独立于 memories；只展示当前账号的文件元信息和已入库段数。 */
   const [knowledgeDocs, setKnowledgeDocs] = useState<KnowledgeDocument[]>([]);
   const [knowledgeOpen, setKnowledgeOpen] = useState(false);
@@ -305,62 +467,210 @@ export default function App() {
     setMessages((prev) => prev.concat({ id: Date.now() + Math.floor(Math.random() * 1000), role: 'assistant', text }));
   };
 
-  // ---- 第 10 步：记忆 —— pending 上卡、active 进列表；确认前绝不注入 ----
+  // ---- 第 15 步：两层记忆 + 智能体列表（一切以服务端为准，界面只做展示） ----
   const memHeaders = () => ({ authorization: `Bearer ${sessionRef.current?.token ?? ''}` });
-  const loadMemories = async () => {
+
+  /** 第一层：用户记忆库（账号级）——任何智能体都读得到，界面也一样列出来 */
+  const loadUserMemory = async () => {
     if (!sessionRef.current) return;
     try {
-      const r = await authFetchJson<MemoryListResult>('/memories', { headers: memHeaders() });
-      setMemActive(r.active);
-      setMemPending(r.pending);
+      const r = await authFetchJson<MemoryLayerList>('/memory/user', { headers: memHeaders() });
+      setUserMem(r.items);
     } catch {
       /* 后端/库没起就不打扰 */
     }
   };
-  /** 「结束」：手动触发一次提取（同会话 10 分钟内重复点会被服务端去重窗口挡下） */
-  const endConversationAndExtract = async () => {
+  /** 第二层：某个智能体的项目记忆（智能体级）——切智能体就整块换成它自己的 */
+  const loadProjectMemory = async (agentId: number) => {
     if (!sessionRef.current) return;
-    if (convIdRef.current === null) {
-      setChatNote('还没聊过天，没有可整理的。');
-      return;
-    }
     try {
-      const r = await authFetchJson<MemoryExtractResult>('/memories/extract', {
+      const r = await authFetchJson<MemoryLayerList>(`/agents/${agentId}/memory`, { headers: memHeaders() });
+      // 切走之后晚到的响应不能覆盖当前智能体的那份
+      if (curAgentRef.current !== agentId) return;
+      setProjMem(r.items);
+    } catch {
+      /* 同上 */
+    }
+  };
+
+  /** 拉某个智能体自己的那条会话历史（一个智能体一份聊天，不串） */
+  const loadAgentHistory = async (agent: AgentView) => {
+    const sess = sessionRef.current;
+    if (!sess) return;
+    const q = agent.conversationId !== null ? `?conversationId=${agent.conversationId}` : `?agentId=${agent.id}`;
+    try {
+      const h = await authFetchJson<ChatHistoryResult>(`/chat/history${q}`, {
+        headers: { authorization: `Bearer ${sess.token}` },
+      });
+      if (sessionRef.current?.token !== sess.token) return; // 切号期间晚到的响应丢掉
+      historyLoadedRef.current.add(agent.id);
+      patchChat(agent.id, () => ({
+        messages: h.messages.map((m) => ({ id: m.id, role: m.role, text: m.text })),
+        convId: h.conversationId,
+      }));
+    } catch (e) {
+      setChatNote(`拉取历史失败：${(e as Error).message}`);
+    }
+  };
+
+  /** 拉智能体列表；当前选中的那个不在了就回到第一个（小助） */
+  const loadAgents = async () => {
+    const sess = sessionRef.current;
+    if (!sess) return;
+    try {
+      const r = await authFetchJson<AgentListResult>('/agents', { headers: { authorization: `Bearer ${sess.token}` } });
+      if (sessionRef.current?.token !== sess.token) return;
+      setAgents(r.agents);
+      setAgentNote('');
+      const cur = curAgentRef.current;
+      const stillThere = cur !== null && r.agents.some((a) => a.id === cur);
+      if (stillThere) {
+        void loadProjectMemory(cur as number);
+      } else if (r.agents.length > 0) {
+        const first = r.agents[0];
+        curAgentRef.current = first.id;
+        setCurAgentId(first.id);
+        void loadProjectMemory(first.id);
+        void loadAgentHistory(first);
+      }
+    } catch (e) {
+      setAgentNote(`读不到智能体列表：${(e as Error).message}`);
+    }
+  };
+
+  /** 切智能体 = 换一份聊天：换消息列表、换项目记忆、旧网页卡片降级 */
+  const selectAgent = (agent: AgentView) => {
+    if (agent.id === curAgentRef.current) return;
+    curAgentRef.current = agent.id; // 立刻生效，免得同一 tick 里的回调写错桶
+    setCurAgentId(agent.id);
+    setCardExpanded(false);
+    setProjMem([]);
+    setChatNote('');
+    setAgentNote('');
+    void loadProjectMemory(agent.id);
+    if (!historyLoadedRef.current.has(agent.id)) void loadAgentHistory(agent);
+  };
+
+  /**
+   * 点「添加」：服务端建一个智能体 + 立刻给它建一条空会话，界面直接切到那个新会话。
+   * 不弹独立设置窗、不开新 BrowserWindow —— 引导表就摆在这个新会话里。
+   */
+  const addAgent = async () => {
+    const sess = sessionRef.current;
+    if (!sess || agentBusy) return;
+    setAgentBusy(true);
+    setAgentNote('');
+    try {
+      const r = await authFetchJson<AgentCreateResult>('/agents', {
         method: 'POST',
-        body: JSON.stringify({ conversationId: convIdRef.current }),
-        headers: memHeaders(),
+        body: '{}',
+        headers: { authorization: `Bearer ${sess.token}` },
+      });
+      const a = r.agent;
+      setAgents((prev) => prev.concat(a));
+      historyLoadedRef.current.add(a.id);
+      patchChat(a.id, () => ({ messages: [], convId: a.conversationId }));
+      curAgentRef.current = a.id;
+      setCurAgentId(a.id);
+      setProjMem([]);
+      setProjMemOpen(false);
+      setCardExpanded(false);
+      setChatNote('');
+    } catch (e) {
+      setAgentNote(`添加没成：${(e as Error).message}`);
+    } finally {
+      setAgentBusy(false);
+    }
+  };
+
+  /** 引导表确认：存人设 → 这个智能体从这一刻起按这份描述干活 */
+  const savePersona = async (agentId: number, persona: AgentPersona) => {
+    const sess = sessionRef.current;
+    if (!sess) throw new Error('还没登录');
+    const r = await authFetchJson<AgentCreateResult>(`/agents/${agentId}/persona`, {
+      method: 'POST',
+      body: JSON.stringify(persona),
+      headers: { authorization: `Bearer ${sess.token}` },
+    });
+    setAgents((prev) => prev.map((x) => (x.id === agentId ? r.agent : x)));
+    setChatNote(`好，${r.agent.name} 已就位——从现在起它按你填的这份描述干活。`);
+  };
+
+  /** 删自建智能体（「小助」服务端会拒）：它的聊天与项目记忆一并清掉，不碰别的智能体 */
+  const deleteAgent = async (agentId: number) => {
+    const sess = sessionRef.current;
+    if (!sess) return;
+    try {
+      await authFetchJson(`/agents/${agentId}`, {
+        method: 'DELETE',
+        body: '{}',
+        headers: { authorization: `Bearer ${sess.token}` },
+      });
+      const next = agents.filter((x) => x.id !== agentId);
+      setAgents(next);
+      setChats((prev) => {
+        const copy = { ...prev };
+        delete copy[agentId];
+        return copy;
+      });
+      historyLoadedRef.current.delete(agentId);
+      if (curAgentRef.current === agentId) {
+        const first = next[0];
+        curAgentRef.current = first ? first.id : null;
+        setCurAgentId(first ? first.id : null);
+        setProjMem([]);
+        if (first && !historyLoadedRef.current.has(first.id)) void loadAgentHistory(first);
+      }
+      setBrowserCardId(null);
+      setChatNote('已删掉这个智能体（它的聊天和项目记忆一并清掉，没碰别的智能体）。');
+    } catch (e) {
+      setChatNote(`删除没成：${(e as Error).message}`);
+    }
+  };
+
+  /**
+   * 「结束」：把这段聊天**总结**进两层记忆（不是把整段聊天当记忆存）。
+   * 服务端按「偏口味/习惯 → 用户库；偏这个项目的业务/资料 → 该智能体项目记忆」分类，
+   * 敏感信息在写入前一律整条丢弃。
+   */
+  const tidyCurrentAgent = async () => {
+    const sess = sessionRef.current;
+    const agentId = curAgentRef.current;
+    if (!sess || agentId === null) return;
+    const convId = chatsRef.current[agentId]?.convId ?? null;
+    setChatNote('正在把这段聊天总结进两层记忆…');
+    try {
+      const r = await authFetchJson<AgentTidyResult>(`/agents/${agentId}/tidy`, {
+        method: 'POST',
+        body: JSON.stringify({ conversationId: convId ?? undefined }),
+        headers: { authorization: `Bearer ${sess.token}` },
       });
       if (r.skipped === 'llm_not_configured') setChatNote('没配 DEEPSEEK_API_KEY，这次没整理记忆。');
-      else if (r.skipped === 'dedup_10min') setChatNote('刚整理过一次了（10 分钟内不重复）。');
-      else {
-        const silent = Math.max(0, r.extracted - r.pending.length);
-        setChatNote(silent > 0 ? `已静默记下 ${silent} 条偏好；${r.pending.length > 0 ? '还有要你先确认的：' : '没有需要确认的。'}` : '整理完了，没有新增。');
-      }
-      void loadMemories();
+      else if (r.skipped === 'empty_transcript') setChatNote('还没聊过天，没有可整理的。');
+      else setChatNote(`整理完了：用户记忆库 +${r.userAdded} 条，本项目记忆 +${r.projectAdded} 条。`);
+      void loadUserMemory();
+      void loadProjectMemory(agentId);
     } catch (e) {
       setChatNote(`整理记忆没成：${(e as Error).message}`);
     }
   };
-  const decideMemories = async (kind: 'confirm' | 'reject') => {
-    if (!sessionRef.current) return;
+
+  /** 忘掉一条：user = 账号级用户记忆库；agent = 当前智能体的项目记忆 */
+  const forgetEntry = async (layer: 'user' | 'agent', id: number) => {
+    const sess = sessionRef.current;
+    if (!sess) return;
     try {
-      await authFetchJson(`/memories/${kind}`, { method: 'POST', body: JSON.stringify({ all: true }), headers: memHeaders() });
-      setChatNote(kind === 'confirm' ? '好，记下了，从现在起按这个来。' : '收到，这几条作废。');
-      void loadMemories();
-    } catch (e) {
-      setChatNote(`操作没成：${(e as Error).message}`);
-    }
-  };
-  const forgetMemory = async (id: number) => {
-    if (!sessionRef.current) return;
-    try {
-      await authFetchJson('/memories/forget', { method: 'POST', body: JSON.stringify({ id }), headers: memHeaders() });
-      void loadMemories();
+      await authFetchJson('/memory/forget', {
+        method: 'POST',
+        body: JSON.stringify({ layer, id }),
+        headers: { authorization: `Bearer ${sess.token}` },
+      });
+      if (layer === 'user') void loadUserMemory();
+      else if (curAgentRef.current !== null) void loadProjectMemory(curAgentRef.current);
     } catch (e) {
       setChatNote(`忘掉失败：${(e as Error).message}`);
     }
   };
-  const MEM_TYPE_CN: Record<string, string> = { preference: '偏好', decision: '决定', fact: '事实' };
 
   /** 第 8 步：任务快照（状态/未读/结果）——红点的唯一事实源。
    *  用 ref 拿会话：agent 订阅 effect 是挂载时建的闭包，直接引用 session 会拿到旧的 null。 */
@@ -477,29 +787,24 @@ export default function App() {
     else setDocNote(`下载失败：${r.error ?? '未知原因'}`);
   };
 
-  /** 会话一定向拉一次历史 + 任务快照：刷新/重启还能看见之前的对话与红点；登出清零 */
+  /**
+   * 会话变了：把**所有**智能体的聊天缓存清掉，重新拉智能体列表 / 用户记忆库 / 任务快照 / 资料列表。
+   * 具体某个智能体的历史由 loadAgents → loadAgentHistory 拉（一个智能体一份聊天，互不干扰）。
+   */
   useEffect(() => {
-    setMessages([]);
-    convIdRef.current = null;
+    setChats({});
+    setCurAgentId(null);
+    curAgentRef.current = null;
+    historyLoadedRef.current = new Set();
+    setAgents([]);
+    setAgentNote('');
+    setUserMem([]);
+    setProjMem([]);
     if (!session) return;
-    let off = false;
-    authFetchJson<ChatHistoryResult>('/chat/history', {
-      headers: { authorization: `Bearer ${session.token}` },
-    })
-      .then((h) => {
-        if (off) return;
-        convIdRef.current = h.conversationId;
-        setMessages(h.messages.map((m) => ({ id: m.id, role: m.role, text: m.text })));
-        void refreshTask();
-        void loadMemories(); // 刷新后：pending 卡与「我的记忆」都还在
-        void loadKnowledge(); // 第 11 步：只拉本人资料的文件名/段数，不把正文拉回前端
-      })
-      .catch((e) => {
-        if (!off) setChatNote(`拉取历史失败：${(e as Error).message}`);
-      });
-    return () => {
-      off = true;
-    };
+    void refreshTask();
+    void loadAgents();
+    void loadUserMemory();
+    void loadKnowledge(); // 第 11 步：只拉本人资料的文件名/段数，不把正文拉回前端
   }, [session]);
 
   const onSubmitPassword = async () => {
@@ -527,10 +832,19 @@ export default function App() {
     setSession(null);
     setPwMsg('');
     // 第 6 步：聊天痕迹也清掉（历史本来就在服务端，重启登录后由 /chat/history 还原）
-    setMessages([]);
     setChatNote('');
     setStreamText('');
-    convIdRef.current = null;
+    // 第 15 步：所有智能体的聊天、列表、两层记忆全部清掉（会话 effect 也会兜一遍）
+    setChats({});
+    setCurAgentId(null);
+    curAgentRef.current = null;
+    historyLoadedRef.current = new Set();
+    setAgents([]);
+    setAgentNote('');
+    setUserMem([]);
+    setUserMemOpen(false);
+    setProjMem([]);
+    setProjMemOpen(false);
     // 第 7 步：驾驶员循环和 token 一并停掉/清掉（主进程里也不留）
     void window.workbench?.agentStop();
     // 第 13 步：聊天里的网页卡片一并清掉（换号不该看见上一个号的网页）
@@ -543,9 +857,7 @@ export default function App() {
     setDocNote('');
     setHasUnread(false);
     setAgentAwaitInfo(false);
-    setMemActive([]);
-    setMemPending([]);
-    setMemOpen(false);
+    setAgentAwaitAgent(null);
     setKnowledgeDocs([]);
     setKnowledgeOpen(false);
     setKnowledgeUploading(false);
@@ -656,20 +968,25 @@ export default function App() {
         pushChatLine(`⚠️ ${p.question}`);
         const needInfo = p.reason === 'need_info';
         setAgentAwaitInfo(needInfo);
+        // 第 15 步：记下「是哪个智能体在等这句话」，答复才不会串到别的智能体
+        setAgentAwaitAgent(needInfo ? curAgentRef.current : null);
         if (needInfo) setChatNote('小助在等你答这句话——直接在下面输入框回答即可，发出后会自动继续（不用点「继续」）。');
       } else if (p.kind === 'sensitive') {
         pushChatLine(`🔒 ${p.message}`);
       } else if (p.kind === 'done') {
         setAgentAwaitInfo(false);
+        setAgentAwaitAgent(null);
         pushChatLine(`✅ 任务完成：${p.summary}${p.docReady ? ` · ${p.unreadHint ?? '结果文档已生成'}` : '（文档未就绪：后端未配置模型或库未起，见后端日志）'}`);
         setAgentDoc({ title: p.documentTitle, outline: p.documentOutline });
         // 第 8 步：红点由服务端确认（finish 已置 unread=true），这里点亮并刷新卡片
         setHasUnread(true);
         void refreshTask();
-        void loadMemories(); // 第 10 步：任务 done 的抽取在服务端做，可能刚产出待确认条目
       } else if (p.kind === 'note') {
         pushChatLine(`${p.level === 'error' ? '⚠️' : 'ℹ️'} ${p.text}`);
-        if (/继续|恢复驾驶/.test(p.text)) setAgentAwaitInfo(false);
+        if (/继续|恢复驾驶/.test(p.text)) {
+          setAgentAwaitInfo(false);
+          setAgentAwaitAgent(null);
+        }
       }
     });
     return () => {
@@ -689,6 +1006,13 @@ export default function App() {
     if (!session) return;
     const value = input.trim();
     if (!value || streaming) return;
+    /**
+     * 第 15 步：**这轮消息属于哪个智能体，在发起时就钉死**。
+     * 后面所有写入（用户句、网页卡片、流式半截、助手全文）都用这个 id 落桶——
+     * 中途切到别的智能体，也绝不会把 A 的话写进 B 的聊天里。
+     */
+    const myAgent = curAgentRef.current;
+    if (myAgent === null) return;
     setChatNote('');
     // 第 9 步本地闸：聊天里出现「密码/验证码：xxx」这类赋值就拦下——不发送、不落库、
     // 让敏感值只走浏览器输入框（服务端聊天与代填执行层各有自己的闸，这是第一道）。
@@ -697,6 +1021,9 @@ export default function App() {
     if (/(密码|口令|password|passcode|验证码|校验码|captcha|otp|cvv|银行卡|卡号|身份证)[\s:：=是为]{0,3}[A-Za-z0-9*#@$%&+=.-]{6,}/i.test(value)
       || /^\s*\d{4,8}\s*$/.test(value)) {
       setChatNote('这看起来像密码/验证码/卡号：请不要发到聊天里。直接点在网页卡片里的输入框上自己打（我把焦点给这张页面），我不会代填、也不会留存。');
+      // 第 15 步：顺手把输入框清空——否则这串敏感值会一直留在框里，
+      // 下一次输入变成「123456打开百度」这种拼串，既难查也等于没拦住。
+      setInput('');
       try {
         focusCard();
       } catch {
@@ -707,27 +1034,29 @@ export default function App() {
     // 第 13 步：明确的开网页指令 → 不再要确认，聊天里直接插一张真实网页卡片。
     // 判定纯本地（不联网、不问模型），所以后端/模型没起来时卡片照样出现。
     const openUrl = detectOpenUrl(value);
-    lastUserWasOpenRef.current = openUrl !== null;
+    lastUserWasOpenRef.current[myAgent] = openUrl !== null;
     if (aiInControl) {
       void window.workbench?.pauseTask();
       setChatNote('任务在 running：已先暂停自动 click/type（状态机 → paused），聊天照常发。');
     }
     if (openUrl) {
       const cardId = Date.now() + 2 + Math.floor(Math.random() * 1000);
-      setMessages((prev) =>
-        prev.concat(
+      patchChat(myAgent, (c) => ({
+        ...c,
+        messages: c.messages.concat(
           { id: Date.now(), role: 'user', text: value },
           { id: cardId, role: 'browser', text: openUrl, cardUrl: openUrl },
         ),
-      );
+      }));
       setBrowserCardId(cardId);
       setCardExpanded(false);
     } else {
-      setMessages((prev) => prev.concat({ id: Date.now(), role: 'user', text: value }));
+      patchChat(myAgent, (c) => ({ ...c, messages: c.messages.concat({ id: Date.now(), role: 'user', text: value }) }));
     }
     setInput('');
     setHasUnread(false);
     setStreaming(true);
+    setStreamingAgentId(myAgent);
     setStreamText('');
     try {
       const res = await fetch(`${API_BASE()}/chat/stream`, {
@@ -735,8 +1064,10 @@ export default function App() {
         headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
         // browserOpened 只是给服务端系统提示词的一个开关：告诉小助「网页已经开好了」，
         // 别再让用户点确认。不是网页内容、不进历史、不落库。
+        // agentId 让服务端在没带会话号时也只认这个智能体自己的会话（绝不串到别人的）。
         body: JSON.stringify({
-          conversationId: convIdRef.current ?? undefined,
+          conversationId: chatsRef.current[myAgent]?.convId ?? undefined,
+          agentId: myAgent,
           message: value,
           ...(openUrl ? { browserOpened: openUrl } : {}),
         }),
@@ -778,8 +1109,11 @@ export default function App() {
           } catch {
             continue; // 坏帧忽略，等下一条
           }
-          if (ev === 'meta' && typeof j.conversationId === 'number') convIdRef.current = j.conversationId;
-          else if (ev === 'error') setChatNote(`出错了：${j.error ?? '未知原因'}`);
+          if (ev === 'meta' && typeof j.conversationId === 'number') {
+            // 会话号写回**发起时那个智能体**的桶（不是「此刻正在看的」那个）
+            const cid = j.conversationId;
+            patchChat(myAgent, (c) => (c.convId === cid ? c : { ...c, convId: cid }));
+          } else if (ev === 'error') setChatNote(`出错了：${j.error ?? '未知原因'}`);
           else if (ev === 'done') sawDone = true;
           else if (j.delta) {
             acc += j.delta;
@@ -788,7 +1122,7 @@ export default function App() {
         }
       }
       if (acc) {
-        setMessages((prev) => prev.concat({ id: Date.now() + 1, role: 'assistant', text: acc }));
+        patchChat(myAgent, (c) => ({ ...c, messages: c.messages.concat({ id: Date.now() + 1, role: 'assistant', text: acc }) }));
       } else if (!sawDone) {
         setChatNote((n) => n || '这轮没拿到回复（未完成，服务端不会把半截存进历史）。');
       }
@@ -796,11 +1130,14 @@ export default function App() {
       setChatNote(`${openUrl ? '网页已经打开在聊天卡片里；' : ''}连不上后端：${(e as Error).message}`);
     } finally {
       setStreaming(false);
+      setStreamingAgentId(null);
       setStreamText('');
     }
     // 第 9 步：刚才是回答驾驶员的「补资料」提问 → 把答案递给主进程并自动恢复循环
-    if (agentAwaitInfo) {
+    // 第 15 步：只有「正在等的那个智能体」的回答才转给它；别的智能体聊天里的话不串过去。
+    if (agentAwaitInfo && agentAwaitAgent === myAgent) {
       setAgentAwaitInfo(false);
+      setAgentAwaitAgent(null);
       setChatNote('已把答复转给小助，继续驾驶中…');
       void window.workbench?.agentAnswer(value);
     }
@@ -836,7 +1173,10 @@ export default function App() {
   const startAgentTask = async (rawGoal?: string) => {
     const goal = (rawGoal ?? '').trim();
     if (!goal || !session) return;
-    if (browserCardId === null) openBrowserCard(detectOpenUrl(goal) ?? HOME_URL);
+    // 第 15 步：只有当**当前这个智能体**手里真有一张活着的卡片时才复用它。
+    // 别的智能体开过卡片不算（那张卡此刻根本没挂载，webview 也不在，主进程会找不到 guest）。
+    const hasLiveCardHere = browserCardId !== null && messages.some((m) => m.role === 'browser' && m.id === browserCardId);
+    if (!hasLiveCardHere) openBrowserCard(detectOpenUrl(goal) ?? HOME_URL);
     await getWebviewId();
     setAgentSteps([]);
     setAgentDoc(null);
@@ -858,21 +1198,70 @@ export default function App() {
     return <AuthScreen onSession={setSession} />;
   }
 
+  /**
+   * 左栏要显示的智能体列表。
+   * 正常情况以服务端 /agents 为准；刚登录还没拉回来时先用登录响应里的 agents 顶上，
+   * 免得首屏左栏是空的（那种「点了没反应」的错觉最难查）。
+   */
+  const sidebarAgents: AgentView[] =
+    agents.length > 0
+      ? agents
+      : (session.agents ?? []).map((a) => ({
+          id: a.id,
+          name: a.name,
+          kind: 'assistant',
+          deletable: false,
+          personaStatus: 'ready' as const,
+          persona: null,
+          conversationId: null,
+        }));
+  const curAgent = sidebarAgents.find((a) => a.id === curAgentId) ?? null;
+  /** 当前智能体这一轮的「开网页指令」标记（按智能体分开记，免得压掉别人的确认按钮） */
+  const curWasOpen = curAgentId !== null && Boolean(lastUserWasOpenRef.current[curAgentId]);
+
   return (
     <div className="app">
-      {/* 左侧：联系人「小助」 */}
+      {/*
+        左侧：**智能体列表**（自带「小助」+ 用户点「添加」建的）。
+        第 15 步起这里不再是一个写死的联系人——一个智能体一行，点一行就换一份聊天。
+        「＋ 添加」不弹独立设置窗、不开新 BrowserWindow：服务端建好智能体 + 空会话，直接切过去。
+      */}
       <aside className="sidebar">
-        <div className="contact">
-          <div className="avatar">
-            <span className="avatar__face" aria-hidden="true">
-              助
-            </span>
-            {hasUnread && <span className="red-dot" title={curTask?.unreadHint || '任务结果待查看'} />}
-          </div>
-          <div className="contact__meta">
-            <div className="contact__name">小助</div>
-            <div className="small">在线</div>
-          </div>
+        <div className="agentList" role="list" aria-label="我的智能体">
+          {sidebarAgents.map((a) => (
+            <button
+              type="button"
+              role="listitem"
+              key={a.id}
+              className={a.id === curAgentId ? 'contact contact--on' : 'contact'}
+              onClick={() => selectAgent(a)}
+            >
+              <div className="avatar">
+                <span className="avatar__face" aria-hidden="true">
+                  {agentGlyph(a)}
+                </span>
+                {a.kind === 'assistant' && hasUnread && (
+                  <span className="red-dot" title={curTask?.unreadHint || '任务结果待查看'} />
+                )}
+              </div>
+              <div className="contact__meta">
+                <div className="contact__name">{a.name}</div>
+                <div className="small">
+                  {a.kind === 'assistant' ? '在线' : a.personaStatus === 'pending' ? '等你填引导表' : '已就位'}
+                </div>
+              </div>
+            </button>
+          ))}
+          <button type="button" className="btn agentList__add" disabled={agentBusy} onClick={() => void addAgent()}>
+            {agentBusy ? '添加中…' : '＋ 添加'}
+          </button>
+          {/* 自建智能体可以删（「小助」是自带的，服务端也会拒）；它自己的聊天与项目记忆一并清掉 */}
+          {curAgent && curAgent.deletable && (
+            <button type="button" className="btn agentList__del" onClick={() => void deleteAgent(curAgent.id)}>
+              删掉「{curAgent.name}」
+            </button>
+          )}
+          {agentNote && <div className="small agentList__note">{agentNote}</div>}
         </div>
 
         {/* 第 5 步：我的账号（XYZ 对外号 + 设置/修改密码；退出回登录页） */}
@@ -892,20 +1281,39 @@ export default function App() {
             </button>
           </div>
           {pwMsg && <div className="small">{pwMsg}</div>}
+          {/* 第 15 步：两层记忆分开展示——上面那份是「这个人」的，下面那份是当前智能体的 */}
           <div className="buttons-row">
-            <button type="button" className="btn" onClick={() => setMemOpen((v) => !v)}>
-              我的记忆（{memActive.length}）
+            <button type="button" className="btn" onClick={() => setUserMemOpen((v) => !v)}>
+              用户记忆（{userMem.length}）
+            </button>
+            <button type="button" className="btn" onClick={() => setProjMemOpen((v) => !v)}>
+              项目记忆（{projMem.length}）
             </button>
           </div>
-          {memOpen && (
-            <div className="memList" role="list">
-              {memActive.length === 0 && <div className="small">还没有记过东西。</div>}
-              {memActive.map((m) => (
+          {userMemOpen && (
+            <div className="memList" role="list" aria-label="用户记忆库">
+              <div className="small memList__title">账号级 · 所有智能体都读得到</div>
+              {userMem.length === 0 && <div className="small">还没有记过东西。</div>}
+              {userMem.map((m) => (
                 <div className="memList__row" key={m.id}>
-                  <span className="small">
-                    {MEM_TYPE_CN[m.type] ?? m.type}：{m.content}
-                  </span>
-                  <button type="button" className="memList__forget" onClick={() => void forgetMemory(m.id)}>
+                  <span className="small">{m.content}</span>
+                  <button type="button" className="memList__forget" onClick={() => void forgetEntry('user', m.id)}>
+                    忘掉这条
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {projMemOpen && (
+            <div className="memList" role="list" aria-label="当前智能体的项目记忆">
+              <div className="small memList__title">
+                {curAgent ? `${curAgent.name} 专属 · 别的智能体看不到` : '智能体级'}
+              </div>
+              {projMem.length === 0 && <div className="small">这个智能体还没有项目记忆。</div>}
+              {projMem.map((m) => (
+                <div className="memList__row" key={m.id}>
+                  <span className="small">{m.content}</span>
+                  <button type="button" className="memList__forget" onClick={() => void forgetEntry('agent', m.id)}>
                     忘掉这条
                   </button>
                 </div>
@@ -961,18 +1369,31 @@ export default function App() {
         <div className="sidebar__footer">桥：{bridgeInfo}</div>
       </aside>
 
-      {/* 中间：聊天区（第 6 步：真流式；历史在服务端加密存储，这里只是展示） */}
+      {/* 中间：聊天区（第 6 步：真流式；第 15 步：**一个智能体一份**，切换即换聊天） */}
       <main className="middle">
         <div className="chat">
-          {messages.length === 0 && !streaming && (
+          {/*
+            第 15 步：新智能体的**引导表**就摆在这个会话里（不是独立设置窗、不是后台配置页）。
+            填完确认 → 服务端存人设 → personaStatus 变 ready，它才按这份描述干活。
+          */}
+          {curAgent && curAgent.personaStatus === 'pending' && (
+            <AgentGuide
+              key={curAgent.id}
+              agent={curAgent}
+              onSave={(p) => savePersona(curAgent.id, p)}
+              onDelete={() => void deleteAgent(curAgent.id)}
+            />
+          )}
+          {messages.length === 0 && !streaming && !(curAgent && curAgent.personaStatus === 'pending') && (
             <div className="small" style={{ padding: '8px 4px' }}>
-              还没有聊天记录。跟小助说句话试试——消息会加密存进库里，重启后还在。
+              {curAgent ? `还没有和「${curAgent.name}」聊过。说句话试试——消息加密存进库里，重启后还在。` : '还没有聊天记录。'}
             </div>
           )}
           {messages.map((m, idx) => {
             // 第 13 步：只有**最新那张**卡片挂真 webview；更早的卡片退化成一行说明。
             // 这样全窗口始终只有一个 <webview>——否则既是事实上的多标签，
             // 也会让主进程「找内嵌页」挑错 guest。
+            // 第 15 步：切智能体后，上一个智能体那张卡片自然落到「非最新」分支 → 降级成占位。
             const isLiveCard = m.role === 'browser' && m.id === browserCardId && Boolean(m.cardUrl);
             return (
               <div
@@ -998,12 +1419,13 @@ export default function App() {
                         目标一律取这条确认之前最近的那句用户原话（例如「打开百度搜天气」）：
                         既不读输入框，也不用更早的消息；取不到就明确提示，不拿空 goal 去开车。
                         第 13 步：本轮用户原话就是「开网页指令」时不再挂这个按钮——
-                        网页已经在卡片里打开了，再要确认就是自相矛盾。 */}
+                        网页已经在卡片里打开了，再要确认就是自相矛盾。
+                        第 15 步：这个「本轮」是按**当前智能体**判的，别的智能体开过网页不算。 */}
                     {m.role === 'assistant' &&
                       m.text.includes('确认后我开始操作') &&
                       idx === messages.length - 1 &&
                       !streaming &&
-                      !lastUserWasOpenRef.current && (
+                      !curWasOpen && (
                         <div style={{ padding: '2px 4px' }}>
                           <button
                             type="button"
@@ -1029,30 +1451,13 @@ export default function App() {
               </div>
             );
           })}
-          {streaming && (
+          {/* 第 15 步：只在「发起这轮流式的那个智能体」里显示打字气泡，切走就不显示 */}
+          {streaming && streamingAgentId === curAgentId && (
             <div className="msg assistant">
-              {streamText || <span className="small">小助正在想…</span>}
+              {streamText || <span className="small">正在想…</span>}
               <span className="caret" aria-hidden="true">
                 ▍
               </span>
-            </div>
-          )}
-          {memPending.length > 0 && (
-            <div className="card memCard">
-              <h4>需要你确认</h4>
-              {memPending.map((m) => (
-                <div className="small" key={m.id}>
-                  {MEM_TYPE_CN[m.type] ?? m.type}：{m.content}
-                </div>
-              ))}
-              <div className="buttons-row">
-                <button type="button" className="btn" onClick={() => void decideMemories('confirm')}>
-                  确认
-                </button>
-                <button type="button" className="btn" onClick={() => void decideMemories('reject')}>
-                  不用，忘掉这条
-                </button>
-              </div>
             </div>
           )}
           {chatNote && (
@@ -1067,7 +1472,13 @@ export default function App() {
 
         <div className="inputBar">
           <input
-            placeholder={streaming ? '小助正在打字…' : agentAwaitInfo ? '回复小助的提问即可，发出后自动继续…' : '和小助聊聊（消息加密存服务端，刷新后还在）'}
+            placeholder={
+              streaming
+                ? '正在打字…'
+                : awaitHere
+                  ? '回复小助的提问即可，发出后自动继续…'
+                  : `和${curAgent ? `「${curAgent.name}」` : '小助'}聊聊（消息加密存服务端，刷新后还在）`
+            }
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && onSend()}
@@ -1076,8 +1487,13 @@ export default function App() {
           <button type="button" onClick={onSend} disabled={streaming}>
             {streaming ? '打字中…' : '发送'}
           </button>
-          {/* 第 10 步：结束本轮聊天并整理记忆（沿用 endConversationAndExtract 里的守卫） */}
-          <button type="button" className="inputBar__end" title="结束这轮聊天并整理记忆" onClick={() => void endConversationAndExtract()}>
+          {/* 第 15 步：结束这轮 → 把这段聊天**总结**进两层记忆（用户库 + 本项目记忆） */}
+          <button
+            type="button"
+            className="inputBar__end"
+            title="结束这轮聊天，把这段总结进两层记忆"
+            onClick={() => void tidyCurrentAgent()}
+          >
             结束
           </button>
         </div>

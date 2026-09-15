@@ -279,7 +279,7 @@ export interface ChatHistoryResult {
 
 /** /chat/stream 的 SSE 事件负载（data: 里的 JSON） */
 export type ChatStreamEvent =
-  | { conversationId: number; userMessageId: number } // event: meta（流第一帧）
+  | { conversationId: number; userMessageId: number; agentId?: number | null } // event: meta（流第一帧）
   | { delta: string } // 打字机：逐段追加
   | { conversationId: number; messageId: number; contentLength: number } // event: done（助手已落库）
   | { error: string }; // event: error（中断/失败：半截不算数）
@@ -368,3 +368,71 @@ export interface KnowledgeListResult {
 export interface KnowledgeUploadResult {
   document: KnowledgeDocument;
 }
+
+// ---------------------------------------------------------------------------
+// 第 15 步：多智能体（添加 + 聊天内引导表）+ 两层记忆
+//
+// - 一个智能体 = 一份独立聊天（自己的 conversation）+ 一份项目记忆；
+// - 人设（引导表那四格）是**智能体配置**，不是记忆条目；
+// - 两层记忆：用户记忆库（账号级，所有智能体都读）/ 项目记忆（智能体级，绝不串）。
+// ---------------------------------------------------------------------------
+
+/** 引导表填出来的四格人设。字段名就是表里的行标题，别改名。 */
+export interface AgentPersona {
+  /** 名称：左栏和聊天里显示的名字 */
+  name: string;
+  /** 它是谁 */
+  who: string;
+  /** 怎么说话 */
+  tone: string;
+  /** 干什么 */
+  duty: string;
+}
+
+/** 一个智能体在前端可见的形态（GET /agents 的元素） */
+export interface AgentView {
+  id: number;
+  name: string;
+  /** 'assistant' = 自带的「小助」（不可删、不强制走引导表）；'custom' = 用户点「添加」新建的 */
+  kind: string;
+  /** 能不能删（小助恒为 false） */
+  deletable: boolean;
+  /** 'pending' = 引导表还没填完；'ready' = 已按人设干活 */
+  personaStatus: 'pending' | 'ready';
+  persona: AgentPersona | null;
+  /** 这个智能体自己的那条会话；null = 还没有（第一次发消息时服务端会建） */
+  conversationId: number | null;
+}
+
+/** GET /agents */
+export interface AgentListResult {
+  agents: AgentView[];
+}
+
+/** POST /agents 成功响应：新智能体 + 已经为它建好的空会话 */
+export interface AgentCreateResult {
+  agent: AgentView;
+}
+
+/** 一条记忆（服务端解密成人话才下发；库里只有密文） */
+export interface MemoryEntry {
+  id: number;
+  content: string;
+  updatedAt: string;
+}
+
+/** GET /memory/user 与 GET /agents/:id/memory 的统一形态 */
+export interface MemoryLayerList {
+  items: MemoryEntry[];
+}
+
+/** POST /agents/:id/tidy：把这段聊天总结进两层记忆（不存整段聊天） */
+export interface AgentTidyResult {
+  userAdded: number;
+  projectAdded: number;
+  /** 跳过原因：llm_not_configured / nothing_worth_remembering / empty_transcript … */
+  skipped?: string;
+}
+
+/** 记忆层：'user' = 账号级用户记忆库；'agent' = 该智能体的项目记忆 */
+export type MemoryLayer = 'user' | 'agent';

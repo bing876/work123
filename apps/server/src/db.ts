@@ -147,6 +147,43 @@ CREATE TABLE IF NOT EXISTS knowledge_chunks (
   UNIQUE (document_id, chunk_index)
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_owner ON knowledge_chunks (owner_id, document_id, chunk_index);
+
+-- 第 15 步：智能体人设（用户在聊天里的「引导表」填的那四格）。
+-- 刻意**不**塞进 memories：人设是智能体配置，不是记忆条目，混表会让两层记忆的读写互相污染。
+-- persona_status：'pending' = 引导表还没填完（模型先引导，不空人设硬聊）；'ready' = 已按描述干活。
+-- 老库里的 agents（含「小助」）走 DEFAULT 'ready'，不会被强制再走一遍引导表。
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS persona JSONB;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS persona_status TEXT NOT NULL DEFAULT 'ready';
+
+-- 第 15 步 · 第一层：用户记忆库（账号级）。所有智能体都能读，属于「这个人」的习惯/口味/展示偏好。
+-- 和第 10 步的 memories 完全分表（那张表是老确认流，本步不再往里写）。
+CREATE TABLE IF NOT EXISTS user_memories (
+  id           BIGSERIAL PRIMARY KEY,
+  owner_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  mem_key      TEXT NOT NULL,
+  content_enc  TEXT NOT NULL,
+  source       TEXT,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (owner_id, mem_key)
+);
+CREATE INDEX IF NOT EXISTS idx_user_memories_owner ON user_memories (owner_id, updated_at DESC);
+
+-- 第 15 步 · 第二层：项目记忆（智能体级）。一个智能体一份，**绝不串**。
+-- agent_id 是 NOT NULL 外键：查询一律 owner_id + agent_id 双条件，别的智能体的项目记忆读不到；
+-- 删智能体时级联删掉它自己的项目记忆（不会误伤别人）。
+CREATE TABLE IF NOT EXISTS agent_memories (
+  id           BIGSERIAL PRIMARY KEY,
+  owner_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  agent_id     BIGINT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  mem_key      TEXT NOT NULL,
+  content_enc  TEXT NOT NULL,
+  source       TEXT,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (agent_id, mem_key)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_memories_agent ON agent_memories (agent_id, updated_at DESC);
 `;
 
 

@@ -25,6 +25,7 @@ import { bearerFrom, verifyToken } from '../crypto';
 import { isDbUnreachable } from '../db';
 import { buildMemoryBlock } from './memories';
 import { buildKnowledgeBlock } from './knowledge';
+import { buildAgentContext, buildUserMemoryBlock, ensureAgentConversation } from './agents';
 
 export interface ChatDeps {
   pool: Pool;
@@ -32,18 +33,29 @@ export interface ChatDeps {
   cipher: JsonCipher;
 }
 
-/** 系统提示词：只放服务端，绝不进前端。逐字按第 6 步说明。 */
-const SYSTEM_PROMPT = [
-  '你是「小助」，用户桌面工作台里唯一的 AI 同事。说话短、像同事，不要官腔。',
+/**
+ * 系统提示词：只放服务端，绝不进前端。
+ * 第 15 步起首句按**当前智能体**变（自建智能体的人设由引导表填出来，见 buildAgentContext）。
+ */
+const BASE_PROMPT_LINES = [
+  '说话短、像同事，不要官腔。',
   '你现在只能聊天和帮用户把需求说清楚。',
   '当用户的需求必须打开网页才能完成时，不要假装已经打开了网页，只回答：',
   '「这需要用工作台浏览器，确认后我开始操作。」',
-  '（本步不要真的开始操作浏览器。）',
   '不要向用户索要任何网站密码。需要登录时，让用户自己在工作台浏览器里登录。',
   '不要编造你没有查到的数据和链接。',
   '不要输出 JSON 动作，不要输出 function call。',
   '（第 9 步）用户在聊天里发来疑似密码、验证码、卡号等敏感信息时：提醒他「请直接在浏览器里输入，我不会代填，也别把这个发在聊天里」，不要复述该值，也不要在回复里保存或转写它。',
-].join('\n');
+  '（第 15 步）你只知道自己这一份项目记忆和账号级的用户记忆库；不要假装知道别的智能体聊过什么。',
+];
+
+function systemPromptFor(agentName: string | null): string {
+  const head =
+    agentName && agentName !== '小助'
+      ? `你是用户桌面工作台里的一个 AI 智能体（名字见下面的人设块；没给人设就先用「${agentName}」）。`
+      : '你是「小助」，用户桌面工作台里的 AI 同事。';
+  return [head, ...BASE_PROMPT_LINES].join('\n');
+}
 
 const HISTORY_WINDOW = 24; // 拼给模型的历史条数（含本轮前的最近 24 条）
 const MESSAGE_MAX = 2000; // 单条用户输入上限
@@ -76,12 +88,18 @@ function safeDecrypt(cipher: JsonCipher, enc: string): string {
   }
 }
 
-/** 找/建当前用户默认项目 + 「小助」下的一条会话。owner 校验全走 projects.user_id，别人的会话号直接当不存在。 */
+/**
+ * 找/建当前用户的一条会话。owner 校验全走 projects.user_id，别人的会话号直接当不存在。
+ *
+ * 第 15 步：多了 agentId。**一个智能体一份聊天**——没带会话号时优先按智能体找它自己那条，
+ * 绝不去捡「本账号最近一条会话」（那可能是别的智能体的，会串聊天）。
+ */
 async function resolveConversation(
   pool: Pool,
   userId: number,
   conversationId: number | null,
   seedTitle: string,
+  agentId: number | null = null,
 ): Promise<{ id: number } | { err: string; status: number }> {
   if (conversationId !== null) {
     const own = await pool.query<{ id: string }>(
@@ -90,6 +108,17 @@ async function resolveConversation(
     );
     if (own.rowCount !== 1) return { err: '会话不存在或不是你的', status: 404 };
     return { id: Number(own.rows[0].id) };
+  }
+  // 第 15 步：带智能体号 → 只认这个智能体自己的会话（没有就建一条给它）
+  if (agentId !== null) {
+    const owned = await pool.query<{ id: string }>(
+      'SELECT a.id FROM agents a JOIN projects p ON p.id = a.project_id WHERE a.id = $1 AND p.user_id = $2',
+      [agentId, userId],
+    );
+    if (owned.rowCount !== 1) return { err: '智能体不存在或不是你的', status: 404 };
+    const conv = await ensureAgentConversation(pool, userId, agentId);
+    if (conv === null) return { err: '建会话失败（智能体或项目缺失）', status: 500 };
+    return { id: conv };
   }
   const latest = await pool.query<{ id: string }>(
     'SELECT c.id FROM conversations c JOIN projects p ON p.id = c.project_id WHERE p.user_id = $1 AND p.is_default = true ORDER BY c.id DESC LIMIT 1',
@@ -123,7 +152,9 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
     const claims = authed(req, env);
     if (!claims) return errJson(reply, 401, '未登录或登录已过期（聊天需要第 5 步的 JWT）');
 
-    const body = req.body as { conversationId?: unknown; message?: unknown; browserOpened?: unknown } | null;
+    const body = req.body as
+      | { conversationId?: unknown; message?: unknown; browserOpened?: unknown; agentId?: unknown }
+      | null;
     const message = typeof body?.message === 'string' ? body.message.trim() : '';
     if (!message) return errJson(reply, 400, 'message 不能为空');
     /**
@@ -139,6 +170,13 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
       if (!Number.isInteger(n) || n <= 0) return errJson(reply, 400, 'conversationId 要是正整数（或干脆不传）');
       conversationId = n;
     }
+    // 第 15 步：当前智能体号。只在没带会话号时用来定位「它自己那条会话」。
+    let agentId: number | null = null;
+    if (body?.agentId !== undefined && body?.agentId !== null && body?.agentId !== '') {
+      const n = Number(body.agentId);
+      if (!Number.isInteger(n) || n <= 0) return errJson(reply, 400, 'agentId 要是正整数（或干脆不传）');
+      agentId = n;
+    }
 
     if (!env.deepseekApiKey) {
       // 明确拒绝，绝不用假回复冒充模型
@@ -148,7 +186,7 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
     }
 
     try {
-      const conv = await resolveConversation(pool, claims.sub, conversationId, message);
+      const conv = await resolveConversation(pool, claims.sub, conversationId, message, agentId);
       if ('err' in conv) return errJson(reply, conv.status, conv.err);
       const convId = conv.id;
 
@@ -170,6 +208,15 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
       // 第 10 步：该用户已确认的档案记忆注入系统提示词（无记忆=空串，行为与第 9 步一致）
       const memBlock = await buildMemoryBlock(pool, cipher, claims.sub, message);
       const memoryBlock = memBlock ? `\n\n${memBlock}` : '';
+      // 第 15 步 · 两层记忆 + 当前智能体人设：
+      //   - 用户记忆库（账号级）：所有智能体都读得到，是「这个人」的习惯/口味；
+      //   - 项目记忆（智能体级）：**只**读当前会话所属智能体那一份，绝不串号；
+      //   - 人设：引导表填完就按它干活；没填完只让模型引导用户去填表，不许空人设乱聊。
+      const agentCtx = await buildAgentContext(pool, cipher, claims.sub, convId, agentId);
+      const personaBlock = agentCtx.personaBlock ? `\n\n${agentCtx.personaBlock}` : '';
+      const userMemoryBlockRaw = await buildUserMemoryBlock(pool, cipher, claims.sub);
+      const userMemoryBlock = userMemoryBlockRaw ? `\n\n${userMemoryBlockRaw}` : '';
+      const projectMemoryBlock = agentCtx.projectMemoryBlock ? `\n\n${agentCtx.projectMemoryBlock}` : '';
       // 第 11 步：知识库资料是与 memories 完全独立的、仅聊天用的上下文位置。
       // buildKnowledgeBlock 只按当前 owner 的加密片段做关键词字面匹配；空命中/异常都返回空，
       // 不进 agent 的驾驶员 JSON，也不触碰第 10 步的确认逻辑。
@@ -195,7 +242,17 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
             model: env.deepseekModel,
             stream: true,
             messages: [
-              { role: 'system', content: SYSTEM_PROMPT + memoryBlock + knowledgeContext + browserContext },
+              {
+                role: 'system',
+                content:
+                  systemPromptFor(agentCtx.agentName) +
+                  personaBlock +
+                  userMemoryBlock +
+                  projectMemoryBlock +
+                  memoryBlock +
+                  knowledgeContext +
+                  browserContext,
+              },
               ...history,
               { role: 'user', content: message },
             ],
@@ -223,7 +280,7 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
         'x-accel-buffering': 'no',
         'access-control-allow-origin': req.headers.origin ?? '*',
       });
-      sse(res, 'meta', { conversationId: convId, userMessageId });
+      sse(res, 'meta', { conversationId: convId, userMessageId, agentId: agentCtx.agentId });
 
       const onClose = (): void => ac.abort(); // 桌面关了窗口/按停：上游掐掉，半截不落库
       req.raw.on('close', onClose);
@@ -309,15 +366,22 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
   app.get('/chat/history', async (req: FastifyRequest, reply) => {
     const claims = authed(req, env);
     if (!claims) return errJson(reply, 401, '未登录或登录已过期（历史需要第 5 步的 JWT）');
-    const q = req.query as { conversationId?: unknown } | null;
+    const q = req.query as { conversationId?: unknown; agentId?: unknown } | null;
     let conversationId: number | null = null;
     if (q?.conversationId !== undefined && q?.conversationId !== '') {
       const n = Number(q.conversationId);
       if (!Number.isInteger(n) || n <= 0) return errJson(reply, 400, 'conversationId 要是正整数');
       conversationId = n;
     }
+    // 第 15 步：切智能体时按 agentId 拉「它自己那条会话」的历史——不会串到别的智能体
+    let agentId: number | null = null;
+    if (q?.agentId !== undefined && q?.agentId !== '') {
+      const n = Number(q.agentId);
+      if (!Number.isInteger(n) || n <= 0) return errJson(reply, 400, 'agentId 要是正整数');
+      agentId = n;
+    }
     try {
-      const conv = await resolveConversation(pool, claims.sub, conversationId, '');
+      const conv = await resolveConversation(pool, claims.sub, conversationId, '', agentId);
       if ('err' in conv) {
         // 历史接口对「一条会话都没有」宽容返回空，其余错误照报
         if (conversationId === null) {

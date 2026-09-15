@@ -3,7 +3,8 @@
  *
  * 接口面：GET /health（免）+ /auth/*（账号）+ /chat/stream、/chat/history（聊天）
  *           + /agent/next-action、/agent/task/*（第 7 步驾驶员循环的“大脑”半边，要 JWT）
- *           + /knowledge、/knowledge/upload（第 11 步资料原文密文知识库，要 JWT）。
+ *           + /knowledge、/knowledge/upload（第 11 步资料原文密文知识库，要 JWT）
+ *           + /agents*、/memory/*（第 15 步多智能体 + 两层记忆，要 JWT）。
  * 服务器**不直接碰浏览器**：动作都返回给桌面主进程，由本地 driver.ts 执行。
  * 明确没有：邮箱登录、真微信；云端也拿不到 CDP（只出动作建议，执行与叫停在本地）。监听 127.0.0.1。
  */
@@ -19,6 +20,7 @@ import { registerChatRoutes } from './routes/chat';
 import { registerAgentRoutes } from './routes/agent';
 import { registerMemoryRoutes, startIdleScheduler } from './routes/memories';
 import { registerKnowledgeRoutes, KNOWLEDGE_MAX_UPLOAD_BYTES } from './routes/knowledge';
+import { registerMultiAgentRoutes } from './routes/agents';
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -59,11 +61,15 @@ async function main(): Promise<void> {
   registerMemoryRoutes(app, { pool, env, cipher });
   // 第 11 步：资料上传/列表；聊天检索块在 chat.ts 单独接入，不碰驾驶员 JSON。
   registerKnowledgeRoutes(app, { pool, env, cipher });
+  // 第 15 步：智能体（添加/引导表人设/删）+ 两层记忆（user_memories 账号级、agent_memories 智能体级）。
+  registerMultiAgentRoutes(app, { pool, env, cipher });
   startIdleScheduler({ pool, env, cipher });
 
   try {
     await migrate(pool);
-    console.log('[server] 数据库表就绪（users/projects/agents/sms_codes/conversations/messages/tasks/memories/knowledge_documents/knowledge_chunks）');
+    console.log(
+      '[server] 数据库表就绪（users/projects/agents/sms_codes/conversations/messages/tasks/memories/knowledge_documents/knowledge_chunks/user_memories/agent_memories）',
+    );
   } catch (err) {
     console.warn('[server] 数据库暂未连通，服务照常起（/auth 会回 503 提示）：', (err as Error).message);
   }
