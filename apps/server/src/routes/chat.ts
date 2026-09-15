@@ -34,7 +34,7 @@ import type { JsonCipher } from '../crypto';
 import { bearerFrom, verifyToken } from '../crypto';
 import { isDbUnreachable } from '../db';
 import { llmFetch } from '../llm';
-import { BASE_OVERRIDE_NOTE, BASE_SYSTEM_PROMPT, sessionStateBlock } from '../promptPolicy';
+import { BASE_OVERRIDE_NOTE, BASE_SYSTEM_PROMPT, sessionStateBlock, stripLoginLecture } from '../promptPolicy';
 import {
   applyUserMessage,
   loadConversationState,
@@ -216,7 +216,21 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
       const history = hist.rows
         .reverse()
         .filter((r) => r.role === 'user' || r.role === 'assistant')
-        .map((r) => ({ role: r.role as 'user' | 'assistant', content: safeDecrypt(cipher, r.content_enc) }));
+        .map((r) => {
+          const content = safeDecrypt(cipher, r.content_enc);
+          /**
+           * 第 16 步验收第 ④ 条：本会话已经提醒过「自己登录」之后，
+           * 历史里的同类安全提示句不再喂给模型 —— 否则它会照抄旧话，变成每轮都提醒。
+           * 只改**喂给模型的上下文**，不改库里存的消息、也不改界面上显示的。
+           */
+          return {
+            role: r.role as 'user' | 'assistant',
+            content:
+              r.role === 'assistant' && state.already_told_user_login_themselves
+                ? stripLoginLecture(content)
+                : content,
+          };
+        });
       const um = await pool.query<{ id: string }>(
         "INSERT INTO messages (conversation_id, role, content_enc) VALUES ($1, 'user', $2) RETURNING id",
         [convId, cipher.encryptText(message)],
@@ -240,8 +254,25 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
       const browserContext = openedUrl
         ? `（本轮补充：用户要开网页，工作台浏览器卡片已经打开并加载 ${openedUrl}，就在这句下面的聊天里。
 网页已经开好了，**不要再让用户点确认、不要再说「确认后我开始操作」**，直接用一句话说明你已经打开了这个网页。
-提醒他可以直接在卡片里点、可以直接把验证码/密码打在网页自己的输入框里（你不会代填、也不会留存）。
+${
+  state.already_told_user_login_themselves
+    ? '登录提醒本会话已经说过，这一轮**不要再提**「密码/验证码自己在卡片里输」「我不代填」这类话。'
+    : '提醒他可以直接在卡片里点、可以直接把验证码/密码打在网页自己的输入框里（你不会代填、也不会留存）。'
+}
 如果他还交代了具体要做的事，说你会在卡片里接着做，不要谎称已经做完。）`
+        : '';
+
+      /**
+       * 第 16 步验收第 ④ 条（登录提醒最多一次）：模型会**照抄自己历史里的安全提醒**——
+       * 光在状态块里写一句「已经提醒过」压不住。这里把这条硬性要求放到**系统提示词最末**，
+       * 紧贴用户消息，利用近因位置把它按住。
+       */
+      const loginTail = state.already_told_user_login_themselves
+        ? '（本轮硬性要求：本会话你已经提醒过用户「自己在网页卡片里输账号密码验证码」了，所以这一轮' +
+          '**不要再写**这类安全提示，也不要写「我不代填 / 我不留存 / 不索要密码」。' +
+          '要区分两件事：说「你还得先登录」是可以的（这是任务状态，不是安全提示）；' +
+          '说「账号、密码、验证码你自己输，我不代填」就不行——这句本会话已经说过了。' +
+          '历史里你之前的同类提醒是旧话，不要照抄。）'
         : '';
 
       /**
@@ -270,6 +301,7 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
         memBlock,
         knowledgeBlock,
         browserContext,
+        loginTail,
       ].filter((x) => x && x.trim());
 
       // 2) 调 DeepSeek（OpenAI 兼容 chat/completions，stream:true）。失败/无流 → 普通 JSON 错误，不开 SSE

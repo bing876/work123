@@ -144,6 +144,41 @@ export function detectOpenUrl(raw: string): string | null {
   return null;
 }
 
+/**
+ * 第 16 步缺项修复：**已有网页卡片**时，「普通浏览指令」判定。
+ *
+ * 背景：以前只有「明确开页指令」和「对确认提问回继续」才发车驾驶员循环，
+ * 于是「在这个页面搜一下 AI」这种句子只会得到一句口头「稍等」，网页一动不动。
+ *
+ * 这里只做**字符串**判断（不联网、不问模型），命中表示：
+ *   用户要驾驶员去动**当前这张已经开着的页面**，而不是要开新站点、也不是闲聊。
+ *
+ * 刻意保守：必须有明确的「对页面动手」动词才命中；纯闲聊（你好 / 谢谢 / 你是谁）一律不命中。
+ * 没有网页卡片时调用方也不会用它发车（不开第二张卡）。
+ */
+const BROWSE_ACT =
+  /(搜一下|搜一搜|搜搜|搜索|搜个|搜\s|查一下|查一查|查查|查询|查找|读一下|读一读|读读|读页|读当前页|读这页|看一下这|看下这|看看这|看一下当前|往下滚|向下滚|往上滚|向上滚|滚一下|滚到底|滚动|翻页|下一页|上一页|刷新|重载|返回上一页|后退|点一下|点下|点击|点开|选中|勾选|填一下|帮我搜|帮我查|帮我点|帮我读|帮我翻|在这个页面|在当前页面|在当前这张|在这张页面|搜索框|输入框)/;
+
+/** 明显是在提问、而不是下指令（比 detectOpenUrl 的判据更严：句中含疑问词也算） */
+function looksLikeAsking(t: string): boolean {
+  return (
+    /^(怎么|如何|为什么|為什麽|怎样|怎樣|啥|什么|是不是|能不能|可以|要不要|该不该)/.test(t) ||
+    /(是什么|什么意思|怎么办|怎么样|为什么|如何|吗？|吗\?|吗$|？|\?)/.test(t)
+  );
+}
+
+/**
+ * 从一句用户原话里解析出「要驾驶员在当前页面做的动作」。
+ * 不是普通浏览指令就返回 null（调用方此时按纯聊天处理，不发车）。
+ */
+export function detectBrowseIntent(raw: string): string | null {
+  const t = (raw ?? '').trim();
+  if (!t || t.length > 120) return null;
+  if (looksLikeQuestion(t) || looksLikeAsking(t)) return null;
+  if (!BROWSE_ACT.test(t)) return null;
+  return t;
+}
+
 interface BrowserCardProps {
   url: string;
   expanded: boolean;

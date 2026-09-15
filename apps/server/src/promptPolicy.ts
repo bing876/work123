@@ -60,9 +60,15 @@ export const BASE_SYSTEM_PROMPT = [
   '  读页面一律直接做，不要再问。',
   '- 用户已经说了「打开百度 / 打开油管 / 打开 https://…」这类明确开页指令时，网页卡片已经开好了：',
   '  直接用一句话说明已经打开，绝不再说「确认后我开始操作」。',
+  '- 本会话已经开着网页卡片时，用户说「在这个页面搜一下 X / 读一下当前页 / 往下滚 / 点某处」这类',
+  '  **在当前这张页面上干活**的话：一句「好，我在当前页面…」即可，桌面会直接把这条指令交给驾驶员执行；',
+  '  不要再问要不要用浏览器、也不要只回一句口头承诺就完事。',
   '- 记忆里若有「操作浏览器前需要确认」这类句子，它只对敏感操作有效，绝不是每一步都要确认。',
   '- 登录必须由用户自己在网页卡片里输入账号密码和验证码：你不代填，也不要让用户把密码 / 验证码',
-  '  发到聊天里。提醒一次就够，不要每轮重复长篇安全说明。',
+  '  发到聊天里。**这句安全提示整个会话只说一次**：说过之后（或本会话状态里已标「已经提醒过」），',
+  '  后面每一轮都不要再写「账号 / 密码 / 验证码你自己输」「我不代填」「我不留存」这类句子。',
+  '  注意区分：「你还得先登录」是任务状态，随时可以说；「账号密码验证码你自己输、我不代填」是安全提示，',
+  '  只说一次。用户明确问「怎么登录」时才回答细节。',
   '',
   '执行风格：',
   '- 先执行，再在必要时澄清；能推进就推进。',
@@ -112,10 +118,29 @@ export function looksLikeSensitiveAction(text: string): boolean {
 }
 
 /** 助手回复里在让用户自己去网页里登录 → 记「已经提醒过」，之后不再重复长篇提醒 */
-const TOLD_LOGIN_RE = /(在(网页|卡片|页面)里(自己)?(输入|登录|填)|你自己(登录|输入)|请你自己(登录|输入)|我不代填)/;
+const TOLD_LOGIN_RE =
+  /((网页|卡片|页面|浏览器)里?[^。；;，,\n]{0,10}(自己)?(输入|登录|登陆|登一下|登进去|登好|填)|你自己(登录|登陆|输入|登)|请你自己(登录|输入)|我不代填|不代填|需要先登录|得先登录|要先登录|登录(后)?才(能|可以)|登进去(才|再)|扫码登录)/;
 
 export function looksLikeLoginReminder(text: string): boolean {
   return TOLD_LOGIN_RE.test(String(text ?? ''));
+}
+
+/**
+ * 第 16 步验收第 ④ 条：**安全提示句**（不是任务状态句）。
+ * 「账号密码验证码你自己输、我不代填」这类句子本会话只说一次就够了；
+ * 但模型会照抄自己历史里的旧提醒（上下文里的旧话最容易被复读），
+ * 所以说过一次之后，历史里这些句子就不再喂给它。
+ */
+const LOGIN_LECTURE_RE =
+  /((账号|密码|验证码|短信码|动态码|扫码)[^。！？!?\n]{0,24}(自己|你)[^。！？!?\n]{0,8}(输|填|打))|我不代填|不代填|我不留存|不会留存|不索要|别把[^。！？!?\n]{0,12}(发|说)到聊天|不要发到聊天/;
+
+/** 按句切分并丢掉「登录安全提示」句；整条被删空时保留原文（宁可多一句，也不要空消息） */
+export function stripLoginLecture(text: string): string {
+  const t = String(text ?? '');
+  if (!t) return '';
+  const kept = t.split(/(?<=[。！？!?\n])/).filter((p) => !LOGIN_LECTURE_RE.test(p));
+  const out = kept.join('').trim();
+  return out || t;
 }
 
 /**
@@ -150,7 +175,12 @@ export function sessionStateBlock(s: SessionStateLike | null | undefined): strin
   if (s.login_required) lines.push('login_required（用户要自己在网页里登录）：是');
   if (s.sensitive_action) lines.push('sensitive_action（本轮涉及敏感/不可逆操作）：是');
   if (s.last_page_summary) lines.push(`last_page_summary（最后一页摘要）：${s.last_page_summary}`);
-  if (s.already_told_user_login_themselves) lines.push('已经提醒过用户自己在网页里登录：是（不要再重复长篇提醒）');
+  if (s.already_told_user_login_themselves) {
+    lines.push(
+      '已经提醒过用户自己在网页里登录：是 —— 本轮不要再写「账号 / 密码 / 验证码你自己输」「我不代填」' +
+        '「我不留存」这类安全提示（说「你还得先登录」这种任务状态是可以的）。',
+    );
+  }
   if (s.keepalive) lines.push('该智能体处于监听/保活态：空闲时不要主动调模型、不要假聊天。');
   if (s.task_switched) {
     lines.push(

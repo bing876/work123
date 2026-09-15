@@ -18,7 +18,7 @@ import type {
   MemoryLayerList,
   TaskState,
 } from '@ai-workbench/shared';
-import { BrowserCard, HOME_URL, detectOpenUrl } from './browserCard';
+import { BrowserCard, HOME_URL, detectBrowseIntent, detectOpenUrl } from './browserCard';
 
 /**
  * 第 2 步（内嵌版）「脸和门」：
@@ -1154,6 +1154,18 @@ export default function App() {
     // 判定纯本地（不联网、不问模型），所以后端/模型没起来时卡片照样出现。
     const openUrl = detectOpenUrl(value);
     /**
+     * 第 16 步缺项修复：**已有网页卡片**时，「普通浏览指令」（在这个页面搜一下 AI / 读一下当前页 /
+     * 往下滚…）必须交给**现有驾驶员**去动**这一张** webview —— 不能再只回一句口头「稍等」。
+     *
+     * 判定纯本地（不联网、不问模型）：没有活卡片就不发车（不开第二张卡、不新窗口），
+     * 闲聊（你好 / 谢谢 / 你是谁）也不发车。
+     */
+    const liveCard = (chatsRef.current[myAgent]?.messages ?? []).find(
+      (m) => m.role === 'browser' && m.id === browserCardId,
+    );
+    const cardLive = browserCardId !== null && Boolean(liveCard);
+    const browseGoal = openUrl === null && cardLive ? detectBrowseIntent(value) : null;
+    /**
      * 第 16 步：确认是**例外**不是默认。
      * 「继续 / 可以」这类回答只有在**本会话确实有一个待确认的浏览器任务**时才算同意：
      * 判定只看**这个智能体**自己那份聊天里最后一条助手回复是不是在要确认。
@@ -1172,8 +1184,8 @@ export default function App() {
     /** 待确认任务的原始目标 = 那条确认之前最近的一句用户原话（沿用第 7/8 步的取法） */
     const pendingGoal = pendingConfirm ? lastUserGoalBeforeConfirm(myAgent) : '';
     const goNow = pendingConfirm && Boolean(pendingGoal);
-    /** 这句话本身就算「已确认」：明确开页指令，或对确认提问回了「继续/可以」 */
-    const confirmedByThisMessage = openUrl !== null || goNow;
+    /** 这句话本身就算「已确认」：明确开页指令、对确认提问回「继续/可以」、或已在当前页面上干活 */
+    const confirmedByThisMessage = openUrl !== null || goNow || browseGoal !== null;
     lastUserWasOpenRef.current[myAgent] = confirmedByThisMessage;
 
     if (aiInControl) {
@@ -1185,7 +1197,7 @@ export default function App() {
          */
         void window.workbench?.agentDrop();
         setChatNote('按你的最新指令：已经放下上一件事（旧任务不再提起）。');
-      } else {
+      } else if (!browseGoal) {
         void window.workbench?.pauseTask();
         setChatNote('任务在 running：已先暂停自动 click/type（状态机 → paused），聊天照常发。');
       }
@@ -1201,6 +1213,20 @@ export default function App() {
       void (async () => {
         await getWebviewId();
         void window.workbench?.agentStart(pendingGoal, API_BASE(), session.token);
+      })();
+    }
+    if (browseGoal) {
+      /**
+       * 第 16 步缺项修复：普通浏览指令 → **复用同一张卡片**发车。
+       * 不开新卡片、不新窗口；主进程 agentStart 会 epoch++ 让上一个循环自己退出，
+       * 所以「最新指令优先」在驾驶员这一侧同样成立。
+       */
+      setAgentSteps([]);
+      setAgentDoc(null);
+      setChatNote('已把这条指令交给驾驶员，在**当前这张**网页上执行（不新开卡片）。');
+      void (async () => {
+        await getWebviewId();
+        void window.workbench?.agentStart(browseGoal, API_BASE(), session.token);
       })();
     }
     setInput('');
@@ -1219,7 +1245,11 @@ export default function App() {
           conversationId: chatsRef.current[myAgent]?.convId ?? undefined,
           agentId: myAgent,
           message: value,
-          ...(openUrl ? { browserOpened: openUrl } : {}),
+          // 明确开页指令 → 报新开的地址；在当前这张页面上干活 → 报这张页的地址。
+          // 两者都是「网页已经开好了」，让基座别再让用户点确认（与驾驶员路径同一套）。
+          ...(openUrl || (browseGoal && liveCard?.cardUrl)
+            ? { browserOpened: openUrl ?? liveCard?.cardUrl }
+            : {}),
         }),
       });
       if (!res.ok || !res.body) {
