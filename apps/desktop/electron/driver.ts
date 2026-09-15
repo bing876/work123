@@ -1013,11 +1013,14 @@ export async function drive(action: BrowserAction, targetWebContentsId?: number)
         }
         const hit = await clickTarget(wc, action.target);
         if (!hit) {
+          // 第 16 步：click 是最常见的失败，必须给「可能原因 + 一个下一步」，
+          // 不能只甩一句「没找到」——那会让模型/用户都只能干瞪眼。
+          const snap = await readSnapshot(wc);
           return {
             ok: false,
             action: actionName,
-            error: `没找到可点击的元素：${action.target}`,
-            pageSnapshot: await readSnapshot(wc),
+            error: `没找到可点击的元素：${action.target}。${failureHint(snap)}`,
+            pageSnapshot: snap,
           };
         }
         detail = hit.hittable
@@ -1085,11 +1088,14 @@ export async function drive(action: BrowserAction, targetWebContentsId?: number)
           (refused.length ? `；按规矩拒填敏感 ${refused.length} 项` : '') +
           (missed.length ? `；没填上 ${missed.length} 项` : '');
         if (filled.length === 0) {
+          const snap = await readSnapshot(wc);
           return {
             ok: false,
             action: actionName,
-            error: refused.length && !missed.length ? '目标全是敏感字段，一项都不能代填' : missed.join(' / ') || '没有可填的字段',
-            pageSnapshot: await readSnapshot(wc),
+            error: `${
+              refused.length && !missed.length ? '目标全是敏感字段，一项都不能代填' : missed.join(' / ') || '没有可填的字段'
+            }。${failureHint(snap)}`,
+            pageSnapshot: snap,
           };
         }
         return { ok: missed.length === 0, action: actionName, detail, pageSnapshot: await readSnapshot(wc) };
