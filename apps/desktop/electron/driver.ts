@@ -353,7 +353,7 @@ function sleep(ms: number): Promise<void> {
 // ---------------------------------------------------------------------------
 
 const PAGE_HELPERS = `(() => {
-  if (window.__wbHelper && window.__wbHelper.__v === 6) return;
+  if (window.__wbHelper && window.__wbHelper.__v === 7) return;
   const visible = (el) => {
     if (!el) return false;
     const r = el.getBoundingClientRect();
@@ -496,9 +496,41 @@ const PAGE_HELPERS = `(() => {
     const f = fieldOf(el);
     return f.type === 'password' || SENSITIVEISH_RE.test([f.name, f.id, f.ph, f.aria, f.lbl].join(' '));
   };
+  /**
+   * 第 16 步：这一页像不像登录页。工具层要能给出「失败原因 + 一个下一步」，
+   * 「需要先登录」是最常见的真实原因之一。只看 password 框与标题/地址里的登录字样，不猜。
+   */
+  const loginish = () => {
+    try { if (document.querySelector('input[type="password"]')) return true; } catch (_) {}
+    const t = ((document.title || '') + ' ' + location.href).toLowerCase();
+    return /(登录|登陆|登入|sign\\s*in|log\\s*in|login|passport|sso)/i.test(t);
+  };
+  /**
+   * 第 16 步：有没有疑似弹窗/遮罩压在大半屏上（点击失败的另一个常见原因）。
+   * 只看类名/ID 像遮罩的元素，且必须是 fixed/absolute + z-index≥10 + 覆盖 >35% 视口——
+   * 宁可漏报也不误报（误报会让模型乱猜）。
+   */
+  const overlayish = () => {
+    const sel = '[class*=mask],[class*=overlay],[class*=modal],[class*=dialog],[class*=popup],[class*=layer],[id*=mask],[id*=overlay],[id*=modal],[id*=dialog]';
+    let els;
+    try { els = Array.prototype.slice.call(document.querySelectorAll(sel)); } catch (_) { return false; }
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
+    if (!vw || !vh) return false;
+    return els.some((el) => {
+      if (!visible(el)) return false;
+      const s = getComputedStyle(el);
+      if (s.position !== 'fixed' && s.position !== 'absolute') return false;
+      if ((Number(s.zIndex) || 0) < 10) return false;
+      const r = el.getBoundingClientRect();
+      return r.width * r.height > vw * vh * 0.35;
+    });
+  };
   const snapshot = () => ({
     url: location.href,
     title: document.title,
+    loginLike: loginish(),
+    overlay: overlayish(),
     buttons: Array.prototype.filter.call(document.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"]'), visible)
       .map(text).filter(Boolean).slice(0, 40),
     links: Array.prototype.filter.call(document.querySelectorAll('a[href]'), visible)
@@ -515,7 +547,7 @@ const PAGE_HELPERS = `(() => {
     fields: Array.prototype.filter.call(document.querySelectorAll(INPUT_SEL), visible)
       .map(fieldOf).slice(0, 40),
   });
-  window.__wbHelper = { __v: 6, visible, text, find, findInput, findClickable, pick, fieldOf, sensitiveish, snapshot };
+  window.__wbHelper = { __v: 7, visible, text, find, findInput, findClickable, pick, fieldOf, sensitiveish, loginish, overlayish, snapshot };
 })();`;
 
 /** 组合一段「注入 helper + 执行动作」的脚本 */
@@ -561,8 +593,25 @@ async function typeSensitiveGuard(wc: Target, target: string): Promise<string | 
     : null;
 }
 
-/** 第 9 步：click 的支付确认守卫——收银台最终确认永远由用户点 */
-async function payClickGuard(wc: Target, target: string): Promise<string | null> {
+/**
+ * 第 16 步：操作失败时的「可能原因 + 一个明确的下一步」。
+ * 说明书钉死：失败不要退回「你是否确认打开某某网站」这种整段重确认，
+ * 也不要让用户自己猜——按当前快照给出最可能的几条原因，再给一个能立刻做的动作。
+ */
+function failureHint(snap: PageSnapshot | undefined): string {
+  const reasons = [
+    snap?.loginLike ? '这一页需要先登录' : '',
+    snap?.overlay ? '有弹窗/遮罩挡住了元素' : '',
+    '页面可能还没加载完',
+    '元素不在当前视图里，或这一页没有相应权限',
+  ].filter(Boolean);
+  const next = snap?.loginLike
+    ? '下一步：要我帮你点页面上的登录入口吗？（账号密码请你自己在网页里输，我不代填、也不收聊天里的密码）'
+    : '下一步：把按钮上的准确文字告诉我，或者你自己点一下，然后让我接着做（我会先读你当前的页面，不会从头再来）。';
+  return `可能原因：${reasons.join(' / ')}。${next}`;
+}
+
+/** 第 9 步：click 的支付确认守卫——收银台最终确认永远由用户点 */async function payClickGuard(wc: Target, target: string): Promise<string | null> {
   const hit = await evaluate<{ label: string } | null>(
     wc,
     pageScript(`(() => {
@@ -982,11 +1031,12 @@ export async function drive(action: BrowserAction, targetWebContentsId?: number)
         }
         const result = await typeInto(wc, action.target, action.text, Boolean(action.submit));
         if (!result.ok) {
+          const snap = await readSnapshot(wc);
           return {
             ok: false,
             action: actionName,
-            error: result.reason,
-            pageSnapshot: await readSnapshot(wc),
+            error: `${result.reason}${/没找到可输入的输入框|找不到.{0,6}输入框/.test(result.reason) ? `。${failureHint(snap)}` : ''}`,
+            pageSnapshot: snap,
           };
         }
         detail = `已向 ${result.label} 写入「${action.text}」（方式：${result.method}）`;

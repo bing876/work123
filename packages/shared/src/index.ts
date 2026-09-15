@@ -102,6 +102,13 @@ export interface PageSnapshot {
    * 由本地 fieldClass.classifyField 生成——服务器只转述，不自己发明规则。
    */
   inputFields?: FieldClassInfo[];
+  /**
+   * 第 16 步：这一页像不像登录页（有 password 框，或标题/地址带登录字样）。
+   * 工具层要能给出「失败原因 + 一个下一步」——「需要先登录」是最常见的真实原因之一。
+   */
+  loginLike?: boolean;
+  /** 第 16 步：是否检测到疑似弹窗/遮罩（会挡住按钮，点击失败的常见原因） */
+  overlay?: boolean;
 }
 
 /** 一个输入框的分类信息（label 是给人和模型看的描述，绝不含敏感值） */
@@ -180,6 +187,12 @@ export interface WorkbenchBridge {
   agentStart: (goal: string, apiBase: string, token: string) => Promise<TaskState>;
   /** 中止驾驶员循环并清 token（退出登录时也要调） */
   agentStop: () => Promise<void>;
+  /**
+   * 第 16 步：**放下**当前驾驶员任务但保留登录凭证。
+   * 用户改口（例如「打开油管」）时用它：旧任务立刻作废，不再被「继续」重启，
+   * 也不会在下一轮把旧目标重新捡起来。
+   */
+  agentDrop: () => Promise<void>;
 
   /** 第 9 步：把用户对「补资料」提问的回答交给主进程（仅普通资料；敏感值别走这里） */
   agentAnswer: (text: string) => Promise<void>;
@@ -402,6 +415,8 @@ export interface AgentView {
   persona: AgentPersona | null;
   /** 这个智能体自己的那条会话；null = 还没有（第一次发消息时服务端会建） */
   conversationId: number | null;
+  /** 第 16 步：是否处于「启动并保活」监听态（挂在会话状态上；空闲不调模型） */
+  listening?: boolean;
 }
 
 /** GET /agents */
@@ -436,3 +451,31 @@ export interface AgentTidyResult {
 
 /** 记忆层：'user' = 账号级用户记忆库；'agent' = 该智能体的项目记忆 */
 export type MemoryLayer = 'user' | 'agent';
+
+// ---------------------------------------------------------------------------
+// 第 16 步：轻量会话状态（随会话持久化在现有 Postgres 的 conversations 表上）
+//
+// 这些字段每轮都进模型上下文 —— 否则光改提示词是无效的。
+//   current_task     当前任务（最新一句用户消息覆盖它，改口立刻切换）
+//   browser_confirmed 本会话是否已确认过用浏览器（已确认 → 普通点击/搜索/滚动/读页不再问）
+//   keepalive         「启动并保活」监听态；空闲**不调模型**，来消息才走 /chat/stream
+// ---------------------------------------------------------------------------
+
+/** 一个会话的轻量状态（GET /chat/state 回传；字段名与库里列名一致） */
+export interface ConversationStateView {
+  conversationId: number;
+  current_task: string;
+  latest_user_intent: string;
+  browser_confirmed: boolean;
+  login_required: boolean;
+  sensitive_action: boolean;
+  last_page_summary: string;
+  already_told_user_login_themselves: boolean;
+  keepalive: boolean;
+}
+
+/** GET /chat/state 与 POST /chat/state 的统一响应；还没有会话时 state 为 null */
+export interface ChatStateResult {
+  conversationId: number | null;
+  state: ConversationStateView | null;
+}

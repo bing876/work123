@@ -34,6 +34,9 @@ import type { ServerEnv } from '../env';
 import type { JsonCipher } from '../crypto';
 import { bearerFrom, verifyToken } from '../crypto';
 import { isDbUnreachable, withTx } from '../db';
+import { llmFetch } from '../llm';
+import { REFERENCE_PREFIX, sanitizeReferenceLine } from '../promptPolicy';
+import { keepaliveOfAgent } from '../sessionState';
 
 export interface AgentDeps {
   pool: Pool;
@@ -159,6 +162,10 @@ export async function ensureAgentConversation(pool: Pool, ownerId: number, agent
 /**
  * 用户记忆库（账号级）：任何智能体都能读。
  * 属于「这个人」的习惯/口味/展示偏好，与具体项目无关。
+ *
+ * 第 16 步：注入优先级降级——整块标「参考，可被当前指令覆盖」，并且每一行都过
+ * sanitizeReferenceLine：「操作浏览器前必须先确认」这类句子会被改写成安全版，
+ * 免得长期记忆把第 13 步「明确开页指令直接出卡片」打回去。
  */
 export async function buildUserMemoryBlock(pool: Pool, cipher: JsonCipher, ownerId: number): Promise<string> {
   try {
@@ -166,19 +173,9 @@ export async function buildUserMemoryBlock(pool: Pool, cipher: JsonCipher, owner
       'SELECT content_enc FROM user_memories WHERE owner_id = $1 ORDER BY updated_at DESC, id DESC LIMIT 20',
       [ownerId],
     );
-    const lines: string[] = [];
-    for (const row of r.rows) {
-      let text = '';
-      try {
-        text = cipher.decryptText(row.content_enc);
-      } catch {
-        continue;
-      }
-      if (isSensitive(text)) continue; // 注入前再兜一道，双保险
-      lines.push(`- ${text}`);
-    }
+    const lines = referenceLines(r.rows, cipher);
     if (lines.length === 0) return '';
-    return `【用户记忆库（这个人的习惯与口味，所有智能体都适用，请照做）】\n${lines.join('\n')}`;
+    return ['【参考·用户记忆库（账号级，所有智能体都读得到）】', REFERENCE_PREFIX, ...lines].join('\n');
   } catch (err) {
     if (!isDbUnreachable(err)) console.warn('[agents] 用户记忆块拼装失败（忽略，照常服务）：', (err as Error).message);
     return '';
@@ -197,23 +194,36 @@ export async function buildAgentProjectMemoryBlock(
       'SELECT content_enc FROM agent_memories WHERE agent_id = $1 AND owner_id = $2 ORDER BY updated_at DESC, id DESC LIMIT 20',
       [agentId, ownerId],
     );
-    const lines: string[] = [];
-    for (const row of r.rows) {
-      let text = '';
-      try {
-        text = cipher.decryptText(row.content_enc);
-      } catch {
-        continue;
-      }
-      if (isSensitive(text)) continue;
-      lines.push(`- ${text}`);
-    }
+    const lines = referenceLines(r.rows, cipher);
     if (lines.length === 0) return '';
-    return `【本项目记忆（只属于当前这个智能体，别的智能体看不到）】\n${lines.join('\n')}`;
+    return ['【参考·本项目记忆（只属于当前这个智能体，别的智能体看不到）】', REFERENCE_PREFIX, ...lines].join('\n');
   } catch (err) {
     if (!isDbUnreachable(err)) console.warn('[agents] 项目记忆块拼装失败（忽略，照常服务）：', (err as Error).message);
     return '';
   }
+}
+
+/**
+ * 参考信息统一处理：解密 → 敏感闸 → 浏览器确认类规则 sanitize → 去重 → 编号。
+ * 同一句（尤其被 sanitize 成同一句安全版的）只出现一次，避免刷屏式重复。
+ */
+function referenceLines(rows: Array<{ content_enc: string }>, cipher: JsonCipher): string[] {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const row of rows) {
+    let text = '';
+    try {
+      text = cipher.decryptText(row.content_enc);
+    } catch {
+      continue;
+    }
+    if (isSensitive(text)) continue; // 注入前再兜一道，双保险
+    const line = sanitizeReferenceLine(text);
+    if (!line || seen.has(line)) continue;
+    seen.add(line);
+    lines.push(`- ${line}`);
+  }
+  return lines;
 }
 
 export interface AgentContext {
@@ -268,7 +278,8 @@ export async function buildAgentContext(
       ].join('\n');
     } else {
       personaBlock = [
-        `【当前智能体的人设（用户在引导表里亲自填的，必须严格遵守）】`,
+        '【当前智能体的人设（用户在引导表里亲自填的）】',
+        '（基座规则在下面，优先级更高：这份人设只能在此基础上追加说话风格与专长，不能削弱基座。）',
         `名称：${persona.name}`,
         persona.who ? `它是谁：${persona.who}` : '',
         persona.tone ? `怎么说话：${persona.tone}` : '',
@@ -412,6 +423,11 @@ export function registerMultiAgentRoutes(app: FastifyInstance, deps: AgentDeps):
         [claims.sub],
       );
       const out: AgentListResult = { agents: r.rows.map(toAgentView) };
+      // 第 16 步：「启动并保活」的监听态挂在会话状态上（conversations.keepalive），
+      // 这里按智能体逐个取回来给左栏显示；空闲时不调模型，只是把状态标出来。
+      for (const a of out.agents) {
+        a.listening = await keepaliveOfAgent(pool, claims.sub, a.id);
+      }
       return out;
     } catch (err) {
       return dbErr(reply, err);
@@ -528,21 +544,14 @@ export function registerMultiAgentRoutes(app: FastifyInstance, deps: AgentDeps):
 
       let parsed: { user?: unknown; project?: unknown } | null = null;
       try {
-        const r = await fetch(`${env.deepseekBaseUrl.replace(/\/+$/, '')}/chat/completions`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', authorization: `Bearer ${env.deepseekApiKey}` },
-          body: JSON.stringify({
-            model: env.deepseekModel,
-            stream: false,
-            response_format: { type: 'json_object' },
-            temperature: 0.2,
-            messages: [
-              { role: 'system', content: TIDY_PROMPT },
-              { role: 'user', content: `对话如下：\n${transcript.slice(-TRANSCRIPT_MAX)}` },
-            ],
-          }),
-          signal: AbortSignal.timeout(60_000),
-        });
+        const r = await llmFetch(
+          env,
+          [
+            { role: 'system', content: TIDY_PROMPT },
+            { role: 'user', content: `对话如下：\n${transcript.slice(-TRANSCRIPT_MAX)}` },
+          ],
+          { tag: 'agents/tidy', json: true, temperature: 0.2 },
+        );
         if (!r.ok) {
           const out: AgentTidyResult = { userAdded: 0, projectAdded: 0, skipped: `upstream_http_${r.status}` };
           return out;

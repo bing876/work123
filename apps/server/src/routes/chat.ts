@@ -1,7 +1,7 @@
 /**
  * 第 6 步：DeepSeek 流式聊天（只做嘴，不做手）。
  *
- *   POST /chat/stream   要 JWT。body {conversationId?, message}。
+ *   POST /chat/stream   要 JWT。body {conversationId?, message, agentId?, browserOpened?}。
  *                       SSE（text/event-stream）逐 delta 推给桌面：
  *                         event: meta  data: {"conversationId":N}          ← 第一条，带会话号
  *                         data: {"delta":"字"}                              ← 打字机
@@ -11,18 +11,36 @@
  *                       不发伪回复。
  *   GET  /chat/history  要 JWT。?conversationId= 可省（默认取你最近一条会话）；
  *                       返回解密后的历史，供桌面刷新后还原。只认自己的会话。
+ *   GET  /chat/state    第 16 步：?agentId= 或 ?conversationId= → 该会话的轻量状态
+ *                       （current_task / browser_confirmed / keepalive …），桌面重启后据此恢复。
+ *   POST /chat/state    第 16 步：{agentId, keepalive} → 「启动并保活」开关。只改状态位，不调模型。
  *
  * 落库：用户句先写（role=user）；助手全文完成才写（role=assistant）；都是 AES-256-GCM 密文列。
  * 禁止项：不动 XYZ 号、不加第二套聊天表、不在 messages 里出现验证码/JWT/API Key、
  *         不指挥浏览器（系统提示词写死了）——那是第 7 步的事。
+ *
+ * 第 16 步（提示词与上下文）：
+ *   - 系统提示词 = 人设块（第 15 步，在前） + **所有 Agent 共用的基座**（promptPolicy.BASE_SYSTEM_PROMPT，
+ *     在后且写明「人设只能追加、不能削弱基座」） + 本会话状态 + 参考信息（记忆/档案/资料）；
+ *   - 记忆与档案一律标「参考，可被当前指令覆盖」，且「操作浏览器前必须先确认」这类句子
+ *     会被 sanitize 成安全版——绝不让长期记忆把第 13 步的「明确开页指令直接出卡片」打回去；
+ *   - 每轮先按最新用户消息更新会话状态（最新一句覆盖 current_task），再注入上下文。
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Pool } from 'pg';
-import type { ChatHistoryResult, ChatRow } from '@ai-workbench/shared';
+import type { ChatHistoryResult, ChatRow, ChatStateResult } from '@ai-workbench/shared';
 import type { ServerEnv } from '../env';
 import type { JsonCipher } from '../crypto';
 import { bearerFrom, verifyToken } from '../crypto';
 import { isDbUnreachable } from '../db';
+import { llmFetch } from '../llm';
+import { BASE_OVERRIDE_NOTE, BASE_SYSTEM_PROMPT, sessionStateBlock } from '../promptPolicy';
+import {
+  applyUserMessage,
+  loadConversationState,
+  noteLoginReminder,
+  setKeepalive,
+} from '../sessionState';
 import { buildMemoryBlock } from './memories';
 import { buildKnowledgeBlock } from './knowledge';
 import { buildAgentContext, buildUserMemoryBlock, ensureAgentConversation } from './agents';
@@ -34,27 +52,13 @@ export interface ChatDeps {
 }
 
 /**
- * 系统提示词：只放服务端，绝不进前端。
- * 第 15 步起首句按**当前智能体**变（自建智能体的人设由引导表填出来，见 buildAgentContext）。
+ * 系统提示词的**首句**：只放服务端，绝不进前端。
+ * 第 15 步起按当前智能体变；第 16 步起后面统一接基座（人设不能关掉基座）。
  */
-const BASE_PROMPT_LINES = [
-  '说话短、像同事，不要官腔。',
-  '你现在只能聊天和帮用户把需求说清楚。',
-  '当用户的需求必须打开网页才能完成时，不要假装已经打开了网页，只回答：',
-  '「这需要用工作台浏览器，确认后我开始操作。」',
-  '不要向用户索要任何网站密码。需要登录时，让用户自己在工作台浏览器里登录。',
-  '不要编造你没有查到的数据和链接。',
-  '不要输出 JSON 动作，不要输出 function call。',
-  '（第 9 步）用户在聊天里发来疑似密码、验证码、卡号等敏感信息时：提醒他「请直接在浏览器里输入，我不会代填，也别把这个发在聊天里」，不要复述该值，也不要在回复里保存或转写它。',
-  '（第 15 步）你只知道自己这一份项目记忆和账号级的用户记忆库；不要假装知道别的智能体聊过什么。',
-];
-
-function systemPromptFor(agentName: string | null): string {
-  const head =
-    agentName && agentName !== '小助'
-      ? `你是用户桌面工作台里的一个 AI 智能体（名字见下面的人设块；没给人设就先用「${agentName}」）。`
-      : '你是「小助」，用户桌面工作台里的 AI 同事。';
-  return [head, ...BASE_PROMPT_LINES].join('\n');
+function systemPromptHead(agentName: string | null): string {
+  return agentName && agentName !== '小助'
+    ? `你是用户桌面工作台里的一个 AI 智能体（名字见下面的人设块；没给人设就先用「${agentName}」）。`
+    : '你是「小助」，用户桌面工作台里的 AI 同事。';
 }
 
 const HISTORY_WINDOW = 24; // 拼给模型的历史条数（含本轮前的最近 24 条）
@@ -190,6 +194,14 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
       if ('err' in conv) return errJson(reply, conv.status, conv.err);
       const convId = conv.id;
 
+      /**
+       * 第 16 步：每轮先按**本轮最新消息**更新会话状态，再拿它拼上下文。
+       * 规则见 sessionState.applyUserMessage：最新一句覆盖 current_task；「继续 / 按我上一条」
+       * 或本轮带了 browserOpened（桌面已直接出卡片）→ browser_confirmed = true，
+       * 于是同一会话后续的普通点击/搜索/滚动/读页都不再问。
+       */
+      const state = await applyUserMessage(pool, convId, message, { browserOpened: openedUrl });
+
       // 1) 先读历史（不含本句），再落用户消息
       const hist = await pool.query<{ role: string; content_enc: string }>(
         'SELECT role, content_enc FROM messages WHERE conversation_id = $1 ORDER BY id DESC LIMIT $2',
@@ -206,59 +218,62 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
       const userMessageId = Number(um.rows[0].id);
 
       // 第 10 步：该用户已确认的档案记忆注入系统提示词（无记忆=空串，行为与第 9 步一致）
+      // 第 16 步：它只是**参考**（buildMemoryBlock 自己带「可被当前指令覆盖」的表头）。
       const memBlock = await buildMemoryBlock(pool, cipher, claims.sub, message);
-      const memoryBlock = memBlock ? `\n\n${memBlock}` : '';
       // 第 15 步 · 两层记忆 + 当前智能体人设：
       //   - 用户记忆库（账号级）：所有智能体都读得到，是「这个人」的习惯/口味；
       //   - 项目记忆（智能体级）：**只**读当前会话所属智能体那一份，绝不串号；
       //   - 人设：引导表填完就按它干活；没填完只让模型引导用户去填表，不许空人设乱聊。
       const agentCtx = await buildAgentContext(pool, cipher, claims.sub, convId, agentId);
-      const personaBlock = agentCtx.personaBlock ? `\n\n${agentCtx.personaBlock}` : '';
       const userMemoryBlockRaw = await buildUserMemoryBlock(pool, cipher, claims.sub);
-      const userMemoryBlock = userMemoryBlockRaw ? `\n\n${userMemoryBlockRaw}` : '';
-      const projectMemoryBlock = agentCtx.projectMemoryBlock ? `\n\n${agentCtx.projectMemoryBlock}` : '';
       // 第 11 步：知识库资料是与 memories 完全独立的、仅聊天用的上下文位置。
       // buildKnowledgeBlock 只按当前 owner 的加密片段做关键词字面匹配；空命中/异常都返回空，
       // 不进 agent 的驾驶员 JSON，也不触碰第 10 步的确认逻辑。
       const knowledgeBlock = await buildKnowledgeBlock(pool, cipher, claims.sub, message);
-      const knowledgeContext = knowledgeBlock ? `\n\n${knowledgeBlock}` : '';
       // 第 13 步：网页已开好时的当轮补充约束（只在带上 browserOpened 的那一轮出现）
       const browserContext = openedUrl
-        ? `\n\n（本轮补充：用户要开网页，工作台浏览器卡片已经打开并加载 ${openedUrl}，就在这句下面的聊天里。
-不要再让用户点确认、不要再说「确认后我开始操作」，直接用一句话说明你已经打开了这个网页。
+        ? `（本轮补充：用户要开网页，工作台浏览器卡片已经打开并加载 ${openedUrl}，就在这句下面的聊天里。
+网页已经开好了，**不要再让用户点确认、不要再说「确认后我开始操作」**，直接用一句话说明你已经打开了这个网页。
 提醒他可以直接在卡片里点、可以直接把验证码/密码打在网页自己的输入框里（你不会代填、也不会留存）。
 如果他还交代了具体要做的事，说你会在卡片里接着做，不要谎称已经做完。）`
         : '';
+
+      /**
+       * 第 16 步 · 系统提示词拼装顺序（顺序本身也是规矩）：
+       *   ① 首句（小助 / 某个智能体）
+       *   ② 人设块（第 15 步，**在前**）
+       *   ③ 基座（所有 Agent 共用，**在后**并写明「人设只能追加、不能削弱基座」）
+       *   ④ 本会话状态（current_task / browser_confirmed / keepalive…）
+       *   ⑤ 参考信息（记忆/档案/资料，全部标明可被当前指令覆盖）
+       * 这样人设与长期记忆都压不住基座，也不会把第 13 步打回「确认后我开始操作」。
+       */
+      const systemParts = [
+        systemPromptHead(agentCtx.agentName),
+        agentCtx.personaBlock,
+        BASE_OVERRIDE_NOTE,
+        BASE_SYSTEM_PROMPT,
+        sessionStateBlock(state),
+        userMemoryBlockRaw,
+        agentCtx.projectMemoryBlock,
+        memBlock,
+        knowledgeBlock,
+        browserContext,
+      ].filter((x) => x && x.trim());
 
       // 2) 调 DeepSeek（OpenAI 兼容 chat/completions，stream:true）。失败/无流 → 普通 JSON 错误，不开 SSE
       const ac = new AbortController();
       const deadline = setTimeout(() => ac.abort(), UPSTREAM_TIMEOUT_MS);
       let upstream: Response;
       try {
-        upstream = await fetch(`${env.deepseekBaseUrl.replace(/\/+$/, '')}/chat/completions`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', authorization: `Bearer ${env.deepseekApiKey}` },
-          body: JSON.stringify({
-            model: env.deepseekModel,
-            stream: true,
-            messages: [
-              {
-                role: 'system',
-                content:
-                  systemPromptFor(agentCtx.agentName) +
-                  personaBlock +
-                  userMemoryBlock +
-                  projectMemoryBlock +
-                  memoryBlock +
-                  knowledgeContext +
-                  browserContext,
-              },
-              ...history,
-              { role: 'user', content: message },
-            ],
-          }),
-          signal: ac.signal,
-        });
+        upstream = await llmFetch(
+          env,
+          [
+            { role: 'system', content: systemParts.join('\n\n') },
+            ...history,
+            { role: 'user', content: message },
+          ],
+          { tag: 'chat/stream', stream: true, signal: ac.signal },
+        );
       } catch (err) {
         clearTimeout(deadline);
         return errJson(reply, 502, `模型服务连不上：${(err as Error).message}（检查 DEEPSEEK_BASE_URL / 网络）`);
@@ -349,6 +364,8 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
           "INSERT INTO messages (conversation_id, role, content_enc) VALUES ($1, 'assistant', $2) RETURNING id",
           [convId, cipher.encryptText(full)],
         );
+        // 第 16 步：这轮是在让用户自己去网页里登录 → 记「已提醒过」，之后不再重复长篇提醒。
+        await noteLoginReminder(pool, convId, full).catch(() => undefined);
         sse(res, 'done', { conversationId: convId, messageId: Number(am.rows[0].id), contentLength: full.length });
       } catch (err) {
         sse(res, 'error', { error: `回复完成但入库失败：${(err as Error).message}` });
@@ -404,6 +421,67 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
         })) satisfies ChatRow[],
       };
       return out;
+    } catch (err) {
+      return dbErr(reply, err);
+    }
+  });
+
+  // ------------------------------------------- 第 16 步：会话状态（读 / 保活开关）
+  /**
+   * 桌面重启后靠它恢复：当前任务目标、本会话是否已确认过浏览器、是否在监听。
+   * 只认自己的会话（走 projects.user_id），别人的号当不存在。
+   */
+  app.get('/chat/state', async (req: FastifyRequest, reply) => {
+    const claims = authed(req, env);
+    if (!claims) return errJson(reply, 401, '未登录或登录已过期（会话状态需要第 5 步的 JWT）');
+    const q = req.query as { conversationId?: unknown; agentId?: unknown } | null;
+    const convIdRaw = Number(q?.conversationId);
+    const agentIdRaw = Number(q?.agentId);
+    try {
+      const conv = await resolveConversation(
+        pool,
+        claims.sub,
+        Number.isInteger(convIdRaw) && convIdRaw > 0 ? convIdRaw : null,
+        '',
+        Number.isInteger(agentIdRaw) && agentIdRaw > 0 ? agentIdRaw : null,
+      );
+      if ('err' in conv) {
+        // 一条会话都还没有时宽容返回空状态（和 /chat/history 一致）
+        if (!Number.isInteger(convIdRaw) && !Number.isInteger(agentIdRaw)) {
+          return { conversationId: null, state: null } satisfies ChatStateResult;
+        }
+        return errJson(reply, conv.status, conv.err);
+      }
+      const state = await loadConversationState(pool, conv.id);
+      return { conversationId: conv.id, state } satisfies ChatStateResult;
+    } catch (err) {
+      return dbErr(reply, err);
+    }
+  });
+
+  /**
+   * 「启动并保活」：把该智能体的会话标记为监听态。
+   * 保活**不等于**会一直调模型——空闲时服务端一次 LLM 都不调（看 /health 的 llmCalls），
+   * 有新消息才走本文件的 /chat/stream。也不起新进程、不开新窗口、不做计费看板。
+   */
+  app.post('/chat/state', async (req: FastifyRequest, reply) => {
+    const claims = authed(req, env);
+    if (!claims) return errJson(reply, 401, '未登录或登录已过期');
+    const b = (req.body ?? {}) as { agentId?: unknown; conversationId?: unknown; keepalive?: unknown };
+    const agentIdRaw = Number(b.agentId);
+    const convIdRaw = Number(b.conversationId);
+    if (typeof b.keepalive !== 'boolean') return errJson(reply, 400, 'keepalive 要是 true/false');
+    try {
+      const conv = await resolveConversation(
+        pool,
+        claims.sub,
+        Number.isInteger(convIdRaw) && convIdRaw > 0 ? convIdRaw : null,
+        '',
+        Number.isInteger(agentIdRaw) && agentIdRaw > 0 ? agentIdRaw : null,
+      );
+      if ('err' in conv) return errJson(reply, conv.status, conv.err);
+      const state = await setKeepalive(pool, conv.id, b.keepalive);
+      return { conversationId: conv.id, state } satisfies ChatStateResult;
     } catch (err) {
       return dbErr(reply, err);
     }

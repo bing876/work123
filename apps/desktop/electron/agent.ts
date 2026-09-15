@@ -10,8 +10,13 @@
  *   - 每步开头与执行后都查暂停；暂停后绝不点、绝不问下一步，并把 paused 同步给 tasks 表；
  *   - 「继续」= 重启本循环：第一步永远是重新 read_page，按当前真实页面决策，不重放旧动作；
  *   - 同一动作连续失败 2 次 → 第 3 次不再盲试，本地直接转 ask_user；
+ *     第 16 步：转 ask_user 时给的是「可能原因 + 一个明确的下一步」，不是整段重确认；
  *   - 模型/网络/未配置错误 → 明确 note + failed，绝不假装有动作；
  *   - 记步只存一行人话摘要，整页 HTML/快照绝不出现在 steps 里。
+ *
+ * 第 16 步：目标只认「用户最新指令」（服务端 current_task 也按最新一句覆盖）。
+ * 用户改口时桌面会 agentDrop 掉本循环（epoch 自增 → 下一个检查点退出），
+ * 所以这里不需要、也不允许去猜「现在到底是旧任务还是新任务」。
  */
 import type { AgentActionResponse, AgentEventPayload, BrowserAction, DriveResult, PageSnapshot } from '@ai-workbench/shared';
 
@@ -272,8 +277,14 @@ export async function runAgentLoop(goal: string, hooks: AgentLoopHooks): Promise
 
     fails += 1;
     if (fails >= FAILS_BEFORE_ASK) {
-      // 说明书第 11 条：连败两次，第三次不许再盲点——本地兜底直接转 ask_user
-      const q = `连着两步都没成（最后一次：${res.error ?? '原因未知'}）。我不想瞎点了，请你指导一下：告诉我点哪里，或者你手动操作后点「继续」。`;
+      // 说明书第 11 条：连败两次，第三次不许再盲点——本地兜底直接转 ask_user。
+      // 第 16 步：这里必须给「可能原因 + 一个明确的下一步」，不能退回「是否确认打开某某网站」，
+      // 也不要让用户重新确认一整段——driver 已经把原因写在 res.error 里了，转述即可。
+      const detail = (res.error ?? '原因未知').replace(/\s+/g, ' ').slice(0, 240);
+      const q =
+        `连着两步都没成（最后一次：${detail}）。我不再瞎点了，给你两条路：` +
+        '① 把按钮上的准确文字告诉我，我再试一次；② 你自己在卡片里点一下，然后点「继续」——' +
+        '我会先读你当前停留的页面再接着做，不会从头再来。';
       hooks.emit({ kind: 'ask', reason: 'consecutive_failures', question: q });
       hooks.phase('paused', '连续失败两次，等用户指导');
       await hooks.taskStatus(taskId, 'paused').catch(() => undefined);

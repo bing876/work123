@@ -1,10 +1,12 @@
 /**
  * AI 工作台最小后端（第 7 步：账号 + 流式聊天 + 云端驾驶员“一步一问”接口）。
  *
- * 接口面：GET /health（免）+ /auth/*（账号）+ /chat/stream、/chat/history（聊天）
+ * 接口面：GET /health（免，含第 16 步的 llmCalls 计数）+ /auth/*（账号）
+ *           + /chat/stream、/chat/history、/chat/state（聊天 + 第 16 步会话状态/保活）
  *           + /agent/next-action、/agent/task/*（第 7 步驾驶员循环的“大脑”半边，要 JWT）
  *           + /knowledge、/knowledge/upload（第 11 步资料原文密文知识库，要 JWT）
  *           + /agents*、/memory/*（第 15 步多智能体 + 两层记忆，要 JWT）。
+ * 第 16 步：所有模型调用都收口到 llm.ts（计数 + [llm] 日志），空闲/保活路径一次都不调。
  * 服务器**不直接碰浏览器**：动作都返回给桌面主进程，由本地 driver.ts 执行。
  * 明确没有：邮箱登录、真微信；云端也拿不到 CDP（只出动作建议，执行与叫停在本地）。监听 127.0.0.1。
  */
@@ -15,6 +17,7 @@ import multipart from '@fastify/multipart';
 import { loadEnv } from './env';
 import { makePool, migrate } from './db';
 import { makeCipher } from './crypto';
+import { llmCallCount } from './llm';
 import { registerAuthRoutes } from './routes/auth';
 import { registerChatRoutes } from './routes/chat';
 import { registerAgentRoutes } from './routes/agent';
@@ -50,6 +53,8 @@ async function main(): Promise<void> {
       db,
       sms: env.smsMock ? 'mock' : 'http',
       llm: env.deepseekApiKey ? 'configured' : 'missing', // 只报有没有配，绝不回显 key
+      // 第 16 步：模型调用**累计次数**。保活/空闲挂着时这个数不动，就是「不调 LLM」的证据。
+      llmCalls: llmCallCount(),
       time: new Date().toISOString(),
     };
   });

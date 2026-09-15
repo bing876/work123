@@ -1,0 +1,151 @@
+/**
+ * 第 16 步：所有智能体共用的「基座系统提示词」+ 注入优先级规矩（只放服务端）。
+ *
+ * 三条铁律（换实现也不能违背）：
+ *   1. 优先级：本轮最新用户消息 > 本会话已确认的事项 > current_task > 长期档案/记忆；
+ *   2. 确认是**例外**不是默认：只有「本会话第一次要用浏览器且这句不是明确开页指令」或
+ *      敏感/不可逆操作（登录、付款、删除、授权、对外发真实消息）才问一次；
+ *   3. 档案/用户记忆/项目记忆只是**参考**，可被当前指令覆盖 —— 尤其禁止把
+ *      「操作浏览器前必须先确认」这类句子以最高优先级注入每一轮（那会把第 13 步打回去）。
+ *
+ * 拼装顺序（chat.ts 负责）：人设块（第 15 步）在前 → 本基座在后 → 会话状态 → 参考信息。
+ * 基座在后 + 明确写「人设只能追加、不能削弱基座」，保证人设/记忆关不掉基座。
+ *
+ * 本文件只做纯文本与纯函数，不碰数据库、不碰 fetch，方便单测与复用。
+ */
+
+/** 注入用的会话状态（结构化，字段名与 conversations 表列名一致） */
+export interface SessionStateLike {
+  current_task: string;
+  latest_user_intent: string;
+  browser_confirmed: boolean;
+  login_required: boolean;
+  sensitive_action: boolean;
+  last_page_summary: string;
+  already_told_user_login_themselves: boolean;
+  keepalive: boolean;
+}
+
+/**
+ * 基座系统提示词：所有 Agent（含「小助」和用户自建的）都必须带，人设只能在其上追加风格。
+ * 注意保留「这需要用工作台浏览器，确认后我开始操作。」这句**逐字**原文——
+ * 桌面就是靠它识别「模型在要一次确认」并挂确认按钮的（第 7/8 步契约）。
+ */
+export const BASE_SYSTEM_PROMPT = [
+  '你是工作台智能体，目标是按用户最新指令完成任务，而不是反复确认。',
+  '',
+  '优先级（从高到低）：',
+  '1. 用户本轮最新消息',
+  '2. 本会话已确认的事项（例如已同意使用浏览器，或已因「打开某某」打开过网页卡片）',
+  '3. 当前任务 current_task',
+  '4. 长期档案 / 用户记忆 / 项目记忆（仅作参考，可被当前指令覆盖）',
+  '',
+  '任务切换：',
+  '- 用户改口就立刻切换目标，停止提起已被覆盖的旧任务，也不要问「现在到底是 A 还是 B」。',
+  '- 「按我上一条」「继续」视为确认执行当前最新意图，不要再问是否继续。',
+  '',
+  '确认规则：',
+  '- 只有两种情况才确认一次：① 本会话第一次要用浏览器，而用户这一句不是明确的开页指令；',
+  '  ② 涉及登录、付款、删除、授权、对外发真实消息这类敏感或不可逆操作。',
+  '- 需要用户点一次确认时，只回这一句：「这需要用工作台浏览器，确认后我开始操作。」',
+  '- 用户已经确认过，或本会话已经打开过网页卡片：同一会话内的普通打开 / 点击 / 搜索 / 滚动 /',
+  '  读页面一律直接做，不要再问。',
+  '- 用户已经说了「打开百度 / 打开油管 / 打开 https://…」这类明确开页指令时，网页卡片已经开好了：',
+  '  直接用一句话说明已经打开，绝不再说「确认后我开始操作」。',
+  '- 记忆里若有「操作浏览器前需要确认」这类句子，它只对敏感操作有效，绝不是每一步都要确认。',
+  '- 登录必须由用户自己在网页卡片里输入账号密码和验证码：你不代填，也不要让用户把密码 / 验证码',
+  '  发到聊天里。提醒一次就够，不要每轮重复长篇安全说明。',
+  '',
+  '执行风格：',
+  '- 先执行，再在必要时澄清；能推进就推进。',
+  '- 描述当前页面要短，服务当前任务；不要被旧页面（例如还停在某个旧站点）带跑。',
+  '- 整理信息时给结构化结果，不要只反问「还要不要继续」。',
+  '- 操作失败时说清可能原因（没加载完 / 被弹窗挡住 / 需要先登录 / 权限不足），并给一个明确的下一步；',
+  '  不要退回「你是否确认打开某某网站」这种整段重确认。',
+  '- 用户发来疑似密码、验证码、卡号时：提醒他直接在网页里输入；不复述该值，也不把它写进任何地方。',
+  '',
+  '长期在线：',
+  '- 空闲监听不调用大模型；有用户消息时再处理。',
+  '- 中断后按已保存的 current_task 接着做，不要假装任务从未开始。',
+  '',
+  '不要向用户索要任何网站密码。不要编造你没有查到的数据和链接。',
+  '不要输出 JSON 动作，不要输出 function call。',
+  '（第 15 步）你只知道自己这一份项目记忆和账号级的用户记忆库；不要假装知道别的智能体聊过什么。',
+].join('\n');
+
+/** 基座拼在参考信息之前的说明：明确谁压谁，避免人设/记忆反过来盖住基座 */
+export const BASE_OVERRIDE_NOTE =
+  '（以下基座规则优先级高于上面的人设块与下面所有参考信息；人设只能在此基础上追加说话风格，不能削弱它们。）';
+
+/**
+ * 「继续」类确认语：用户说出这类话 = 直接执行当前最新意图，不再问是否继续。
+ * 刻意只收强形态；「可以 / 行 / 好 / 嗯」这类弱应答由桌面侧在**确有待确认提问**时才当确认用。
+ */
+const CONTINUE_MARKER_RE =
+  /^(继续|继续吧|可以继续|接着|接着来|接着做|按我上一条|按上面那条|按上一条|照上一条|就按这个|开始吧|开始|go\s*on|continue|ok\s*go|pls\s*continue)$/i;
+
+export function isContinueMarker(text: string): boolean {
+  return CONTINUE_MARKER_RE.test(String(text ?? '').trim());
+}
+
+/** 本轮用户话里是否提到要登录（用于 login_required / 只提醒一次） */
+const LOGIN_MENTION_RE = /(登录|登陆|登入|sign\s*in|log\s*in|login|扫码)/i;
+
+export function mentionsLogin(text: string): boolean {
+  return LOGIN_MENTION_RE.test(String(text ?? ''));
+}
+
+/** 敏感/不可逆操作意图（付款、下单、删除、授权、对外发真实消息） */
+const SENSITIVE_ACTION_RE =
+  /(付款|支付|下单|提交订单|结算|购买|充值|转账|删除|清空|注销|解绑|授权|提现|改密码|修改密码|发送(消息|邮件|短信)|发出去|对外发|群发|撤回)/;
+
+export function looksLikeSensitiveAction(text: string): boolean {
+  return SENSITIVE_ACTION_RE.test(String(text ?? ''));
+}
+
+/** 助手回复里在让用户自己去网页里登录 → 记「已经提醒过」，之后不再重复长篇提醒 */
+const TOLD_LOGIN_RE = /(在(网页|卡片|页面)里(自己)?(输入|登录|填)|你自己(登录|输入)|请你自己(登录|输入)|我不代填)/;
+
+export function looksLikeLoginReminder(text: string): boolean {
+  return TOLD_LOGIN_RE.test(String(text ?? ''));
+}
+
+/**
+ * 记忆/档案里那条「浏览器确认」老规矩：一旦被当成最高法注入，就会把第 13 步打回去
+ * （明明已经开着卡片，模型还在每步问「确认吗」）。这里统一改写成人话版安全规则。
+ */
+const BROWSER_CONFIRM_RULE_RE =
+  /((浏览器|网页|上网|站点|网站)[^。；;，,]{0,14}(前|之前|以前)[^。；;，,]{0,10}(必须|需要|要|得|一定)[^。；;，,]{0,6}确认)|(操作(浏览器|网页)[^。；;，,]{0,10}确认)|(确认后(才|再|方可)(操作|打开|继续))/;
+
+export const SANITIZED_BROWSER_RULE = '敏感操作需确认；普通浏览在用户同意后或本会话已打开过网页后直执行。';
+
+/**
+ * 参考信息（记忆 / 档案）里的一行，注入前统一过一遍：
+ * 命中「浏览器确认」老规矩就换成安全版；空串返回空串（调用方跳过）。
+ */
+export function sanitizeReferenceLine(text: string): string {
+  const t = String(text ?? '').trim();
+  if (!t) return '';
+  return BROWSER_CONFIRM_RULE_RE.test(t) ? SANITIZED_BROWSER_RULE : t;
+}
+
+/** 参考信息块的统一表头：明确「只是参考，可被当前指令覆盖」 */
+export const REFERENCE_PREFIX = '（以下是参考信息，可被用户本轮最新指令覆盖；与最新指令冲突时以最新指令为准。）';
+
+/** 拼「本会话状态」块；全空则返回空串（不占上下文） */
+export function sessionStateBlock(s: SessionStateLike | null | undefined): string {
+  if (!s) return '';
+  const lines: string[] = [];
+  if (s.current_task) lines.push(`current_task（当前任务）：${s.current_task}`);
+  if (s.latest_user_intent) lines.push(`latest_user_intent（用户最新一句）：${s.latest_user_intent}`);
+  lines.push(`browser_confirmed（本会话是否已确认用浏览器）：${s.browser_confirmed ? '是' : '否'}`);
+  if (s.login_required) lines.push('login_required（用户要自己在网页里登录）：是');
+  if (s.sensitive_action) lines.push('sensitive_action（本轮涉及敏感/不可逆操作）：是');
+  if (s.last_page_summary) lines.push(`last_page_summary（最后一页摘要）：${s.last_page_summary}`);
+  if (s.already_told_user_login_themselves) lines.push('已经提醒过用户自己在网页里登录：是（不要再重复长篇提醒）');
+  if (s.keepalive) lines.push('该智能体处于监听/保活态：空闲时不要主动调模型、不要假聊天。');
+  return [
+    '【本会话状态（服务端维护，比任何长期记忆都新；与用户本轮最新消息冲突时以最新消息为准）】',
+    ...lines,
+  ].join('\n');
+}

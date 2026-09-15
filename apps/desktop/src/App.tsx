@@ -9,6 +9,8 @@ import type {
   AuthProfile,
   AuthSession,
   ChatHistoryResult,
+  ChatStateResult,
+  ConversationStateView,
   KnowledgeDocument,
   KnowledgeListResult,
   KnowledgeUploadResult,
@@ -76,6 +78,16 @@ import { BrowserCard, HOME_URL, detectOpenUrl } from './browserCard';
  *     切智能体 = 换聊天；流式回包按**发起时那个智能体**落桶，绝不写进别的智能体；
  *   - 网页卡片仍是第 13 步那一张：谁当前在聊谁用，切换后旧卡片降级成一行占位（全窗口恒 1 个 webview）；
  *   - 两层记忆：用户记忆库（账号级，所有智能体都读）/ 项目记忆（智能体级，绝不串）。
+ *
+ * 第 16 步「智能体行为（最新指令优先 + 确认例外）」：
+ *   - 确认是**例外**：用户回「继续 / 可以」且本会话确实有个待确认的浏览器任务时，
+ *     桌面直接开卡片 + 立刻起任务（不再让用户点按钮、模型也不再问一遍）；
+ *   - 改口立刻切换：running 中用户发明确开页指令（「打开油管」）→ 主进程 agentDrop 掉旧任务，
+ *     旧目标不会被「继续」重新捡起来，也不会再问「现在到底是 A 还是 B」；
+ *   - 会话状态（current_task / browser_confirmed / keepalive…）存在服务端现有会话表里，
+ *     聊天顶部显示状态行，进程重启后据此恢复当前任务；
+ *   - 「启动并保活」只标监听态：空闲时服务端一次模型都不调（看 /health 的 llmCalls），
+ *     仍在这一个窗口里，不新开窗口、不起新进程。
  */
 
 type Role = 'user' | 'assistant' | 'browser';
@@ -84,6 +96,20 @@ type Message = { id: number; role: Role; text: string; cardUrl?: string };
 type AgentChat = { messages: Message[]; convId: number | null };
 /** 空列表用同一个常量：切智能体时引用稳定，不会每次渲染都造新数组 */
 const EMPTY_MESSAGES: Message[] = [];
+
+/**
+ * 第 16 步：确认是**例外**，不是默认。
+ *
+ * 模型只在「本会话第一次要用浏览器、且这句不是明确开页指令」时回那句固定话术；
+ * 桌面靠下面这个正则识别「有一个待确认的浏览器任务」。
+ * 用户回「继续 / 可以」= 同意 → **直接开卡片并起任务**，不再让他点按钮、也不再问一遍。
+ * （和 server 端 promptPolicy.isContinueMarker 保持同一套词表。）
+ */
+const CONFIRM_ASK_RE = /(确认后我开始操作|需要我用工作台浏览器|要我帮你(打开|操作|查|看)|要我打开|要不要我用浏览器)/;
+const CONTINUE_STRONG_RE =
+  /^(继续|继续吧|可以继续|接着|接着来|接着做|按我上一条|按上面那条|按上一条|照上一条|就按这个|开始吧|开始|go\s*on|continue|ok\s*go|pls\s*continue)$/i;
+/** 弱应答（可以 / 行 / 好 / 嗯）：**只有确实有待确认提问**时才算同意，平时不当确认用 */
+const CONTINUE_WEAK_RE = /^(可以|行|好的?|嗯|对|ok|okk?|好嘞|没问题)$/i;
 
 /** 第 8 步：GET /agent/task/current 的形态（红点/结果都认这个，不信内存假数据） */
 interface CurrentTask {
@@ -452,6 +478,16 @@ export default function App() {
   /** 第 15 步 · 第二层：**当前智能体**的项目记忆（智能体级，切智能体就整块换掉） */
   const [projMem, setProjMem] = useState<MemoryEntry[]>([]);
   const [projMemOpen, setProjMemOpen] = useState(false);
+  /**
+   * 第 16 步：每个智能体的**会话状态**（服务端现有 Postgres 的 conversations 表为准）。
+   * current_task / browser_confirmed / keepalive 都从这里来；进程重启后靠它恢复「当前任务」。
+   * 异步回包里要用 ref 读最新值（闭包会拿到旧的）。
+   */
+  const [agentStates, setAgentStates] = useState<Record<number, ConversationStateView>>({});
+  const agentStatesRef = useRef<Record<number, ConversationStateView>>({});
+  agentStatesRef.current = agentStates;
+  /** 保活开关正在请求中（防连点） */
+  const [keepaliveBusy, setKeepaliveBusy] = useState(false);
   /** 第 11 步：知识库资料独立于 memories；只展示当前账号的文件元信息和已入库段数。 */
   const [knowledgeDocs, setKnowledgeDocs] = useState<KnowledgeDocument[]>([]);
   const [knowledgeOpen, setKnowledgeOpen] = useState(false);
@@ -465,6 +501,23 @@ export default function App() {
   /** 聊天里追加一条「小助之外」的系统泡（driver 循环的问话/结论/报错），只进内存展示 */
   const pushChatLine = (text: string) => {
     setMessages((prev) => prev.concat({ id: Date.now() + Math.floor(Math.random() * 1000), role: 'assistant', text }));
+  };
+
+  /**
+   * 第 16 步：找到「最近一次要确认」之前那句用户原话 —— 它就是用户回「继续」时要执行的目标。
+   * 取法沿用第 7/8 步（不读输入框、不拿更早的消息）：从该智能体最后一条助手消息往前找，
+   * 是确认话术就继续往前找最近一条用户消息；找不到就返回空（那就明确不执行，绝不拿空目标开车）。
+   */
+  const lastUserGoalBeforeConfirm = (agentId: number): string => {
+    const list = chatsRef.current[agentId]?.messages ?? [];
+    for (let i = list.length - 1; i >= 0; i -= 1) {
+      if (list[i].role !== 'assistant' || !CONFIRM_ASK_RE.test(list[i].text)) continue;
+      for (let j = i - 1; j >= 0; j -= 1) {
+        if (list[j].role === 'user') return list[j].text.trim();
+      }
+      return '';
+    }
+    return '';
   };
 
   // ---- 第 15 步：两层记忆 + 智能体列表（一切以服务端为准，界面只做展示） ----
@@ -490,6 +543,55 @@ export default function App() {
       setProjMem(r.items);
     } catch {
       /* 同上 */
+    }
+  };
+
+  /**
+   * 第 16 步：拉某个智能体的会话状态（当前任务 / 是否已同意用浏览器 / 是否保活）。
+   * 进程重启后靠它把「当前任务」恢复出来，而不是假装任务从未开始。
+   */
+  const loadAgentState = async (agentId: number) => {
+    const sess = sessionRef.current;
+    if (!sess) return;
+    try {
+      const r = await authFetchJson<ChatStateResult>(`/chat/state?agentId=${agentId}`, {
+        headers: { authorization: `Bearer ${sess.token}` },
+      });
+      if (sessionRef.current?.token !== sess.token) return;
+      if (r.state) setAgentStates((prev) => ({ ...prev, [agentId]: r.state as ConversationStateView }));
+    } catch {
+      /* 后端/库没起就不打扰 */
+    }
+  };
+
+  /**
+   * 「启动并保活」：只把该会话标成监听态（服务端 conversations.keepalive）。
+   * 空闲时服务端**一次模型都不调**（看 /health 的 llmCalls），有新消息才走 /chat/stream；
+   * 不新开窗口、不起新进程、不做 7×24 集群。
+   */
+  const toggleKeepalive = async () => {
+    const sess = sessionRef.current;
+    const agentId = curAgentRef.current;
+    if (!sess || agentId === null || keepaliveBusy) return;
+    const on = !agentStatesRef.current[agentId]?.keepalive;
+    setKeepaliveBusy(true);
+    try {
+      const r = await authFetchJson<ChatStateResult>('/chat/state', {
+        method: 'POST',
+        body: JSON.stringify({ agentId, keepalive: on }),
+        headers: { authorization: `Bearer ${sess.token}` },
+      });
+      if (r.state) setAgentStates((prev) => ({ ...prev, [agentId]: r.state as ConversationStateView }));
+      setAgents((prev) => prev.map((a) => (a.id === agentId ? { ...a, listening: on } : a)));
+      setChatNote(
+        on
+          ? '已启动并保活：这个智能体进入监听态，空闲时不调模型，有新消息才处理（仍在这一个窗口里）。'
+          : '已停止保活。',
+      );
+    } catch (e) {
+      setChatNote(`保活开关没成：${(e as Error).message}`);
+    } finally {
+      setKeepaliveBusy(false);
     }
   };
 
@@ -526,12 +628,14 @@ export default function App() {
       const stillThere = cur !== null && r.agents.some((a) => a.id === cur);
       if (stillThere) {
         void loadProjectMemory(cur as number);
+        void loadAgentState(cur as number);
       } else if (r.agents.length > 0) {
         const first = r.agents[0];
         curAgentRef.current = first.id;
         setCurAgentId(first.id);
         void loadProjectMemory(first.id);
         void loadAgentHistory(first);
+        void loadAgentState(first.id);
       }
     } catch (e) {
       setAgentNote(`读不到智能体列表：${(e as Error).message}`);
@@ -614,6 +718,11 @@ export default function App() {
         return copy;
       });
       historyLoadedRef.current.delete(agentId);
+      setAgentStates((prev) => {
+        const copy = { ...prev };
+        delete copy[agentId];
+        return copy;
+      });
       if (curAgentRef.current === agentId) {
         const first = next[0];
         curAgentRef.current = first ? first.id : null;
@@ -845,6 +954,8 @@ export default function App() {
     setUserMemOpen(false);
     setProjMem([]);
     setProjMemOpen(false);
+    setAgentStates({}); // 第 16 步：会话状态（当前任务/保活）不留在登录页
+    setKeepaliveBusy(false);
     // 第 7 步：驾驶员循环和 token 一并停掉/清掉（主进程里也不留）
     void window.workbench?.agentStop();
     // 第 13 步：聊天里的网页卡片一并清掉（换号不该看见上一个号的网页）
@@ -879,11 +990,19 @@ export default function App() {
    * 在中栏聊天里插一张浏览器卡片。
    * 旧卡片自动降级成一行占位文字——**同一时刻只允许一张卡片挂 <webview>**，
    * 否则主进程「找内嵌页」会挑错 guest，也会变成事实上的多标签。
+   *
+   * 第 16 步：按**发起时那个智能体**落桶（切走之后卡片不会插进别人的聊天）。
    */
-  const openBrowserCard = (url: string) => {
+  const openBrowserCardFor = (agentId: number, url: string) => {
     const id = Date.now() + Math.floor(Math.random() * 1000);
-    setMessages((prev) => prev.concat({ id, role: 'browser', text: url, cardUrl: url }));
+    patchChat(agentId, (c) => ({ ...c, messages: c.messages.concat({ id, role: 'browser', text: url, cardUrl: url }) }));
     setBrowserCardId(id);
+    setCardExpanded(false);
+  };
+  const openBrowserCard = (url: string) => {
+    const id = curAgentRef.current;
+    if (id === null) return;
+    openBrowserCardFor(id, url);
   };
 
   /** 把焦点交给卡片里的网页（还没开过就先开一张默认主页） */
@@ -1034,24 +1153,55 @@ export default function App() {
     // 第 13 步：明确的开网页指令 → 不再要确认，聊天里直接插一张真实网页卡片。
     // 判定纯本地（不联网、不问模型），所以后端/模型没起来时卡片照样出现。
     const openUrl = detectOpenUrl(value);
-    lastUserWasOpenRef.current[myAgent] = openUrl !== null;
+    /**
+     * 第 16 步：确认是**例外**不是默认。
+     * 「继续 / 可以」这类回答只有在**本会话确实有一个待确认的浏览器任务**时才算同意：
+     * 判定只看**这个智能体**自己那份聊天里最后一条助手回复是不是在要确认。
+     * 一旦算同意 → 直接开卡片 + 立刻起任务，不再让用户点按钮、也不再问一遍。
+     */
+    const pendingConfirm =
+      openUrl === null &&
+      (CONTINUE_STRONG_RE.test(value) || CONTINUE_WEAK_RE.test(value)) &&
+      (() => {
+        const list = chatsRef.current[myAgent]?.messages ?? [];
+        for (let i = list.length - 1; i >= 0; i -= 1) {
+          if (list[i].role === 'assistant') return CONFIRM_ASK_RE.test(list[i].text);
+        }
+        return false;
+      })();
+    /** 待确认任务的原始目标 = 那条确认之前最近的一句用户原话（沿用第 7/8 步的取法） */
+    const pendingGoal = pendingConfirm ? lastUserGoalBeforeConfirm(myAgent) : '';
+    const goNow = pendingConfirm && Boolean(pendingGoal);
+    /** 这句话本身就算「已确认」：明确开页指令，或对确认提问回了「继续/可以」 */
+    const confirmedByThisMessage = openUrl !== null || goNow;
+    lastUserWasOpenRef.current[myAgent] = confirmedByThisMessage;
+
     if (aiInControl) {
-      void window.workbench?.pauseTask();
-      setChatNote('任务在 running：已先暂停自动 click/type（状态机 → paused），聊天照常发。');
+      if (openUrl) {
+        /**
+         * 用户改口（最新指令优先级最高）：旧任务**立刻放下**——
+         * 循环作废、旧目标清空，之后「继续」也不会把旧任务重新捡起来，
+         * 更不会去问「现在到底是旧任务还是新任务」。
+         */
+        void window.workbench?.agentDrop();
+        setChatNote('按你的最新指令：已经放下上一件事（旧任务不再提起）。');
+      } else {
+        void window.workbench?.pauseTask();
+        setChatNote('任务在 running：已先暂停自动 click/type（状态机 → paused），聊天照常发。');
+      }
     }
-    if (openUrl) {
-      const cardId = Date.now() + 2 + Math.floor(Math.random() * 1000);
-      patchChat(myAgent, (c) => ({
-        ...c,
-        messages: c.messages.concat(
-          { id: Date.now(), role: 'user', text: value },
-          { id: cardId, role: 'browser', text: openUrl, cardUrl: openUrl },
-        ),
-      }));
-      setBrowserCardId(cardId);
-      setCardExpanded(false);
-    } else {
-      patchChat(myAgent, (c) => ({ ...c, messages: c.messages.concat({ id: Date.now(), role: 'user', text: value }) }));
+    // 用户这句话先落桶（按发起时的智能体），卡片紧随其后
+    patchChat(myAgent, (c) => ({ ...c, messages: c.messages.concat({ id: Date.now(), role: 'user', text: value }) }));
+    const cardUrl = openUrl ?? (goNow ? (detectOpenUrl(pendingGoal) ?? HOME_URL) : null);
+    if (cardUrl) openBrowserCardFor(myAgent, cardUrl);
+    if (goNow) {
+      // 「继续」= 直接执行：等 webview 就绪后立刻把目标交给主进程的驾驶员循环
+      setAgentSteps([]);
+      setAgentDoc(null);
+      void (async () => {
+        await getWebviewId();
+        void window.workbench?.agentStart(pendingGoal, API_BASE(), session.token);
+      })();
     }
     setInput('');
     setHasUnread(false);
@@ -1132,6 +1282,9 @@ export default function App() {
       setStreaming(false);
       setStreamingAgentId(null);
       setStreamText('');
+      // 第 16 步：这轮服务端已经更新过会话状态（current_task / browser_confirmed）——
+      // 拉回来刷新界面上的状态行，改口后这里显示的就是新任务了。
+      void loadAgentState(myAgent);
     }
     // 第 9 步：刚才是回答驾驶员的「补资料」提问 → 把答案递给主进程并自动恢复循环
     // 第 15 步：只有「正在等的那个智能体」的回答才转给它；别的智能体聊天里的话不串过去。
@@ -1216,8 +1369,13 @@ export default function App() {
           conversationId: null,
         }));
   const curAgent = sidebarAgents.find((a) => a.id === curAgentId) ?? null;
-  /** 当前智能体这一轮的「开网页指令」标记（按智能体分开记，免得压掉别人的确认按钮） */
-  const curWasOpen = curAgentId !== null && Boolean(lastUserWasOpenRef.current[curAgentId]);
+  /** 第 16 步：当前智能体的会话状态（服务端为准）——状态行与保活按钮都读它 */
+  const curState = curAgentId === null ? undefined : agentStates[curAgentId];
+  /**
+   * 当前智能体这一轮用户原话**本身**就是确认（明确开页指令，或对确认提问回了「继续/可以」）。
+   * 是的话就不再挂确认按钮——事情已经在做了，再要确认就是自相矛盾（第 13 步的规矩）。
+   */
+  const curConfirmed = curAgentId !== null && Boolean(lastUserWasOpenRef.current[curAgentId]);
 
   return (
     <div className="app">
@@ -1263,6 +1421,24 @@ export default function App() {
           )}
           {agentNote && <div className="small agentList__note">{agentNote}</div>}
         </div>
+
+        {/*
+          第 16 步「启动并保活」最小闭环：
+          只把这个智能体的会话标成监听态（仍在这一个窗口里，不新开窗口、不起新进程）。
+          空闲时服务端一次模型都不调——有新消息才走 /chat/stream。
+        */}
+        {curAgent && (
+          <div className="keepalive">
+            <button type="button" className="btn keepalive__btn" disabled={keepaliveBusy} onClick={() => void toggleKeepalive()}>
+              {keepaliveBusy ? '切换中…' : curState?.keepalive ? '停止保活' : '启动并保活'}
+            </button>
+            <div className="small">
+              {curState?.keepalive
+                ? `「${curAgent.name}」监听中：空闲不调模型，来消息才处理`
+                : '未保活：只在你说一句话时才处理'}
+            </div>
+          </div>
+        )}
 
         {/* 第 5 步：我的账号（XYZ 对外号 + 设置/修改密码；退出回登录页） */}
         <div className="account">
@@ -1373,6 +1549,18 @@ export default function App() {
       <main className="middle">
         <div className="chat">
           {/*
+            第 16 步：会话状态行（服务端 conversations 表为准）。
+            进程重启后靠它把「当前任务」恢复出来，而不是假装任务从未开始；
+            保活态也在这里标出来，让人一眼看出「挂着监听但没在烧模型」。
+          */}
+          {curState && (curState.current_task || curState.keepalive || curState.browser_confirmed) && (
+            <div className="taskState">
+              <span>{curState.keepalive ? '● 监听中（保活：空闲不调模型）' : '○ 未保活'}</span>
+              {curState.current_task && <span> · 当前任务：{curState.current_task}</span>}
+              {curState.browser_confirmed && <span> · 本会话已同意用浏览器</span>}
+            </div>
+          )}
+          {/*
             第 15 步：新智能体的**引导表**就摆在这个会话里（不是独立设置窗、不是后台配置页）。
             填完确认 → 服务端存人设 → personaStatus 变 ready，它才按这份描述干活。
           */}
@@ -1422,10 +1610,10 @@ export default function App() {
                         网页已经在卡片里打开了，再要确认就是自相矛盾。
                         第 15 步：这个「本轮」是按**当前智能体**判的，别的智能体开过网页不算。 */}
                     {m.role === 'assistant' &&
-                      m.text.includes('确认后我开始操作') &&
+                      CONFIRM_ASK_RE.test(m.text) &&
                       idx === messages.length - 1 &&
                       !streaming &&
-                      !curWasOpen && (
+                      !curConfirmed && (
                         <div style={{ padding: '2px 4px' }}>
                           <button
                             type="button"

@@ -426,6 +426,22 @@ ipcMain.handle('workbench:agent:stop', () => {
   emitAgent({ kind: 'note', level: 'info', text: '驾驶员循环已中止（登出/停止）。' });
 });
 
+/**
+ * 第 16 步：**放下**当前任务但保留登录凭证 —— 用户改口时用。
+ *
+ * 场景：正在做任务 A（例如看旧店铺后台），用户直接说「打开油管」。
+ * 最新指令优先级最高：旧循环立刻作废（epoch 自增），旧目标清空（不会被「继续」重新捡起来），
+ * 状态机回 idle。凭证保留，所以新任务不用重新登录。
+ */
+ipcMain.handle('workbench:agent:drop', () => {
+  agentEpoch += 1;
+  agentGoal = null;
+  notifyResume();
+  pendingAnswers = [];
+  resetTask();
+  emitAgent({ kind: 'note', level: 'info', text: '按你的最新指令：已经放下上一件事（旧任务不再提起）。' });
+});
+
 // 单实例锁：重复启动时聚焦已有窗口，而不是再开一个
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {

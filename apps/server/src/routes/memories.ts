@@ -23,6 +23,8 @@ import type { ServerEnv } from '../env';
 import type { JsonCipher } from '../crypto';
 import { bearerFrom, verifyToken } from '../crypto';
 import { isDbUnreachable } from '../db';
+import { llmFetch } from '../llm';
+import { REFERENCE_PREFIX, sanitizeReferenceLine } from '../promptPolicy';
 
 export interface MemoryDeps {
   pool: Pool;
@@ -145,7 +147,14 @@ function extractJsonLoose(text: string): unknown {
   }
 }
 
-/** 注入块：active preference+decision 全带上；active fact 仅命中才带 */
+/**
+ * 注入块：active preference+decision 全带上；active fact 仅命中才带。
+ *
+ * 第 16 步：整块降级为**参考**——标明「可被用户本轮最新指令覆盖」，并且每一行都过
+ * sanitizeReferenceLine：老记忆里若有「操作浏览器前必须先确认」这类句子，会被改写成
+ * 「敏感操作需确认；普通浏览在用户同意后或本会话已打开过网页后直执行。」，
+ * 绝不让它当最高法把第 13 步（明确开页指令直接出卡片）打回去。
+ */
 export async function buildMemoryBlock(
   pool: Pool,
   cipher: JsonCipher,
@@ -158,6 +167,7 @@ export async function buildMemoryBlock(
       [ownerId],
     );
     const lines: string[] = [];
+    const seen = new Set<string>();
     const label = (t: string): string => (t === 'preference' ? '偏好' : t === 'decision' ? '决定' : '事实');
     for (const r of core.rows) {
       let text = '';
@@ -167,9 +177,12 @@ export async function buildMemoryBlock(
         continue; // DATA_KEY 换过之类的脏行：跳过，不炸聊天
       }
       if (SENSITIVE_MEM_RE.test(text) || LONG_DIGITS_RE.test(text)) continue; // 注入前也过闸，双保险
-      lines.push(`- [${label(r.type)}] ${text}`);
+      const line = sanitizeReferenceLine(text);
+      if (!line || seen.has(line)) continue;
+      seen.add(line);
+      lines.push(`- [${label(r.type)}] ${line}`);
     }
-    if (lines.length > 0) lines.push('若两条冲突，以更晚的为准。');
+    if (lines.length > 0) lines.push('若两条冲突，以更晚的为准；与用户本轮最新指令冲突，以最新指令为准。');
     const facts = await pool.query<{ content_encrypted: string }>(
       "SELECT content_encrypted FROM memories WHERE owner_id = $1 AND status = 'active' AND type = 'fact' AND content_encrypted IS NOT NULL ORDER BY updated_at DESC LIMIT 10",
       [ownerId],
@@ -182,10 +195,14 @@ export async function buildMemoryBlock(
         continue;
       }
       if (SENSITIVE_MEM_RE.test(text) || LONG_DIGITS_RE.test(text)) continue; // 注入前也过一遍闸
-      if (wordHits(userText, text)) lines.push(`- [事实·本轮相关] ${text}`);
+      if (!wordHits(userText, text)) continue;
+      const line = sanitizeReferenceLine(text);
+      if (!line || seen.has(line)) continue;
+      seen.add(line);
+      lines.push(`- [事实·本轮相关] ${line}`);
     }
     if (lines.length === 0) return '';
-    return `【用户档案记忆（该用户此前定下的，按规矩执行）】\n${lines.join('\n')}`;
+    return ['【参考·用户档案记忆（该用户此前定下的）】', REFERENCE_PREFIX, ...lines].join('\n');
   } catch (err) {
     if (!isDbUnreachable(err)) console.warn('[memories] 注入块拼装失败（忽略，照常服务）：', (err as Error).message);
     return '';
@@ -220,21 +237,14 @@ async function extractCore(
   const empty: CoreOutcome = { extracted: 0, pending: [] };
   let raw: { items?: unknown };
   try {
-    const r = await fetch(`${env.deepseekBaseUrl.replace(/\/+$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${env.deepseekApiKey}` },
-      body: JSON.stringify({
-        model: env.deepseekModel,
-        stream: false,
-        response_format: { type: 'json_object' },
-        temperature: 0.2,
-        messages: [
-          { role: 'system', content: EXTRACT_PROMPT },
-          { role: 'user', content: `记录如下：\n${transcript.slice(-6000)}` },
-        ],
-      }),
-      signal: AbortSignal.timeout(60_000),
-    });
+    const r = await llmFetch(
+      env,
+      [
+        { role: 'system', content: EXTRACT_PROMPT },
+        { role: 'user', content: `记录如下：\n${transcript.slice(-6000)}` },
+      ],
+      { tag: `memories/extract:${source}`, json: true, temperature: 0.2 },
+    );
     if (!r.ok) return { ...empty, skipped: `upstream_http_${r.status}` };
     const data = (await r.json()) as { choices?: { message?: { content?: string } }[] };
     const parsed = extractJsonLoose(data.choices?.[0]?.message?.content ?? '');
@@ -331,14 +341,24 @@ export function triggerTaskExtract(deps: MemoryDeps, ownerId: number, taskId: nu
   });
 }
 
-/** 闲置 15 分钟自动提取：每分钟扫一轮（进程内记“处理到哪个消息号”，同一切点不重抽） */
+/**
+ * 闲置 15 分钟自动提取：每分钟扫一轮（进程内记“处理到哪个消息号”，同一切点不重抽）。
+ *
+ * 第 16 步：**处于「启动并保活」监听态的会话直接跳过**——保活/监听本身一次模型都不调，
+ * 只有用户真发了消息才走 /chat/stream。这条让「挂着不调模型」变成硬保证，不靠自觉。
+ */
 export function startIdleScheduler(deps: MemoryDeps, intervalMs = 60_000): NodeJS.Timeout {
   const done = new Set<string>();
   const timer = setInterval(() => {
     void (async () => {
       const { pool } = deps;
       const r = await pool.query<{ conv_id: string; user_id: string; last_id: string | null; last_at: string | null }>(
-        'SELECT c.id AS conv_id, p.user_id, MAX(m.id) AS last_id, MAX(m.created_at) AS last_at FROM conversations c JOIN projects p ON p.id = c.project_id LEFT JOIN messages m ON m.conversation_id = c.id GROUP BY c.id, p.user_id',
+        `SELECT c.id AS conv_id, p.user_id, MAX(m.id) AS last_id, MAX(m.created_at) AS last_at
+           FROM conversations c
+           JOIN projects p ON p.id = c.project_id
+           LEFT JOIN messages m ON m.conversation_id = c.id
+          WHERE COALESCE(c.keepalive, false) = false
+          GROUP BY c.id, p.user_id`,
       );
       const now = Date.now();
       for (const row of r.rows) {
@@ -366,6 +386,8 @@ export function startIdleScheduler(deps: MemoryDeps, intervalMs = 60_000): NodeJ
           })
           .filter(Boolean)
           .join('\n');
+        // 这是**用户活动驱动**的一次整理（某条会话聊完闲置了），不是心跳：日志里能看清。
+        console.log(`[memories] 会话 ${row.conv_id} 闲置 ${Math.round(ago / 60_000)} 分钟 → 整理一次记忆`);
         await extractCore(deps, Number(row.user_id), 'chat_idle', transcript, `conv:${row.conv_id}:idle`);
       }
     })().catch((err) => {

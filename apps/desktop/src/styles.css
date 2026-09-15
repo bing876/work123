@@ -97,6 +97,29 @@ body {
   word-break: break-word;
 }
 
+/* ---- 第 16 步：「启动并保活」开关（左栏）---- */
+.keepalive {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.keepalive__btn {
+  width: 100%;
+}
+
+/* ---- 第 16 步：聊天顶部的会话状态行（当前任务 / 是否保活 / 是否已同意用浏览器）---- */
+.taskState {
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  border-radius: 8px;
+  background: #eef2ff;
+  color: #3730a3;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
 .avatar {
   width: 40px;
   height: 40px;

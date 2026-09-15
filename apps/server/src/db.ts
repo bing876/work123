@@ -169,6 +169,21 @@ CREATE TABLE IF NOT EXISTS user_memories (
 );
 CREATE INDEX IF NOT EXISTS idx_user_memories_owner ON user_memories (owner_id, updated_at DESC);
 
+-- 第 16 步：轻量会话状态（每个智能体那条会话一份）——直接补在**现有会话表**上，
+-- 不新建 SQLite、不建第二套库。这些字段每轮进模型上下文，否则改提示词也无效。
+--   current_task     当前任务（最新一句用户消息覆盖它，改口立刻切换）
+--   browser_confirmed 本会话是否已确认过用浏览器（已确认 → 普通点击/搜索/滚动/读页不再问）
+--   keepalive         「启动并保活」监听态；空闲**不调模型**，来消息才走 /chat/stream
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS current_task TEXT;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS latest_user_intent TEXT;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS browser_confirmed BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS login_required BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS sensitive_action BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS last_page_summary TEXT;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS already_told_user_login_themselves BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS keepalive BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS state_updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
 -- 第 15 步 · 第二层：项目记忆（智能体级）。一个智能体一份，**绝不串**。
 -- agent_id 是 NOT NULL 外键：查询一律 owner_id + agent_id 双条件，别的智能体的项目记忆读不到；
 -- 删智能体时级联删掉它自己的项目记忆（不会误伤别人）。

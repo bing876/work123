@@ -26,6 +26,7 @@ import type { ServerEnv } from '../env';
 import type { JsonCipher } from '../crypto';
 import { bearerFrom, verifyToken } from '../crypto';
 import { isDbUnreachable } from '../db';
+import { llmFetch } from '../llm';
 import { notifyUser } from '../notify';
 import { buildMemoryBlock, triggerTaskExtract } from './memories';
 
@@ -66,6 +67,9 @@ const DRIVER_PROMPT = [
   '13.（第 9 步）快照会标注每个输入框的分类。对 sensitive（密码/验证码/支付/身份证）字段：绝不用 type/fill_form 填它；需要用户输入时只输出 focus_sensitive_field（不带任何值，target 写明是哪个框），并在页面说明里让用户知道「输完会自动继续」。',
   '14.（第 9 步）需要用户提供普通资料（姓名/性别/地址/公司/职位/备注/搜索词等）而你还没拿到：先输出 ask_user（reason 用 need_info，一句话问清要什么，可一次问多项）；拿到用户答复后用 fill_form 一次填完这些 normal 字段，再按需用 click 点「搜索/确定/提交/下一步」这类普通按钮。支付/收银的最终确认永远不点。',
   '15.（第 9 步）用户在聊天里主动发了疑似密码/验证码的值：不要复述该值、不要拿它填任何字段，输出 focus_sensitive_field 定位对应输入框即可。',
+  '16.（第 16 步）用户已经同意使用浏览器（本会话已确认，网页卡片就开在聊天里）：**直接执行**，不要再问「是否打开某某网站」「要不要我操作浏览器」，也不要在每一步前问「可以吗」。',
+  '17.（第 16 步）以**用户最新指令**为准：目标已被用户改口覆盖时，不要再提旧任务；也不要把还停在旧站点（例如旧店铺后台）的当前页当成用户还想做旧任务——按新目标决定下一步。',
+  '18.（第 16 步）动作失败时：说清可能原因（页面没加载完 / 被弹窗遮住 / 需要先登录 / 权限不足 / 元素不在视口内），并给**一个**明确的下一步；不要退回「你是否确认打开某某网站」这种整段重确认。需要用户自己在页面里登录时，提醒一次即可，不要每轮重复。',
 ].join('\n');
 
 /** paused 覆盖提示：拼在用户消息最前 */
@@ -288,11 +292,16 @@ function matchSensitiveTarget(snapshot: PageSnapshot, target: string): FieldClas
   return SENSITIVE_TARGET_RE.test(t) ? { label: t, kind: 'sensitive', reason: 'server_guard' } : null;
 }
 
+/**
+ * 第 16 步：快照描述里把「像不像登录页 / 有没有遮挡」说清楚——
+ * 工具层要能给出「失败原因 + 一个下一步」，这两条是最常见的真实原因。
+ */
 function snapshotBrief(s: PageSnapshot): string {
   const list = (a: string[] | undefined, n: number): string => (a && a.length ? a.slice(0, n).join(' | ') : '（无）');
   return [
     `url: ${s.url}`,
     `title: ${s.title}`,
+    `页面性质: ${s.loginLike ? '像登录页（需要用户自己在网页里登录）' : '普通页面'}${s.overlay ? '；检测到疑似弹窗/遮罩，可能挡住按钮' : ''}`,
     `可见按钮: ${list(s.buttons, 24)}`,
     `可见链接: ${list(s.links, 16)}`,
     `可见输入框: ${list(s.inputs, 12)}`,
@@ -533,30 +542,23 @@ export function registerAgentRoutes(app: FastifyInstance, { pool, env, cipher }:
         // 只整理一次；模型连不上/乱答都退回兜底，绝不让收尾卡死
         try {
           const points = Array.isArray(b?.pagePoints) ? (b.pagePoints as unknown[]).map(String).slice(0, 12) : [];
-          const r = await fetch(`${env.deepseekBaseUrl.replace(/\/+$/, '')}/chat/completions`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json', authorization: `Bearer ${env.deepseekApiKey}` },
-            body: JSON.stringify({
-              model: env.deepseekModel,
-              stream: false,
-              response_format: { type: 'json_object' },
-              temperature: 0.2,
-              messages: [
-                { role: 'system', content: WRAP_PROMPT },
-                {
-                  role: 'user',
-                  content: [
-                    `任务目标：${goal}`,
-                    `步骤摘要：\n${steps.map((x, i) => `${i + 1}. ${x}`).join('\n') || '（无）'}`,
-                    `驾驶员 done 结论：${doneBits.summary || '（无）'}`,
-                    `要点提纲：${doneBits.document_outline.join(' / ') || '（无）'}`,
-                    `最后页面要点（仅标题/按钮级，不含整页）：\n${points.join('\n') || '（无）'}`,
-                  ].join('\n\n'),
-                },
-              ],
-            }),
-            signal: AbortSignal.timeout(60_000),
-          });
+          const r = await llmFetch(
+            env,
+            [
+              { role: 'system', content: WRAP_PROMPT },
+              {
+                role: 'user',
+                content: [
+                  `任务目标：${goal}`,
+                  `步骤摘要：\n${steps.map((x, i) => `${i + 1}. ${x}`).join('\n') || '（无）'}`,
+                  `驾驶员 done 结论：${doneBits.summary || '（无）'}`,
+                  `要点提纲：${doneBits.document_outline.join(' / ') || '（无）'}`,
+                  `最后页面要点（仅标题/按钮级，不含整页）：\n${points.join('\n') || '（无）'}`,
+                ].join('\n\n'),
+              },
+            ],
+            { tag: 'agent/task/finish', json: true, temperature: 0.2 },
+          );
           if (r.ok) {
             const data = (await r.json()) as { choices?: { message?: { content?: string } }[] };
             const parsed = extractJson(data.choices?.[0]?.message?.content ?? '');

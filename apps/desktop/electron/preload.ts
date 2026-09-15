@@ -43,6 +43,8 @@ const bridge: WorkbenchBridge = {
   agentStart: (goal: string, apiBase: string, token: string) =>
     ipcRenderer.invoke('workbench:agent:start', goal, apiBase, token),
   agentStop: () => ipcRenderer.invoke('workbench:agent:stop'),
+  // 第 16 步：用户改口时放下当前任务（保留凭证），旧目标不会被「继续」重新捡起来
+  agentDrop: () => ipcRenderer.invoke('workbench:agent:drop'),
   agentAnswer: (text: string) => ipcRenderer.invoke('workbench:agent:answer', text),
 
   // ---- 第 8 步：结果文档下载 + 服务端任务快照（红点以它为准）----

@@ -20,6 +20,14 @@ const SITES: Array<[string, string]> = [
   ['百度', 'https://www.baidu.com'],
   ['douyin', 'https://www.douyin.com'],
   ['抖音', 'https://www.douyin.com'],
+  // 第 16 步：补上「油管」这类口语站点名——验收里就有一条「改口打开油管」，
+  // 名字不在表里的话 detectOpenUrl 会返回 null，卡片开不出来，看着像「改口没生效」。
+  ['youtube', 'https://www.youtube.com'],
+  ['油管', 'https://www.youtube.com'],
+  ['youku', 'https://www.youku.com'],
+  ['优酷', 'https://www.youku.com'],
+  ['抖店', 'https://fxg.jinritemai.com'],
+  ['jinritemai', 'https://fxg.jinritemai.com'],
   ['toutiao', 'https://www.toutiao.com'],
   ['头条', 'https://www.toutiao.com'],
   ['kuaishou', 'https://www.kuaishou.com'],
