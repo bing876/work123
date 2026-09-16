@@ -17,7 +17,7 @@
   background: #f7f7f8;
 }
 
-/* ---- 顶栏：一张页一个 tab（最多 10 个）+ 「＋」+ 展开/收起 ---- */
+/* ---- 顶栏：当前智能体一张页一个 tab（第 20 步起没有数量上限）+ 「＋」+ 展开/收起 ---- */
 .browserPanel__tabs {
   display: flex;
   align-items: center;
@@ -25,12 +25,24 @@
   padding: 6px 8px;
 }
 
+/* 这是谁的浏览器（第 20 步：一个智能体一套独立浏览器，得一眼看出切没切） */
+.browserPanel__who {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-weak);
+  padding: 2px 7px;
+  border: 1px solid #e2e2e4;
+  border-radius: 999px;
+  background: #fff;
+  white-space: nowrap;
+}
+
 .browserTab {
   display: flex;
   align-items: center;
   gap: 2px;
-  /* 活页上限 10：张数一多就按比例收窄（min-width 兜底），
-     否则一排 tab 会把右边的「＋ / 收起」顶出可视区、鼠标够不到。 */
+  /* 页数一多就按比例收窄（min-width 兜底），否则一排 tab 会把右边的「＋ / 收起」顶出可视区、
+     鼠标够不到。第 20 步取消了活页上限，所以这里只靠收窄扛住，不再有「顶掉最旧」。 */
   flex: 0 1 auto;
   min-width: 56px;
   max-width: 190px;
@@ -147,6 +159,17 @@
   flex: 0 0 auto;
   font-size: 11px;
   color: var(--text-weak);
+}
+/* 页数偏多的提示（第 20 步：只提示，不关页） */
+.browserPanel__warn {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: #b45309;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 999px;
+  padding: 2px 7px;
+  white-space: nowrap;
 }
 
 /*

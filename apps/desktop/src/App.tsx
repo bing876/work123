@@ -73,7 +73,8 @@ import {
  *
  * 第 13 步「聊天内浏览器卡片 + 收干净右栏」：
  *   - 用户发**明确开网页指令**（打开百度 / 打开抖音 / 打开 https://… / 打开浏览器）时不再要确认：
- *     中栏聊天里直接插一张卡片，卡片里是**真实 <webview>**（partition=persist:workbench-browser），
+ *     中栏聊天里直接插一张卡片，卡片里是**真实 <webview>**
+ *     （第 20 步起分区按智能体：persist:workbench-browser-agent-{id}；第 18 步起已改挂在中栏工作区），
  *     能点、能在页面输入框打字；卡片上只有「展开 / 收起」一个按钮，不新开窗口、不做多标签；
  *   - 纯闲聊 / 问知识库 / 问「你是谁」：不弹网页、不加载（判定见 browser/sites.ts 的 detectOpenUrl）；
  *   - 右栏驾驶台（开始任务/暂停/继续/我来操作/复位/示例任务/黄框调试区/浏览器开关）全部撤掉，
@@ -102,14 +103,23 @@ import {
  *     仍在这一个窗口里，不新开窗口、不起新进程。
  *
  * 第 18 步「浏览器模块 + 工作区框架」：
- *   - 浏览器相关的东西**全部收进 apps/desktop/src/browser/**（tab 状态、开/关页、上限 10、
- *     URL 栏、webview 宿主、协议拦截、驾驶接口）；这个文件只挂载 <BrowserPanel ws={browser} />，
- *     不再往里堆开页逻辑。主进程的协议拦截仍在 electron/，桌面侧的浏览器 UI/状态以 browser/ 为准。
+ *   - 浏览器相关的东西**全部收进 apps/desktop/src/browser/**（tab 状态、开/关页、
+ *     URL 栏、webview 宿主、协议拦截、驾驶接口）；这个文件只挂载
+ *     <BrowserPanel ws={browser} agentLabel={…} />，不再往里堆开页逻辑。
+ *     主进程的协议拦截仍在 electron/，桌面侧的浏览器 UI/状态以 browser/ 为准。
  *   - 中栏是**钉住的浏览器工作区**（tab + URL + 当前页），它是 .chat 的兄弟节点，
  *     滚聊天滚不没；切智能体也不收起、不卸载（正在跑的驾驶因此不断）。
  *   - 聊天只说话和结论：开页成功只看 tab，不再每页一条记录；关页只从工作区消失，
  *     聊天里最多留一句人话（单条提示，不列「已关闭」清单）。
  *   - 闲聊不打断驾驶；只有明确的「停」口令才停手（见 browser/intent.ts 的 detectStopIntent）。
+ *
+ * 第 20 步「每智能体独立浏览器 + 取消活页硬顶」：
+ *   - **一个智能体 = 一套独立浏览器**：tab / 当前页 / 滚动 / cookie / 登录态全按智能体分开，
+ *     分区是 `persist:workbench-browser-agent-{id}`（见 browser/url.ts 的 partitionFor），
+ *     不再用全局的 `persist:workbench-browser`；新建智能体 = 空浏览器。
+ *   - 切智能体只换「哪一桶可见」：**所有页的 webview 一直挂着**，切回来页面和滚动都还在。
+ *   - **取消活页上限**：开多少张都行，不再「第 11 张顶掉最旧」；页数多了只提示「开太多会卡」。
+ *   - 驾驶只动当前智能体自己的页（点名的 tab 一定来自它自己那一桶）。
  */
 
 /** 第 18 步：聊天只剩这两种角色 —— 网页不再以消息形式出现在聊天里（看中栏工作区） */
@@ -681,8 +691,9 @@ export default function App() {
     if (agent.id === curAgentRef.current) return;
     curAgentRef.current = agent.id; // 立刻生效，免得同一 tick 里的回调写错桶
     setCurAgentId(agent.id);
-    // 第 18 步：**不动浏览器工作区**——它是窗口级的、钉在中栏，
-    // 切智能体只是换聊天，打开着的页和正在跑的驾驶都留在原处。
+    // 第 20 步：切智能体 = 换一套浏览器（tab / 当前页 / cookie 都按智能体分开），
+    // 但**只换「哪一桶可见」**——所有页的 webview 一直挂着不卸载，
+    // 所以切回来页面和滚动都还在，原来在跑的那几路驾驶也不会断。
     setProjMem([]);
     setChatNote('');
     setAgentNote('');
@@ -1042,19 +1053,22 @@ export default function App() {
     setKnowledgeNote('');
   };
 
-  // ---- 第 18 步：中栏浏览器工作区（tab + URL 栏 + 页；同时最多 MAX_LIVE_PAGES 张活页）----
+  // ---- 第 18 步：中栏浏览器工作区（第 20 步起：**每个智能体一套独立浏览器**，无活页上限）----
   /**
    * 浏览器相关的**全部状态与动作**都在 apps/desktop/src/browser/ 里，这里只把它挂上：
-   *   - tab 状态、开页/关页、上限 10、同站复用、满了顶最旧 → browser/useBrowserWorkspace.ts
+   *   - 按智能体分桶的 tab 状态、开页/关页、同站复用、驾驶接口 → browser/useBrowserWorkspace.ts
    *   - URL 栏 / webview 宿主 / 桌面侧协议闸 → browser/BrowserPanel.tsx、browser/url.ts
    *   - 「打开百度」→ URL、「在这张页面上做事」/「停」→ browser/sites.ts、browser/intent.ts
    *
-   * onNote 是它唯一往聊天里说话的通道：**只有「顶掉 / 排队 / 关页」才说一句**，
+   * currentAgentId 是**响应式**的：切智能体就换「哪一桶可见」（页本身一张都不卸载，
+   * 所以切回来页面和滚动都还在，原来在跑的那几路也不会断）。
+   * onNote 是它唯一往聊天里说话的通道：**只有「关页 / 页开太多」才说一句**，
    * 开页成功一个字都不写（看顶栏多出来的那个 tab 就是结果）。
    * getCurrentAgent 让主进程发来的「打开某网址」落给此刻正在聊的那个智能体。
    */
   const browser = useBrowserWorkspace({
     onNote: setChatNote,
+    currentAgentId: curAgentId,
     getCurrentAgent: () => curAgentRef.current,
   });
 
@@ -1677,7 +1691,14 @@ export default function App() {
           第 18 步：工作区挂在**窗口级**，是 .chat 的兄弟节点（所以滚聊天滚不没）。
           浏览器相关的东西全在 ./browser 里，这里只负责挂载。
         */}
-        {browser.tabs.length > 0 && <BrowserPanel ws={browser} />}
+        {/*
+          第 20 步：只要**任意**智能体还有页，工作区就一直挂着 ——
+          不能因为「当前这个智能体的桶是空的」就把它卸载掉，
+          否则别的智能体那些还活着的 webview 会被一起卸载（切回去页面就重载、滚动也没了）。
+        */}
+        {browser.allTabs.length > 0 && (
+          <BrowserPanel ws={browser} agentLabel={agents.find((a) => a.id === curAgentId)?.name} />
+        )}
         <div className="chat">
           {/*
             第 16 步：会话状态行（服务端 conversations 表为准）。

@@ -1,4 +1,5 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell, type WebContents } from 'electron';
+import { mkdirSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -40,6 +41,53 @@ let mainWindow: BrowserWindow | null = null;
 const isHttpUrl = (url: string): boolean => /^https?:\/\//i.test(url);
 
 /**
+ * 第 20 步：一个智能体 = 一套独立浏览器环境。
+ *
+ * 渲染层的 <webview> 用 `partition="persist:workbench-browser-agent-<agentId>"`，
+ * Electron 会把这个分区落到 `<userData>/Partitions/<分区名>/` —— 这天然就是
+ * 「每个 bot 在 userData 下有自己的子目录」（cookie / localStorage / 站点数据全在里面）。
+ *
+ * 这里额外做一件渲染层做不到的事：**把下载也按智能体分开**。
+ * ⚠️ 主进程 import 不到渲染层代码，所以分区命名规则在这里是**同规则的第二份**
+ * （渲染层见 apps/desktop/src/browser/url.ts 的 partitionFor），**改一处要同时改两处**。
+ */
+const AGENT_PARTITION_RE = /workbench-browser-agent-(\d+)/;
+
+/** 已经挂过 will-download 的分区（同一个分区可能被多次 attach，别重复挂） */
+const downloadHooked = new Set<string>();
+
+/** 某个智能体自己的下载目录（不存在就建出来） */
+function agentDownloadDir(agentId: number): string {
+  const dir = path.join(app.getPath('userData'), 'browser-agents', String(agentId), 'downloads');
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch (error) {
+    console.warn('[download] 建目录失败：', (error as Error).message);
+  }
+  return dir;
+}
+
+/**
+ * 给「某个智能体的浏览器分区」挂下载落盘规则：文件直接进它自己的 downloads 目录，
+ * 不弹系统「另存为」，也不会串到别的智能体那儿。
+ * 认不出分区的（例如主窗口自己那个默认 session）一律不管。
+ */
+function hookAgentDownloads(contents: WebContents): void {
+  const ses = contents.session;
+  const storage = ses.getStoragePath() ?? '';
+  const m = AGENT_PARTITION_RE.exec(storage);
+  if (!m) return;
+  if (downloadHooked.has(storage)) return;
+  downloadHooked.add(storage);
+  const agentId = Number(m[1]);
+  ses.on('will-download', (_event, item) => {
+    const savePath = path.join(agentDownloadDir(agentId), item.getFilename());
+    item.setSavePath(savePath);
+    console.log(`[download] 智能体 ${agentId} 的下载落到：${savePath}`);
+  });
+}
+
+/**
  * 内嵌页不允许创建新窗口：点击 target=_blank / window.open 时，改为让**同一个 guest**导航。
  *
  * 这是用户在卡片里手点搜索结果、帮助链接时的必要行为；若只简单 deny，页面看起来就会“点了没反应”。
@@ -53,6 +101,9 @@ const isHttpUrl = (url: string): boolean => /^https?:\/\//i.test(url);
  */
 app.on('web-contents-created', (_event, contents) => {
   if (contents.getType() !== 'webview') return;
+
+  // 第 20 步：这个内嵌页属于哪个智能体，它的下载就落到那个智能体自己的目录
+  hookAgentDownloads(contents);
 
   contents.setWindowOpenHandler(({ url }) => {
     if (isHttpUrl(url)) {
@@ -179,7 +230,8 @@ function createMainWindow(): void {
 // 内嵌浏览器区域（工作台浏览器）
 //
 // 注意：这里**不再创建任何 BrowserWindow**。
-// 网页由渲染层的 <webview partition="persist:workbench-browser"> 承载，
+// 网页由渲染层的 <webview partition="persist:workbench-browser-agent-<agentId>"> 承载
+// （第 20 步：按智能体分区，一个智能体一套 cookie / 登录态），
 // 主进程只做一件事：把渲染进程发来的指令原样转发回去，由渲染层决定显示 / 隐藏 / 聚焦。
 //
 // 这样做的原因：浏览器区域是主窗口界面的一部分（右侧那一栏），
@@ -284,14 +336,14 @@ ipcMain.handle('workbench:task:state', () => getTaskState());
 //   - API Key 不经过这里：它只在 apps/server/.env。
 // ---------------------------------------------------------------------------
 /**
- * 第 17 步：同时最多几路驾驶（= 最多几张活页）。
- * 硬顶 10（本步修订：2 → 10）：多出来的开页请求在渲染层排队或顶掉最旧那张空闲页，
- * 主进程这里再兜一道。
+ * 第 20 步：**并发驾驶不再有硬顶**（原来的 `MAX_LANES = 10` 已删）。
  *
- * ⚠️ 必须与渲染层的 `MAX_LIVE_PAGES`（apps/desktop/src/browser/url.ts）保持一致 ——
- * 主进程不能 import 渲染层代码，所以这里是同值的第二份，改一处要同时改两处。
+ * 旧行为是「第 11 路直接拒绝」，它按活页数算，会变成「页能开 30 张、第 11 张一发车就被拒」，
+ * 与本步「取消活页硬顶」相反。现在只保留一条语义：
+ * **同一张页同一时间只有一路**（这张页上的新指令 → 覆盖旧目标，最新指令优先）。
+ *
+ * 卡顿是本步明确接受的已知代价（页多、路多就是会卡），不再靠拒绝/关页来「治」。
  */
-const MAX_LANES = 10;
 
 /**
  * 一路驾驶 = **一张内嵌页** + 一个目标 + 自己那一份循环状态。
@@ -413,7 +465,7 @@ async function agentPost<T>(path: string, body: unknown): Promise<T> {
  * 第 17 步：在某一张内嵌页上发车（或改道）。
  *
  * - 这张页上已经有一路在跑 → **最新指令优先**：旧循环作废，用新目标重发（第一步仍是 read_page）；
- * - 这张页上没有 → 新起一路；已经满 2 路则拒绝（渲染层本该先顶掉/排队，这里只是兜底）；
+ * - 这张页上没有 → 新起一路（第 20 步起**没有路数上限**，不再拒绝）；
  * - 别路（别的页）**完全不动** —— 第二句不会把第一张降级成不能动的占位。
  */
 function startAgentLoop(wcId: number, goal: string, fresh: boolean): ReturnType<typeof getTaskState> {
@@ -422,13 +474,6 @@ function startAgentLoop(wcId: number, goal: string, fresh: boolean): ReturnType<
     prev.aborted = true;
     prev.running = false;
     notifyResume(prev);
-  } else if (lanes.size >= MAX_LANES) {
-    emitAgent({
-      kind: 'note',
-      level: 'error',
-      text: `已经有 ${MAX_LANES} 路在跑了（硬顶 ${MAX_LANES} 张活页）。等一路停下来，或者先关掉一张卡片再让我开。`,
-    });
-    return getTaskState();
   }
 
   const lane: Lane = {
