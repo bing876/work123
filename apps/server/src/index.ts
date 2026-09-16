@@ -1,14 +1,18 @@
 /**
- * AI 工作台最小后端（第 7 步：账号 + 流式聊天 + 云端驾驶员“一步一问”接口）。
+ * AI 工作台最小后端（第 21 步：账号 + 流式聊天 + **服务端工具循环**）。
  *
- * 接口面：GET /health（免，含第 16 步的 llmCalls 计数）+ /auth/*（账号）
+ * 接口面：GET /health（免，含第 16 步的 llmCalls 计数 + 第 21 步的 liveLoops/loopMaxSteps）
+ *           + /auth/*（账号）
  *           + /chat/stream、/chat/history、/chat/state（聊天 + 第 16 步会话状态/保活）
- *           + /agent/next-action、/agent/task/*（第 7 步驾驶员循环的“大脑”半边，要 JWT）
+ *           + /agent/loop/start|next|stop（**第 21 步工具循环：脑在这一侧**）
+ *           + /agent/next-action、/agent/task/*（老的单步接口，已改成同一引擎的适配器）
  *           + /knowledge、/knowledge/upload（第 11 步资料原文密文知识库，要 JWT）
  *           + /agents*、/memory/*（第 15 步多智能体 + 两层记忆，要 JWT）。
  * 第 16 步：所有模型调用都收口到 llm.ts（计数 + [llm] 日志），空闲/保活路径一次都不调。
- * 服务器**不直接碰浏览器**：动作都返回给桌面主进程，由本地 driver.ts 执行。
- * 明确没有：邮箱登录、真微信；云端也拿不到 CDP（只出动作建议，执行与叫停在本地）。监听 127.0.0.1。
+ * 第 21 步：任务轮的循环（消息历史 / 工具表 / 步数上限 / 提示词）**只在服务端 toolLoop.ts**，
+ * 桌面只当「手」：拿工具 → 在**当前智能体**那张 webview 上执行 → 回执喂回模型。
+ * 服务器**不直接碰浏览器**：也拿不到 CDP，执行与叫停都在本地。监听 127.0.0.1。
+ * 明确没有：邮箱登录、真微信、无头浏览器、Playwright/Puppeteer。
  */
 import 'dotenv/config';
 import Fastify from 'fastify';
@@ -24,6 +28,8 @@ import { registerAgentRoutes } from './routes/agent';
 import { registerMemoryRoutes, startIdleScheduler } from './routes/memories';
 import { registerKnowledgeRoutes, KNOWLEDGE_MAX_UPLOAD_BYTES } from './routes/knowledge';
 import { registerMultiAgentRoutes } from './routes/agents';
+import { registerLoopRoutes } from './routes/loop';
+import { liveLoopCount } from './toolLoop';
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -57,6 +63,10 @@ async function main(): Promise<void> {
       llm: env.deepseekApiKey ? 'configured' : 'missing', // 只报有没有配，绝不回显 key
       // 第 16 步：模型调用**累计次数**。保活/空闲挂着时这个数不动，就是「不调 LLM」的证据。
       llmCalls: llmCallCount(),
+      // 第 21 步：工具循环（脑在服务端）。liveLoops = 现在有几路活着；
+      // loopMaxSteps = 每轮步数上限（配置项 AGENT_LOOP_MAX_STEPS，默认 10，8~12）。
+      liveLoops: liveLoopCount(),
+      loopMaxSteps: env.agentLoopMaxSteps,
       time: new Date().toISOString(),
     };
   });
@@ -70,6 +80,9 @@ async function main(): Promise<void> {
   registerKnowledgeRoutes(app, { pool, env, cipher });
   // 第 15 步：智能体（添加/引导表人设/删）+ 两层记忆（user_memories 账号级、agent_memories 智能体级）。
   registerMultiAgentRoutes(app, { pool, env, cipher });
+  // 第 21 步：网页工具循环（脑在服务端；工具 open_url/read_page/click/type/scroll/stop，
+  // 执行在桌面主进程的现有 driver 上）。/chat/stream 的任务轮与它共用同一份 session_state。
+  registerLoopRoutes(app, { pool, env, cipher });
   startIdleScheduler({ pool, env, cipher });
 
   try {

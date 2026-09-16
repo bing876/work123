@@ -41,8 +41,15 @@ const bridge: WorkbenchBridge = {
 
   // ---- 第 7 步：云端驾驶员循环（编排就在主进程；token 只递给主进程用，不打印）----
   // 第 17 步：多带一个 targetWebContentsId —— 这次驾驶**哪一张**内嵌页（两路并行必须点名）
-  agentStart: (goal: string, apiBase: string, token: string, targetWebContentsId?: number) =>
-    ipcRenderer.invoke('workbench:agent:start', goal, apiBase, token, targetWebContentsId),
+  // 第 21 步：opts = {loopId, agentId} —— 循环的脑在服务端，loopId 是 /chat/stream 建好的那个；
+  //           agentId 让服务端挡住「A 的循环点到 B 的页上」
+  agentStart: (
+    goal: string,
+    apiBase: string,
+    token: string,
+    targetWebContentsId?: number,
+    opts?: { agentId?: number | null; loopId?: string },
+  ) => ipcRenderer.invoke('workbench:agent:start', goal, apiBase, token, targetWebContentsId, opts ?? {}),
   agentStop: () => ipcRenderer.invoke('workbench:agent:stop'),
   // 第 16 步：用户改口时放下当前任务（保留凭证），旧目标不会被「继续」重新捡起来
   // 第 17 步：带 id 只放下那一路（那张页），别路照跑；不带则全部放下

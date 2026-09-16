@@ -18,6 +18,22 @@ export interface ServerEnv {
   deepseekApiKey: string;
   deepseekBaseUrl: string;
   deepseekModel: string;
+  /**
+   * 第 21 步：工具循环每轮最多几步（防止空转烧 token）。
+   * 配置项 AGENT_LOOP_MAX_STEPS，默认 10；只接受 8~12，越界就夹到区间里。
+   */
+  agentLoopMaxSteps: number;
+}
+
+/** 工具循环步数上限：默认 10，允许范围 8~12（写死在代码里，只允许通过环境变量在这个区间内调） */
+export const AGENT_LOOP_MAX_STEPS_DEFAULT = 10;
+export const AGENT_LOOP_MAX_STEPS_MIN = 8;
+export const AGENT_LOOP_MAX_STEPS_MAX = 12;
+
+export function resolveAgentLoopMaxSteps(raw: string | undefined): number {
+  const n = Number(String(raw ?? '').trim());
+  if (!Number.isFinite(n) || n <= 0) return AGENT_LOOP_MAX_STEPS_DEFAULT;
+  return Math.min(AGENT_LOOP_MAX_STEPS_MAX, Math.max(AGENT_LOOP_MAX_STEPS_MIN, Math.floor(n)));
 }
 
 export function loadEnv(): ServerEnv {
@@ -68,5 +84,6 @@ export function loadEnv(): ServerEnv {
     deepseekApiKey: (process.env.DEEPSEEK_API_KEY || '').trim(),
     deepseekBaseUrl: (process.env.DEEPSEEK_BASE_URL || '').trim() || 'https://api.deepseek.com',
     deepseekModel: (process.env.DEEPSEEK_MODEL || '').trim() || 'deepseek-chat',
+    agentLoopMaxSteps: resolveAgentLoopMaxSteps(process.env.AGENT_LOOP_MAX_STEPS),
   };
 }

@@ -209,3 +209,13 @@
 .browserPanel__view--on {
   z-index: 2;
 }
+/**
+ * 第 21 步：**别的智能体的页不露脸**。
+ * 只改 opacity / pointer-events —— **不动 display、不动尺寸、不卸载**，
+ * 所以那张页仍然活着、仍然有真实尺寸，它上面跑着的那一路驾驶照样点得中。
+ */
+.browserPanel__view--off {
+  opacity: 0;
+  pointer-events: none;
+  z-index: 0;
+}

@@ -98,6 +98,12 @@ export interface PageSnapshot {
   /** 可见输入框的可读标识（placeholder / name / 当前值） */
   inputs: string[];
   /**
+   * 第 21 步：可见正文片段（标题 / 段落 / 列表项上的文字，去重限长）。
+   * 没有它，纯正文页（搜索结果、文章、列表）在模型眼里几乎是空的，
+   * 「把这一页整理成列表」这类任务做不了。仍然只是片段，不是整页 HTML。
+   */
+  texts?: string[];
+  /**
    * 第 9 步：字段分类标注（敏感字段不出现 value 的任何痕迹）。
    * 由本地 fieldClass.classifyField 生成——服务器只转述，不自己发明规则。
    */
@@ -192,12 +198,16 @@ export interface WorkbenchBridge {
    * @param targetWebContentsId 第 17 步：这次驾驶**哪一张**内嵌页的 guest id。
    *        两路并行时主进程按它分路——同一张页上的新指令覆盖旧指令，
    *        不同页上的指令互不干扰（第二句不会把第一张废掉）。
+   * @param opts 第 21 步：工具循环的两个身份——
+   *        `agentId`（这一路属于哪个智能体，服务端据此挡住串到别的 bot 的页）
+   *        与 `loopId`（/chat/stream 已经建好的那个循环；不带就由主进程自己建一个）。
    */
   agentStart: (
     goal: string,
     apiBase: string,
     token: string,
     targetWebContentsId?: number,
+    opts?: { agentId?: number | null; loopId?: string },
   ) => Promise<TaskState>;
   /** 中止**所有**驾驶员循环并清 token（退出登录时也要调） */
   agentStop: () => Promise<void>;
@@ -320,6 +330,11 @@ export type ChatStreamEvent =
   | { conversationId: number; userMessageId: number; agentId?: number | null } // event: meta（流第一帧）
   | { delta: string } // 打字机：逐段追加
   | { conversationId: number; messageId: number; contentLength: number } // event: done（助手已落库）
+  /**
+   * 第 21 步：这一轮是「页面任务」，服务端已经为它建好工具循环。
+   * 桌面拿 loopId 去 /agent/loop/next 要下一步工具，并在**这张页**上执行。
+   */
+  | { loopId: string; maxSteps: number; agentId?: number | null; pageUrl?: string }
   | { error: string }; // event: error（中断/失败：半截不算数）
 
 // ---------------------------------------------------------------------------
@@ -514,4 +529,67 @@ export interface ConversationStateView {
 export interface ChatStateResult {
   conversationId: number | null;
   state: ConversationStateView | null;
+}
+
+// ---------------------------------------------------------------------------
+// 第 21 步：工具循环（**脑在服务端**，手在桌面主进程）
+//
+//   用户下任务 → 服务端用 DeepSeek 的 function call 选工具 → 桌面在**当前智能体**
+//   的那张 webview 上执行 → 结果（URL / 读页摘要 / 点没点到）喂回模型 → 再选下一步，
+//   直到 stop 或用户叫停。循环本体（消息历史、步数上限、prompt、工具表）只在服务端；
+//   桌面只当「手」，不自己决定下一步，也不再另写一套 JSON 动作话术。
+//
+//   工具只有这 6 个，且**全部落在 apps/desktop/src/browser/ 那一套浏览器上**：
+//   open_url / read_page / click / type / scroll / stop。
+// ---------------------------------------------------------------------------
+
+/** 循环里允许出现的工具名（就是这 6 个，不多不少） */
+export type LoopToolName = 'open_url' | 'read_page' | 'click' | 'type' | 'scroll' | 'stop';
+
+/** 模型选出来的一个工具调用 */
+export interface LoopToolCall {
+  /** 上游给的调用 id（回执要用它对应） */
+  id: string;
+  name: LoopToolName;
+  args: Record<string, unknown>;
+}
+
+/** 桌面执行完一个工具后回给服务端的回执（只有人话摘要，不含整页 HTML） */
+export interface LoopToolResult {
+  ok: boolean;
+  /** 执行细节（例如「点击了 BUTTON「百度一下」」） */
+  detail?: string;
+  /** 失败原因（人话，直接进模型上下文） */
+  error?: string;
+  /** 动作执行了但页面看不出变化（点没点中） */
+  noChange?: boolean;
+  /** 执行后的页面快照（read_page / open_url / click / type / scroll 都带） */
+  page?: PageSnapshot;
+  /** 工具压根没执行（被本地安全闸拦下）时的原因 */
+  refused?: string;
+  /** 用户在循环跑着的时候补的一句答复（只进上下文，不落库） */
+  userAnswer?: string;
+}
+
+/** 服务端对循环的一次推进结果：要么给一个工具，要么收尾/提问 */
+export type AgentLoopDecision =
+  | { kind: 'tool'; call: LoopToolCall; step: number; text?: string }
+  | { kind: 'ask'; reason: string; question: string; step: number }
+  | { kind: 'done'; summary: string; document_title: string; document_outline: string[]; step: number }
+  | { kind: 'say'; text: string; step: number }
+  | { kind: 'stopped'; reason: string; step: number };
+
+/** POST /agent/loop/start 的响应 */
+export interface AgentLoopStartResult {
+  loopId: string;
+  /** 这一路属于哪个智能体（服务端用它挡住「串到别的 bot 的页」） */
+  agentId: number | null;
+  /** 每轮最多几步（配置项，默认 10，允许 8~12） */
+  maxSteps: number;
+  step: number;
+}
+
+/** POST /agent/loop/next 的响应 */
+export interface AgentLoopNextResult {
+  decision: AgentLoopDecision;
 }

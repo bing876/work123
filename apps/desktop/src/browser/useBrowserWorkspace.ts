@@ -35,6 +35,8 @@ interface BrowserWorkspaceOptions {
 }
 
 export interface BrowserWorkspace {
+  /** 此刻正在聊的那个智能体（舞台靠它决定「谁的页该露出来」） */
+  currentAgentId: number | null;
   /** **当前智能体自己**的活页（顶栏显示的就是这些） */
   tabs: BrowserTabView[];
   /** **所有智能体**的活页（舞台要把它们全挂着——切走的那些页也必须活着） */
@@ -396,6 +398,7 @@ export function useBrowserWorkspace(options: BrowserWorkspaceOptions): BrowserWo
   }, [pages]);
 
   return {
+    currentAgentId: visibleAgentId,
     tabs,
     allTabs,
     activeId,

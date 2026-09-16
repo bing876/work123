@@ -25,6 +25,13 @@
  *   - 记忆与档案一律标「参考，可被当前指令覆盖」，且「操作浏览器前必须先确认」这类句子
  *     会被 sanitize 成安全版——绝不让长期记忆把第 13 步的「明确开页指令直接出卡片」打回去；
  *   - 每轮先按最新用户消息更新会话状态（最新一句覆盖 current_task），再注入上下文。
+ *
+ * 第 21 步（一条分叉，别搞混）：
+ *   - **闲聊 / 问知识库 / 问「你是谁」/ 改口问句**：走本文件的聊天路径，**不带任何工具表** ——
+ *     所以它在能力上就不可能开页、不会新 tab；
+ *   - **页面任务**（打开某某并搜、在这张页上点/读/滚）：桌面带 `taskMode:true` 上来，
+ *     本文件**一次模型都不调**，只建一个服务端工具循环（toolLoop.ts）并把 loopId 交给桌面，
+ *     之后的每一步、聊天里的每一句步摘要都由那一个循环产生 —— 不再有两套互斥话术。
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Pool } from 'pg';
@@ -44,6 +51,7 @@ import {
 import { buildMemoryBlock } from './memories';
 import { buildKnowledgeBlock } from './knowledge';
 import { buildAgentContext, buildUserMemoryBlock, ensureAgentConversation } from './agents';
+import { startLoop } from '../toolLoop';
 
 export interface ChatDeps {
   pool: Pool;
@@ -163,7 +171,18 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
     if (!claims) return errJson(reply, 401, '未登录或登录已过期（聊天需要第 5 步的 JWT）');
 
     const body = req.body as
-      | { conversationId?: unknown; message?: unknown; browserOpened?: unknown; agentId?: unknown }
+      | {
+          conversationId?: unknown;
+          message?: unknown;
+          browserOpened?: unknown;
+          agentId?: unknown;
+          /** 第 21 步：这一轮是「页面任务」，交给服务端工具循环（不再并行第二套话术） */
+          taskMode?: unknown;
+          /** 第 21 步：这一轮要在哪张页上干活 */
+          pageUrl?: unknown;
+          /** 第 21 步：那张页的 guest webContents id（循环记着它，挡住串到别的 bot） */
+          wcId?: unknown;
+        }
       | null;
     const message = typeof body?.message === 'string' ? body.message.trim() : '';
     if (!message) return errJson(reply, 400, 'message 不能为空');
@@ -249,6 +268,71 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
         [convId, cipher.encryptText(message)],
       );
       const userMessageId = Number(um.rows[0].id);
+
+      /**
+       * 第 21 步 · 任务轮：**这一轮不进聊天模型，交给工具循环**。
+       *
+       * 为什么：聊天（嘴）与驾驶员（手）原来是两套提示词，容易互相矛盾
+       * （一边说「确认后我开始操作」，一边已经在点）。本步把「页面任务」整轮交给
+       * toolLoop.ts：循环自己选工具 → 桌面执行 → 结果喂回 → 再选下一步，
+       * 聊天里出现的步摘要与结论也全部由这一个循环产生。
+       *
+       * 这里只做三件事：建循环、把开头一句话写进历史、把 loopId 交给桌面去驱动。
+       * **一次模型都不调**（第一步由 /agent/loop/next 去问），所以也不会说半截假话。
+       *
+       * 闲聊 / 问知识库 / 问「你是谁」不会走到这里（桌面判定纯本地），
+       * 它们照旧走下面的聊天路径，而且**不带任何工具表** —— 闲聊在能力上就不可能开页。
+       */
+      if (body?.taskMode === true) {
+        const pageUrl = typeof body?.pageUrl === 'string' ? body.pageUrl.trim().slice(0, 500) : '';
+        const wcIdRaw = Number(body?.wcId);
+        const wcId = Number.isInteger(wcIdRaw) && wcIdRaw > 0 ? wcIdRaw : null;
+        // 循环记的智能体以**会话自己的 agent_id** 为准（比请求里的 agentId 更权威）
+        const convAgent = await pool.query<{ agent_id: string | null }>('SELECT agent_id FROM conversations WHERE id = $1', [convId]);
+        const convAgentId = Number(convAgent.rows[0]?.agent_id);
+        const loop = startLoop(env, {
+          userId: claims.sub,
+          agentId: Number.isInteger(convAgentId) && convAgentId > 0 ? convAgentId : agentId,
+          conversationId: convId,
+          wcId,
+          goal: message,
+          pageUrl: pageUrl || openedUrl,
+          state: {
+            current_task: state.current_task,
+            browser_confirmed: state.browser_confirmed,
+            login_required: state.login_required,
+            already_told_user_login_themselves: state.already_told_user_login_themselves,
+            last_page_summary: state.last_page_summary,
+          },
+        });
+        const host = openedHost || (() => {
+          try {
+            return new URL(pageUrl).host.replace(/^www\./i, '');
+          } catch {
+            return '';
+          }
+        })();
+        const opening = `好，我在${host ? `「${host}」` : '当前'}这张页上动手了，做完把结果给你。`;
+        const am = await pool.query<{ id: string }>(
+          "INSERT INTO messages (conversation_id, role, content_enc) VALUES ($1, 'assistant', $2) RETURNING id",
+          [convId, cipher.encryptText(opening)],
+        );
+        reply.hijack();
+        const res = reply.raw;
+        res.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache, no-transform',
+          connection: 'keep-alive',
+          'x-accel-buffering': 'no',
+          'access-control-allow-origin': req.headers.origin ?? '*',
+        });
+        sse(res, 'meta', { conversationId: convId, userMessageId, agentId: loop.agentId });
+        sse(res, 'loop', { loopId: loop.id, maxSteps: loop.maxSteps, agentId: loop.agentId, pageUrl: pageUrl || openedUrl });
+        sse(res, null, { delta: opening });
+        sse(res, 'done', { conversationId: convId, messageId: Number(am.rows[0].id), contentLength: opening.length });
+        res.end();
+        return;
+      }
 
       // 第 10 步：该用户已确认的档案记忆注入系统提示词（无记忆=空串，行为与第 9 步一致）
       // 第 16 步：它只是**参考**（buildMemoryBlock 自己带「可被当前指令覆盖」的表头）。

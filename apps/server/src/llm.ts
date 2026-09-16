@@ -11,9 +11,18 @@
  */
 import type { ServerEnv } from './env';
 
+export interface LlmToolCall {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
+}
+
 export interface LlmMessage {
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  /** 第 21 步：assistant 要求调用工具时带上它（tool 角色的消息用 tool_call_id 回执） */
+  tool_calls?: LlmToolCall[];
+  tool_call_id?: string;
 }
 
 export interface LlmCallOptions {
@@ -27,6 +36,13 @@ export interface LlmCallOptions {
   timeoutMs?: number;
   /** 调用方自己的 AbortSignal（流式聊天用：客户端断开就掐上游） */
   signal?: AbortSignal;
+  /**
+   * 第 21 步：工具表（OpenAI 兼容的 function 定义）。
+   * 给了它才开 function call——闲聊路径**一个工具都不给**，所以闲聊不可能开页。
+   */
+  tools?: unknown[];
+  /** 'auto'（默认，给工具时）/ 'none' / 'required' */
+  toolChoice?: 'auto' | 'none' | 'required';
 }
 
 let calls = 0;
@@ -59,6 +75,11 @@ export async function llmFetch(env: ServerEnv, messages: LlmMessage[], opts: Llm
   };
   if (opts.json) body.response_format = { type: 'json_object' };
   if (typeof opts.temperature === 'number') body.temperature = opts.temperature;
+  // 第 21 步：只有显式给了工具表才带 tools —— 闲聊/知识库轮不带，模型也就没有开页的能力。
+  if (opts.tools && opts.tools.length > 0) {
+    body.tools = opts.tools;
+    body.tool_choice = opts.toolChoice ?? 'auto';
+  }
 
   const signal = opts.signal ?? AbortSignal.timeout(opts.timeoutMs ?? 60_000);
   return fetch(`${env.deepseekBaseUrl.replace(/\/+$/, '')}/chat/completions`, {

@@ -1301,18 +1301,35 @@ export default function App() {
     /**
      * 在**某一张**页上发车（第 17 步：必须点名哪张页；主进程不再自己瞎挑一张）。
      * 别路不动 —— 这就是「第二句不会把第一张降级成不能动的占位」。
+     *
+     * 第 21 步：这里**不再自己发车**。先只记下「哪张页 + 目标」，等服务端把
+     * loopId（工具循环号）发下来再发车 —— 脑在服务端，桌面只当手。
      */
-    const startOnTab = async (tabId: number, goal: string, note: string) => {
+    let drive: { wcId: number; goal: string; note: string; pageUrl: string } | null = null;
+    /**
+     * 读「待发车」的那份信息。用函数读是为了绕开 TS 的控制流收窄：
+     * 赋值发生在异步闭包里，直接读变量会被收窄成 null（编译期看不到那次赋值）。
+     */
+    const pendingDrive = (): { wcId: number; goal: string; note: string; pageUrl: string } | null => drive;
+
+    const prepareDrive = async (tabId: number, goal: string, note: string, pageUrl: string): Promise<void> => {
       const wcId = await browser.awaitWebContentsId(tabId);
       if (typeof wcId !== 'number') {
         setChatNote('这张页还没准备好（拿不到内嵌页句柄），没有发车。');
         return;
       }
+      drive = { wcId, goal, note, pageUrl };
       setAgentSteps([]);
       setAgentDoc(null);
       setChatNote(note);
+    };
+
+    /** 真正发车：带 loopId（服务端已建好的循环）时直接用；没带就让主进程自己建一个 */
+    const launch = (loopId?: string): void => {
+      const d = pendingDrive();
+      if (!d) return;
       // token 递给主进程只用于请求头；不打印
-      void window.workbench?.agentStart(goal, API_BASE(), session.token, wcId);
+      void window.workbench?.agentStart(d.goal, API_BASE(), session.token, d.wcId, { agentId: myAgent, loopId });
       window.setTimeout(() => {
         void browser.refreshDriving();
       }, 400);
@@ -1325,21 +1342,28 @@ export default function App() {
       // 还白烧一次「读页 → 问模型」。带活的（「打开百度搜天气」）照旧发车。
       const tabId = await browser.openUrl(myAgent, openUrl);
       if (tabId !== null && !isPureOpenCommand(value)) {
-        await startOnTab(tabId, value, '已把这条指令交给驾驶员，在刚打开的那张页上执行（不新开窗口）。');
+        await prepareDrive(tabId, value, '已把这条指令交给驾驶员，在刚打开的那张页上执行（不新开窗口）。', openUrl);
       }
     } else if (goNow) {
       // 「继续」= 直接执行：打开目标站点后立刻把目标交给驾驶员循环
-      const tabId = await browser.openUrl(myAgent, detectOpenUrl(pendingGoal) ?? HOME_URL);
-      if (tabId !== null) await startOnTab(tabId, pendingGoal, '按你的确认开始执行。');
+      const url = detectOpenUrl(pendingGoal) ?? HOME_URL;
+      const tabId = await browser.openUrl(myAgent, url);
+      if (tabId !== null) await prepareDrive(tabId, pendingGoal, '按你的确认开始执行。', url);
     } else if (browseGoal && activeTab) {
       // 普通浏览指令 → 复用**当前这张**页发车（同页新指令 = 最新指令优先，旧动作当场停）
-      await startOnTab(activeTab.id, browseGoal, '已把这条指令交给驾驶员，在**当前这张**网页上执行（不新开页）。');
+      await prepareDrive(
+        activeTab.id,
+        browseGoal,
+        '已把这条指令交给驾驶员，在**当前这张**网页上执行（不新开页）。',
+        activeTab.url,
+      );
     }
     setInput('');
     setHasUnread(false);
     setStreaming(true);
     setStreamingAgentId(myAgent);
     setStreamText('');
+    let sawLoop = false;
     try {
       const res = await fetch(`${API_BASE()}/chat/stream`, {
         method: 'POST',
@@ -1347,6 +1371,10 @@ export default function App() {
         // browserOpened 只是给服务端系统提示词的一个开关：告诉小助「网页已经开好了」，
         // 别再让用户点确认。不是网页内容、不进历史、不落库。
         // agentId 让服务端在没带会话号时也只认这个智能体自己的会话（绝不串到别人的）。
+        //
+        // 第 21 步：**页面任务**多带三样 —— taskMode（这一轮交给服务端工具循环，
+        // 不再并行第二套聊天话术）、pageUrl/wcId（在**哪一张**页上干活，服务端记着它挡住串 bot）。
+        // 闲聊 / 问知识库 / 问「你是谁」不带这三样：那一轮连工具表都不给模型，能力上就开不了页。
         body: JSON.stringify({
           conversationId: chatsRef.current[myAgent]?.convId ?? undefined,
           agentId: myAgent,
@@ -1354,6 +1382,7 @@ export default function App() {
           // 明确开页指令 → 报新开的地址；在当前这张页面上干活 → 报这张页的地址。
           // 两者都是「网页已经开好了」，让基座别再让用户点确认（与驾驶员路径同一套）。
           ...(openUrl || (browseGoal && activeTab?.url) ? { browserOpened: openUrl ?? activeTab?.url } : {}),
+          ...(pendingDrive() ? { taskMode: true, pageUrl: pendingDrive()!.pageUrl, wcId: pendingDrive()!.wcId } : {}),
         }),
       });
       if (!res.ok || !res.body) {
@@ -1387,7 +1416,7 @@ export default function App() {
           const ev = lines.find((l) => l.startsWith('event:'))?.slice(6).trim() ?? '';
           const dl = lines.find((l) => l.startsWith('data:'));
           if (!dl) continue;
-          let j: { delta?: string; error?: string; conversationId?: number };
+          let j: { delta?: string; error?: string; conversationId?: number; loopId?: string; maxSteps?: number };
           try {
             j = JSON.parse(dl.slice(5).trim());
           } catch {
@@ -1397,6 +1426,10 @@ export default function App() {
             // 会话号写回**发起时那个智能体**的桶（不是「此刻正在看的」那个）
             const cid = j.conversationId;
             patchChat(myAgent, (c) => (c.convId === cid ? c : { ...c, convId: cid }));
+          } else if (ev === 'loop' && typeof j.loopId === 'string') {
+            // 第 21 步：服务端已经建好工具循环 —— 现在才发车，带着这个循环号
+            sawLoop = true;
+            launch(j.loopId);
           } else if (ev === 'error') setChatNote(`出错了：${j.error ?? '未知原因'}`);
           else if (ev === 'done') sawDone = true;
           else if (j.delta) {
@@ -1405,6 +1438,11 @@ export default function App() {
           }
         }
       }
+      /**
+       * 第 21 步兜底：任务轮没拿到 loopId（老后端 / 流被掐）也要发车 ——
+       * 主进程会自己调 /agent/loop/start 建一个（同一条引擎，不是第二套）。
+       */
+      if (pendingDrive() && !sawLoop) launch();
       if (acc) {
         patchChat(myAgent, (c) => ({ ...c, messages: c.messages.concat({ id: Date.now() + 1, role: 'assistant', text: acc }) }));
       } else if (!sawDone) {
@@ -1457,7 +1495,9 @@ export default function App() {
     setAgentSteps([]);
     setAgentDoc(null);
     // token 递给主进程只用于请求头；不打印
-    void window.workbench?.agentStart(goal, API_BASE(), session.token, wcId);
+    // 第 21 步：这条路径（「继续 / 开始任务」按钮）没有 loopId —— 主进程会自己
+    // 调 /agent/loop/start 建一个（同一条服务端引擎）；agentId 仍然要带上，别串 bot。
+    void window.workbench?.agentStart(goal, API_BASE(), session.token, wcId, { agentId: owner });
     window.setTimeout(() => {
       void browser.refreshDriving();
     }, 400);

@@ -15,14 +15,9 @@ import {
   setExternalPhase,
   isDrivingPaused,
 } from './driver';
-import { runAgentLoop } from './agent';
+import { runToolLoop } from './agent';
 import { startSensitiveAutoResume } from './driver';
-import type {
-  AgentActionResponse,
-  AgentEventPayload,
-  BrowserAction,
-  PageSnapshot,
-} from '@ai-workbench/shared';
+import type { AgentEventPayload, AgentLoopNextResult, AgentLoopStartResult, BrowserAction } from '@ai-workbench/shared';
 
 /**
  * Electron 主进程 —— 只有它能碰 Node / 系统能力。
@@ -356,6 +351,13 @@ ipcMain.handle('workbench:task:state', () => getTaskState());
 interface Lane {
   wcId: number;
   goal: string;
+  /**
+   * 第 21 步：这一路在**服务端**的那个工具循环 id（脑在服务端，这里只当手）。
+   * 建循环与「停」都要带上它，服务端才认得出「停的是哪一路」。
+   */
+  loopId: string | null;
+  /** 第 21 步：这一路属于哪个智能体（服务端据此挡住「A 的循环点到 B 的页上」） */
+  agentId: number | null;
   /** 被作废（新指令顶掉 / 用户放下 / 登出）时置 true，循环在下一个检查点自己退出 */
   aborted: boolean;
   running: boolean;
@@ -374,6 +376,11 @@ const lanes = new Map<number, Lane>();
 const pendingGoals = new Map<number, string>();
 /** 用户答复按「哪张页」分开暂存 */
 const pendingAnswers = new Map<number, string[]>();
+/**
+ * 第 21 步：每张页最后是哪个智能体在驾驶 —— 「继续」会新起一轮循环，
+ * 新循环也要记住同一个智能体（否则服务端会把它当成别的 bot 的循环，直接 409）。
+ */
+const lastAgentByWc = new Map<number, number>();
 
 let agentApiBase = 'http://127.0.0.1:8787';
 let agentJwt = '';
@@ -447,9 +454,13 @@ async function agentPost<T>(path: string, body: unknown): Promise<T> {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${agentJwt}` },
       body: JSON.stringify(body),
+      // 第 21 步：后端正常时最长一次模型调用 60s（服务端自己会掐），这里留 90s 上限。
+      // 没有这个上限，后端半路挂掉会让驾驶循环永远停在「等下一步」上。
+      signal: AbortSignal.timeout(90_000),
     });
   } catch (err) {
-    throw new Error(`连不上后端 ${agentApiBase}：${(err as Error).message}`);
+    const msg = (err as Error).name === 'TimeoutError' ? '后端 90 秒没有回应（服务端可能卡住了）' : (err as Error).message;
+    throw new Error(`连不上后端 ${agentApiBase}：${msg}`);
   }
   const data = (await res.json().catch(() => ({}))) as T & { error?: string; code?: string };
   if (!res.ok) {
@@ -464,21 +475,33 @@ async function agentPost<T>(path: string, body: unknown): Promise<T> {
 /**
  * 第 17 步：在某一张内嵌页上发车（或改道）。
  *
- * - 这张页上已经有一路在跑 → **最新指令优先**：旧循环作废，用新目标重发（第一步仍是 read_page）；
+ * - 这张页上已经有一路在跑 → **最新指令优先**：旧循环作废，用新目标重发（第一步仍是读当前页）；
  * - 这张页上没有 → 新起一路（第 20 步起**没有路数上限**，不再拒绝）；
  * - 别路（别的页）**完全不动** —— 第二句不会把第一张降级成不能动的占位。
+ *
+ * 第 21 步：循环的**脑在服务端**。这里要么用渲染层带下来的 loopId（/chat/stream 已经建好），
+ * 要么自己调 /agent/loop/start 建一个；然后 runToolLoop 只负责「要工具 → 执行 → 喂回执」。
  */
-function startAgentLoop(wcId: number, goal: string, fresh: boolean): ReturnType<typeof getTaskState> {
+function startAgentLoop(
+  wcId: number,
+  goal: string,
+  fresh: boolean,
+  opts: { loopId?: string; agentId?: number | null } = {},
+): ReturnType<typeof getTaskState> {
   const prev = lanes.get(wcId);
   if (prev) {
     prev.aborted = true;
     prev.running = false;
+    // 旧那一路在服务端的循环也要停：否则它还会被问下一步（白烧 token）
+    if (prev.loopId) void agentPost('/agent/loop/stop', { loopId: prev.loopId, reason: 'superseded' }).catch(() => undefined);
     notifyResume(prev);
   }
 
   const lane: Lane = {
     wcId,
     goal,
+    loopId: typeof opts.loopId === 'string' && opts.loopId ? opts.loopId : null,
+    agentId: typeof opts.agentId === 'number' ? opts.agentId : null,
     aborted: false,
     running: true,
     waiters: [],
@@ -496,63 +519,93 @@ function startAgentLoop(wcId: number, goal: string, fresh: boolean): ReturnType<
     : `继续任务（先读当前页）：${goal.slice(0, 36)}`;
   const state = takeoverRun(lanes.size > 1 ? `${lanes.size} 路驾驶中 · 本路任务：${goal.slice(0, 30)}` : detail);
 
-  void runAgentLoop(goal, {
-    nextAction: (body: { taskId: number | null; goal: string; stepsSummary: string[]; snapshot: PageSnapshot }) =>
-      agentPost<AgentActionResponse>('/agent/next-action', body).then((r) => {
-        if (!r || typeof (r.action as { action?: string })?.action !== 'string') throw new Error('大脑回了畸形 JSON');
-        return r;
-      }),
-    // 第 17 步：动作一律打到**这一路自己的那张页**上（两路并行时绝不能盲选 guest）
-    exec: (action) => drive(action, wcId),
-    readSnapshot: async () => {
-      const r = await drive({ action: 'read_page' }, wcId);
-      if (!r.ok || !r.pageSnapshot) throw new Error(r.error ?? 'read_page 没拿到快照');
-      return r.pageSnapshot;
-    },
-    isPaused: () => isDrivingPaused(),
-    aborted: () => lane.aborted,
-    emit: (payload) => {
-      if (payload.kind === 'ask' || payload.kind === 'sensitive') lane.awaiting = true;
-      emitAgent(payload, wcId);
-    },
-    phase: setExternalPhase,
-    taskStart: async (g) => {
-      try {
-        const r = await agentPost<{ taskId: number }>('/agent/task/start', { goal: g });
-        return typeof r.taskId === 'number' ? r.taskId : null;
-      } catch {
-        return null; // 记账失败不拦驾驶
-      }
-    },
-    taskStep: async (id, summary, ok) => {
-      if (id === null) return;
-      await agentPost('/agent/task/step', { taskId: id, summary, ok }).catch(() => undefined);
-    },
-    taskStatus: async (id, status) => {
-      if (id === null) return;
-      await agentPost('/agent/task/status', { taskId: id, status }).catch(() => undefined);
-    },
-    sensitiveHold: () => sensitiveHold(lane),
-    takeAnswers: () => {
-      const list = lane.answers;
-      lane.answers = [];
-      lane.awaiting = false;
-      return list;
-    },
-    // 第 8 步：done 收尾（服务端整理文档 + unread=true + 调通知桩；这里失败不卡 done）
-    taskFinish: async (id, doneBits, pagePoints) => {
-      const r = await agentPost<{ unreadHint?: string; docTitle?: string }>('/agent/task/finish', {
-        taskId: id,
-        summary: doneBits.summary,
-        document_title: doneBits.document_title,
-        document_outline: doneBits.document_outline,
-        pagePoints,
+  void (async () => {
+    // 1) 拿到这一路的循环 id（渲染层没带就自己建一个：同一条服务端引擎，没有第二套）
+    if (!lane.loopId) {
+      const r = await agentPost<AgentLoopStartResult>('/agent/loop/start', {
+        agentId: lane.agentId,
+        goal,
+        wcId,
       });
-      return { unreadHint: r.unreadHint, docReady: Boolean(r.docTitle) };
-    },
-    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-  })
-    .then((reason) => finishLane(lane, reason))
+      if (!r || typeof r.loopId !== 'string') throw new Error('服务端没有给出循环号');
+      lane.loopId = r.loopId;
+      console.log(`[agent] 第 ${wcId} 路新循环 ${r.loopId}（上限 ${r.maxSteps} 步）`);
+    }
+    if (lane.aborted) return;
+
+    // 2) 当「手」：要工具 → 用现有 driver 在**这一路自己那张页**上执行 → 喂回执
+    return runToolLoop(lane.loopId, goal, {
+      next: (loopId, result) =>
+        agentPost<AgentLoopNextResult>('/agent/loop/next', {
+          loopId,
+          agentId: lane.agentId,
+          wcId,
+          result,
+        }).then((r) => {
+          if (!r || !r.decision || typeof (r.decision as { kind?: string }).kind !== 'string') {
+            throw new Error('服务端回了畸形的决策');
+          }
+          return r.decision;
+        }),
+      // 第 17 步：动作一律打到**这一路自己的那张页**上（两路并行时绝不能盲选 guest）
+      exec: (action) => drive(action, wcId),
+      isPaused: () => isDrivingPaused(),
+      aborted: () => lane.aborted,
+      emit: (payload) => {
+        if (payload.kind === 'ask' || payload.kind === 'sensitive') lane.awaiting = true;
+        emitAgent(payload, wcId);
+      },
+      stopLoop: (reason) => {
+        if (!lane.loopId) return;
+        void agentPost('/agent/loop/stop', { loopId: lane.loopId, reason }).catch(() => undefined);
+      },
+      sensitiveNotice: (question) => {
+        // 敏感字段：窗口前置 + 聚焦这一路那张页 + 🔒 人话提示（值不经 AI、不落库）
+        mainWindow?.show();
+        mainWindow?.focus();
+        sendToMainWindow('workbench:browser:focus', String(wcId));
+        lane.awaiting = true;
+        emitAgent({ kind: 'sensitive', fieldReason: 'sensitive', message: question }, wcId);
+      },
+      phase: setExternalPhase,
+      taskStart: async (g) => {
+        try {
+          const r = await agentPost<{ taskId: number }>('/agent/task/start', { goal: g });
+          return typeof r.taskId === 'number' ? r.taskId : null;
+        } catch {
+          return null; // 记账失败不拦驾驶
+        }
+      },
+      taskStep: async (id, summary, ok) => {
+        if (id === null) return;
+        await agentPost('/agent/task/step', { taskId: id, summary, ok }).catch(() => undefined);
+      },
+      taskStatus: async (id, status) => {
+        if (id === null) return;
+        await agentPost('/agent/task/status', { taskId: id, status }).catch(() => undefined);
+      },
+      sensitiveHold: () => sensitiveHold(lane),
+      takeAnswers: () => {
+        const list = lane.answers;
+        lane.answers = [];
+        lane.awaiting = false;
+        return list;
+      },
+      // 第 8 步：done 收尾（服务端整理文档 + unread=true + 调通知桩；这里失败不卡 done）
+      taskFinish: async (id, doneBits, pagePoints) => {
+        const r = await agentPost<{ unreadHint?: string; docTitle?: string }>('/agent/task/finish', {
+          taskId: id,
+          summary: doneBits.summary,
+          document_title: doneBits.document_title,
+          document_outline: doneBits.document_outline,
+          pagePoints,
+        });
+        return { unreadHint: r.unreadHint, docReady: Boolean(r.docTitle) };
+      },
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    });
+  })()
+    .then((reason) => finishLane(lane, reason ?? 'done'))
     .catch((err) => {
       // 循环本体不抛穿（内部都 catch 了）；真到这就是编程错误，也得说人话而不是崩
       console.error('[agent] 循环异常：', err);
@@ -591,7 +644,7 @@ function finishLane(lane: Lane, reason: string): void {
 
 ipcMain.handle(
   'workbench:agent:start',
-  (_event, goal: unknown, apiBase: unknown, token: unknown, targetRaw: unknown) => {
+  (_event, goal: unknown, apiBase: unknown, token: unknown, targetRaw: unknown, optsRaw: unknown) => {
     const g = typeof goal === 'string' ? goal.trim().slice(0, 200) : '';
     if (!g) return getTaskState();
     // 第 17 步：两路并行时必须点名「驾驶哪一张页」——不点名就宁可不开车，
@@ -603,7 +656,17 @@ ipcMain.handle(
     }
     if (typeof apiBase === 'string' && apiBase) agentApiBase = apiBase;
     if (typeof token === 'string') agentJwt = token; // 只存内存；绝不 console
-    return startAgentLoop(wcId, g, true);
+    /**
+     * 第 21 步：opts = {loopId?, agentId?}。
+     * loopId 是 /chat/stream 的任务轮已经建好的那个服务端循环（带上就不用再建）；
+     * agentId 记下这一路属于哪个智能体（服务端用它挡住串到别的 bot 的页）。
+     */
+    const opts = (optsRaw ?? {}) as { loopId?: unknown; agentId?: unknown };
+    const loopId = typeof opts.loopId === 'string' && opts.loopId ? opts.loopId : undefined;
+    const agentIdRaw = Number(opts.agentId);
+    const agentId = Number.isInteger(agentIdRaw) && agentIdRaw > 0 ? agentIdRaw : null;
+    if (agentId !== null) lastAgentByWc.set(wcId, agentId);
+    return startAgentLoop(wcId, g, true, { loopId, agentId });
   },
 );
 
@@ -672,17 +735,23 @@ ipcMain.handle('workbench:agent:answer', (_event, text: unknown, targetRaw: unkn
     const goal = lane?.goal ?? pendingGoals.get(wcId);
     if (!goal) continue;
     pendingAnswers.set(wcId, [...(pendingAnswers.get(wcId) ?? []), t]);
-    startAgentLoop(wcId, goal, false); // 上一轮以 ask_user 停了：带答复重启（仍先读当前页）
+    // 第 21 步：带答复重启（仍是先读当前页）；智能体沿用这张页上一次那个
+    startAgentLoop(wcId, goal, false, { agentId: lane?.agentId ?? lastAgentByWc.get(wcId) ?? null });
   }
   return getTaskState();
 });
 
 ipcMain.handle('workbench:agent:stop', () => {
+  // 第 21 步：先告诉服务端「这些循环都别走了」（否则它还会被问下一步，白烧 token）
+  for (const lane of lanes.values()) {
+    if (lane.loopId) void agentPost('/agent/loop/stop', { loopId: lane.loopId, reason: 'agent_stop' }).catch(() => undefined);
+  }
   abortAllLanes();
   agentJwt = '';
   notifyAllResume(); // 别让挂在敏感等待上的循环僵住
   pendingGoals.clear();
   pendingAnswers.clear();
+  lastAgentByWc.clear();
   emitAgent({ kind: 'note', level: 'info', text: '驾驶员循环已中止（登出/停止）。' });
 });
 
@@ -704,18 +773,25 @@ ipcMain.handle('workbench:agent:drop', (_event, targetRaw: unknown) => {
     if (lane) {
       lane.aborted = true;
       lane.running = false;
+      // 第 21 步：只停**这一路**在服务端的那个循环（别路照跑）
+      if (lane.loopId) void agentPost('/agent/loop/stop', { loopId: lane.loopId, reason: 'dropped' }).catch(() => undefined);
       notifyResume(lane);
       lanes.delete(wcId);
     }
     pendingGoals.delete(wcId);
     pendingAnswers.delete(wcId);
+    lastAgentByWc.delete(wcId);
     if (lanes.size === 0) resetTask();
     return;
+  }
+  for (const lane of lanes.values()) {
+    if (lane.loopId) void agentPost('/agent/loop/stop', { loopId: lane.loopId, reason: 'dropped_all' }).catch(() => undefined);
   }
   abortAllLanes();
   notifyAllResume();
   pendingGoals.clear();
   pendingAnswers.clear();
+  lastAgentByWc.clear();
   resetTask();
   emitAgent({ kind: 'note', level: 'info', text: '按你的最新指令：已经放下上一件事（旧任务不再提起）。' });
 });

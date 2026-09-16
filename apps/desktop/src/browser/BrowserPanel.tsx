@@ -146,22 +146,38 @@ export function BrowserPanel({ ws, agentLabel }: { ws: BrowserWorkspace; agentLa
       {/* 舞台：所有智能体、所有 tab 的 webview 都挂在这里，只靠 z-index 分层 */}
       <div className="browserPanel__stage">
         {ws.tabs.length === 0 && <div className="browserPanel__empty small">这个智能体还没有打开网页</div>}
-        {ws.allTabs.map((t) => (
-          <webview
-            key={t.id}
-            ref={(el) => bindRef(t.id, el as unknown as HTMLElement | null)}
-            className={
-              t.id === active?.id && t.agentId === active?.agentId
-                ? 'browserPanel__view browserPanel__view--on'
-                : 'browserPanel__view'
-            }
-            src={t.bootUrl}
-            // 第 20 步：分区按**这张页自己的智能体**算 —— 一个智能体一套 cookie / 登录态
-            partition={partitionFor(t.agentId)}
-            // target=_blank 由主进程拦下并让同一个 guest 导航，不会创建 BrowserWindow
-            allowpopups
-          />
-        ))}
+        {ws.allTabs.map((t) => {
+          /**
+           * 第 21 步：**别的智能体的页不露脸**（但照样挂着、照样活着）。
+           *
+           * 第 20 步只做了「顶栏只显示当前智能体的 tab」，舞台里别的智能体的页仍铺在最底层 ——
+           * 切到「卡布」时顶栏写着「0 张活页 / 这个智能体还没有打开网页」，
+           * 屏幕上却还看得见小助那张百度页，看起来像「串了」。
+           * 现在：不是当前智能体的页一律 `--off`（opacity 0 + 不接收指针事件）。
+           * **尺寸与挂载状态完全不变**（不是 display:none、不是卸载），
+           * 所以它上面正在跑的那一路驾驶照旧点得中、也不会断。
+           */
+          const otherAgent = ws.currentAgentId !== null && t.agentId !== ws.currentAgentId;
+          const on = !otherAgent && t.id === active?.id && t.agentId === active?.agentId;
+          return (
+            <webview
+              key={t.id}
+              ref={(el) => bindRef(t.id, el as unknown as HTMLElement | null)}
+              className={
+                otherAgent
+                  ? 'browserPanel__view browserPanel__view--off'
+                  : on
+                    ? 'browserPanel__view browserPanel__view--on'
+                    : 'browserPanel__view'
+              }
+              src={t.bootUrl}
+              // 第 20 步：分区按**这张页自己的智能体**算 —— 一个智能体一套 cookie / 登录态
+              partition={partitionFor(t.agentId)}
+              // target=_blank 由主进程拦下并让同一个 guest 导航，不会创建 BrowserWindow
+              allowpopups
+            />
+          );
+        })}
       </div>
     </div>
   );
