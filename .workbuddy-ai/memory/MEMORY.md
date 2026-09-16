@@ -127,6 +127,41 @@ Postgres 并发「找或建」：`FOR UPDATE` 等锁期间仍是旧快照 → **
   「回答带来源」这条要**先传一份资料**才能抽查，别误判成自己把功能改坏了。
   查库写 node 脚本直连（`pg` 提升在**根** `node_modules`），别用 `docker`（本机被拦）。
 
+## 十二、第 22 步契约：多实例 / 按智能体隔离 / fail-fast（易踩坏）
+- 本步提交 `80cd92c`（`step22: …`），父 `e222f20`，**快进推送无 force**。
+  **下一轮基线由用户给，别自己认。**
+- **`driver.ts` 里没有任何驾驶状态是全局单例**：`phase/detail/step/paused/loopToken` 全在
+  `Map<number, TargetTask>` 里（`taskOf(wcId)` 取或建、`phaseOf`/`pausedOf` **不建条目**）。
+  新增任何驾驶状态**必须**进这个 Map，不许再起模块级 `let`。
+- **`findWebviewGuest()` 已删除**（全仓只剩注释说明它被删）。`resolveTarget(id?)`：
+  没给 id → 抛「驾驶目标未指定」；id 失效 → 抛「指定的内嵌页已经不在了」。
+  **绝不盲选第一张 webview。** 所有 `drive/readPage/startTask/...` 都要显式带 `webContentsId`。
+- **聚合视图**（不传 id 时给左栏横幅用）：优先级 running > paused > 最近终止态 > idle，
+  **按 `seq` 取最新**（不是 Map 第一条）。`seq` 只在写入时自增。
+- **终态有三种**：`idle`（停手先到）/ `done`（这一路自己做完）/ `paused`（自己转 ask_user）。
+  判据只能写「**绝不停在 running**」——写死成 idle 会把正常收尾误判成 bug。
+  `finishLane` 的 `aborted` 分支要收敛成 idle 时，**必须**加 `lanes.get(wcId) === lane` 判断，
+  否则会把「最新指令优先」时刚起的新循环覆盖掉。
+- **配置**：`electron/settings.ts` 是权威（`userData/workbench-settings.json`），
+  默认 `{ maxConcurrentAgentTasks: 1, maxBrowserInstances: 4 }`，范围来自 shared 的 `SETTINGS_RANGE`
+  （1–8 / 1–20）。渲染层 `App.tsx` 有**第二份兜底常量**（主进程 import 不到渲染层）。
+  **配置是全局唯一一份，不做 per-target**（A1.5 要求按 target 独立的是**驾驶状态**，不是配置）。
+- **并发闸**在 `main.ts` 的 `startAgentLoop`，**只在 `!prev` 时判**（被新指令顶掉不算新路）。
+  上限 1 时第二路会被拒并给一句人话。**调大这个数就解锁真并行，数据结构不用动。**
+- **D 上限闸**在 `useBrowserWorkspace.openUrl`（同站复用判断之后、新开之前），
+  **跨智能体全局计数**；到顶**只拒开、绝不关页**。
+- **卡片视图必须叠一层透明承接层** `.browserCard__catcher`（`position:absolute; inset:0`）：
+  指针落在 `<webview>` 上时鼠标事件被 guest 吞掉，宿主 `:hover` **永不成立**。
+  承接层只在卡片视图渲染，**viewer 模式不渲染**（否则网页点不动）。
+  webview 的父容器 `.browserCard__body` **任何模式都要渲染**——换父节点 = 重挂 = 页重载。
+- **验收前先验产物新鲜度**：`grep` `dist-electron/*.js` 里有没有本步标记字符串 + 比对 mtime
+  （渲染层走 vite HMR 不用重建，主进程改了**必须** `npm run build:electron -w @ai-workbench/desktop`）。
+- **探针的 `agentLanes()` 返回数组**，必须用 `jsf`（`ev`）取，用 `js` 拿到的是 Promise → 序列化成 `{}`，
+  会得出「一路都没起来」的错误结论。
+- **停手后状态采样有竞态**：`agentStop` 与「这一路自己收尾」谁先到决定终态是 idle 还是 done/paused，
+  多跑几次才看得到全部三种。
+
+
 ## 十二、浏览器多实例融合（第 22 步起）：已拍板的决策 + 别信旧审计
 - 基线 `e222f20`。报告 `docs/browser-multiinstance-fusion-report.md` 是**批复与勘误的唯一出处**
   （§10 批复 / §11 勘误 / §12 前置项），**动手前先读它，别读 §1 的旧审计**。

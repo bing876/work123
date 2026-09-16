@@ -1,18 +1,13 @@
 /*
- * 第 22 步 · 浏览器模块的样式（Phase 3 起是**模拟浏览器**：resting 卡片 + 全屏 viewer）。
+ * 第 18 步 · 浏览器模块的样式（第 19 步「钉住的工作区好看一点」只改这个文件）。
  *
- * 边界：这里只管浏览器工作区（工具条 + URL 栏 + 舞台），不碰左栏 / 聊天 / 输入条。
- *
- * ⚠️ 两条与「驾驶能不能点中」直接相关的硬约束，改样式时别踩：
- *   1. **绝不给 `<webview>` 写 `display: block`** —— 它靠 flex 才能把 guest 视图撑开，
- *      写成 block 会让 guest 卡在 150px 高（实测）；
- *   2. **藏页只用 `opacity` + `pointer-events`**，绝不用 `display:none` / 卸载 ——
- *      尺寸变 0 时，在它上面跑的那一路驾驶点不中任何元素。
+ * 边界：这里只管浏览器工作区（顶栏 tab + URL 栏 + 舞台），不碰左栏 / 聊天 / 输入条。
  */
 
 /*
  * 这一块是 .middle（纵向 flex）的**兄弟**节点，不在 .chat 的滚动区里 ——
  * 这就是「钉住」：滚聊天不会把它滚没。
+ * 高度写死（不参与 flex 伸缩），免得被聊天内容挤成一条线。
  */
 .browserPanel {
   flex: 0 0 auto;
@@ -22,7 +17,7 @@
   background: #f7f7f8;
 }
 
-/* ---- 工具条：谁的浏览器 + 页数 + 「＋」+ 展开/收起 ---- */
+/* ---- 顶栏：当前智能体一张页一个 tab（第 20 步起没有数量上限）+ 「＋」+ 展开/收起 ---- */
 .browserPanel__tabs {
   display: flex;
   align-items: center;
@@ -40,6 +35,65 @@
   border-radius: 999px;
   background: #fff;
   white-space: nowrap;
+}
+
+.browserTab {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  /* 页数一多就按比例收窄（min-width 兜底），否则一排 tab 会把右边的「＋ / 收起」顶出可视区、
+     鼠标够不到。第 20 步取消了活页上限，所以这里只靠收窄扛住，不再有「顶掉最旧」。 */
+  flex: 0 1 auto;
+  min-width: 56px;
+  max-width: 190px;
+  padding: 3px 4px 3px 6px;
+  border: 1px solid #dcdcdc;
+  border-radius: 8px 8px 0 0;
+  background: #efeff1;
+}
+.browserTab--on {
+  background: #fff;
+  border-color: var(--accent);
+}
+
+.browserTab__label {
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  /* min-width:0 才能让省略号真的生效（flex 子项的自动最小宽度是 min-content，
+     nowrap 文字会顶住不收窄）。 */
+  min-width: 0;
+  max-width: 140px;
+  padding: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+/* 驾驶员正在这张页上操作 */
+.browserTab__run {
+  color: #0a7;
+  font-size: 10px;
+}
+
+.browserTab__x {
+  border: none;
+  background: transparent;
+  color: var(--text-weak);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 3px;
+  border-radius: 4px;
+}
+.browserTab__x:hover {
+  background: #e5e5e6;
+  color: #b91c1c;
 }
 
 .browserTab__add {
@@ -81,21 +135,6 @@
   gap: 6px;
   padding: 0 8px 6px;
 }
-/* 全屏查看时的「← 卡片」：页不会重载，只是换 CSS 类 */
-.browserPanel__back {
-  flex: 0 0 auto;
-  padding: 4px 10px;
-  font: inherit;
-  font-size: 12px;
-  color: var(--text);
-  border: 1px solid #ccc;
-  background: #fff;
-  border-radius: 6px;
-  cursor: pointer;
-}
-.browserPanel__back:hover {
-  background: #f0f0f1;
-}
 .browserPanel__scheme {
   flex: 0 0 auto;
   font-size: 11px;
@@ -133,40 +172,19 @@
   white-space: nowrap;
 }
 
-/* ---------------------------------------------------------------------------
-   舞台：**所有**智能体、**所有** tab 的 webview 都挂在这里，只是 CSS 类不同。
-   切视图只换类名，DOM 父子关系从头到尾不变（不搬家、不卸载、不动 display）。
-   --------------------------------------------------------------------------- */
+/*
+ * 舞台：**所有** tab 的 webview 都在这里铺满，只靠 z-index 分层。
+ * 切到后面那张必须仍然活着、仍然有真实尺寸——尺寸为 0 时驾驶在它上面点不中任何元素。
+ */
 .browserPanel__stage {
   position: relative;
   width: 100%;
-  background: #f2f2f4;
-}
-
-/* 卡片视图：一张页一个格子。高度写死（不写死的话，格子里只有 webview，行高会塌成 0） */
-.browserPanel__stage--cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  grid-auto-rows: 168px;
-  gap: 10px;
-  padding: 10px;
-  align-content: start;
-  overflow: auto;
+  background: #fff;
   /* 收起也留一块看得见的页面（不是 2px） */
   height: 180px;
 }
-.browserPanel--expanded .browserPanel__stage--cards {
-  height: min(52vh, 560px);
-}
-
-/* 全屏视图：被打开的那张铺满整个舞台 */
-.browserPanel__stage--viewer {
-  padding: 0;
-  background: #fff;
-  height: 180px;
-}
-.browserPanel--expanded .browserPanel__stage--viewer {
-  height: min(62vh, 700px);
+.browserPanel--expanded .browserPanel__stage {
+  height: min(56vh, 620px);
 }
 
 .browserPanel__empty {
@@ -174,143 +192,30 @@
   color: var(--text-weak);
 }
 
-/* ---- resting 卡片（C1：里面就是真的那张网页，缩小显示，不是截图） ---- */
-.browserCard {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  height: 100%;
-  background: #fff;
-  border: 1px solid #dcdcdc;
-  border-radius: 10px;
-  overflow: hidden;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
-}
-.browserCard__bar {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex: 0 0 auto;
-  padding: 4px 6px;
-  background: #f7f7f8;
-  border-bottom: 1px solid #ececee;
-}
-/* 驾驶员正在这张页上操作 */
-.browserCard__run {
-  flex: 0 0 auto;
-  color: #0a7;
-  font-size: 10px;
-}
-.browserCard__title {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-size: 12px;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.browserCard__x {
-  flex: 0 0 auto;
-  border: none;
-  background: transparent;
-  color: var(--text-weak);
-  cursor: pointer;
-  font-size: 11px;
-  line-height: 1;
-  padding: 2px 4px;
-  border-radius: 4px;
-}
-.browserCard__x:hover {
-  background: #e5e5e6;
-  color: #b91c1c;
-}
-
-/* 网页区（webview 的父容器）。⚠️ 这个容器**任何模式下都要渲染**，
-   否则 webview 会被换父节点 = 重挂 = 页面重载、驾驶断掉。 */
-.browserCard__body {
-  position: relative;
-  flex: 1 1 auto;
-  min-height: 0;
-  display: flex;
-}
-
-/* ⚠️ 不要写成 display:block —— 见文件头第 1 条 */
-.browserCard__view {
-  flex: 1 1 auto;
-  width: 100%;
-  min-height: 0;
-  display: flex;
-  border: 0;
-}
-
 /*
- * resting 卡片的承接层：整张卡片可点 = 打开全屏，hover 浮出 Open 药丸。
- *
- * ⚠️ 这一层是**必需的**，不是保险起见：指针落在 `<webview>` 上时鼠标事件被 guest 吞掉，
- * 宿主页面收不到，`.browserCard:hover` 永远不成立（实测多点采样：
- * 网页区 hover 张数 = 0，卡片标题条上 = 1）—— 没有它药丸浮不出来、卡片也点不动。
- *
- * 驾驶不受影响：CDP 的输入直接发给 guest，不经过这一层；全屏时不渲染它。
+ * 注意：不要把 <webview> 设成 display:block —— Electron 的 webview 靠 flex 才能把
+ * guest 视图撑开，写成 block 会让 guest 卡在 150px 高（实测）。
  */
-.browserCard__catcher {
+.browserPanel__view {
   position: absolute;
   inset: 0;
+  width: 100%;
+  height: 100%;
   display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  padding: 0 0 12px;
-  margin: 0;
-  border: none;
-  background: transparent;
-  cursor: pointer;
+  border: 0;
+  z-index: 1;
 }
-/* hover 才浮出来的 Open 药丸 */
-.browserCard__open {
-  opacity: 0;
-  transition: opacity 0.12s ease;
-  padding: 6px 14px;
-  font: inherit;
-  font-size: 12px;
-  color: #fff;
-  background: rgba(17, 17, 17, 0.82);
-  border-radius: 999px;
-  pointer-events: none;
+/* 当前那张放到最前面（切换 tab = 换 z-index，不新开 BrowserWindow） */
+.browserPanel__view--on {
+  z-index: 2;
 }
-.browserCard__catcher:hover .browserCard__open,
-.browserCard__catcher:focus-visible .browserCard__open {
-  opacity: 1;
-}
-
-/*
- * 第 21 步规矩（第 22 步照旧）：**别的智能体的页不露脸**。
+/**
+ * 第 21 步：**别的智能体的页不露脸**。
  * 只改 opacity / pointer-events —— **不动 display、不动尺寸、不卸载**，
  * 所以那张页仍然活着、仍然有真实尺寸，它上面跑着的那一路驾驶照样点得中。
  */
-.browserCard--parked {
-  position: absolute;
-  inset: 0;
+.browserPanel__view--off {
   opacity: 0;
   pointer-events: none;
   z-index: 0;
 }
-
-/* 全屏视图里：被打开的那张铺满，其余一律藏起来（照样活着、照样有尺寸） */
-.browserPanel__stage--viewer .browserCard--behind {
-  position: absolute;
-  inset: 0;
-  opacity: 0;
-  pointer-events: none;
-  z-index: 0;
-}
-.browserCard--opened {
-  position: absolute;
-  inset: 0;
-  z-index: 5;
-  height: auto;
-  border: 0;
-  border-radius: 0;
-  box-shadow: none;
-}
-/* 全屏时承接层压根不渲染（见 BrowserPanel），网页可以正常点 */
