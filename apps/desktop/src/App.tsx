@@ -111,9 +111,9 @@ import {
  *   - 闲聊不打断驾驶；只有明确的「停」口令才停手（见 browser/intent.ts 的 detectStopIntent）。
  */
 
-type Role = 'user' | 'assistant' | 'browser';
-/** 第 17 步：浏览器那行消息记下它对应的 tab，点一下就能把那张页切到前面 */
-type Message = { id: number; role: Role; text: string; cardUrl?: string; tabId?: number };
+/** 第 18 步：聊天只剩这两种角色 —— 网页不再以消息形式出现在聊天里（看中栏工作区） */
+type Role = 'user' | 'assistant';
+type Message = { id: number; role: Role; text: string };
 /** 第 15 步：一个智能体 = 一份聊天（自己的消息列表 + 自己的会话号） */
 type AgentChat = { messages: Message[]; convId: number | null };
 /** 空列表用同一个常量：切智能体时引用稳定，不会每次渲染都造新数组 */
