@@ -311,9 +311,40 @@ function resolveTarget(id?: number): Target {
 // CDP 基础能力
 // ---------------------------------------------------------------------------
 
+/**
+ * 第 21 步 · CDP 命令统一超时（**这是防死锁的硬闸，别去掉**）。
+ *
+ * Electron 的 `debugger.sendCommand()` **没有自带超时**：命令发出去了，回包不来就永远挂着。
+ * 实测（本机 9333 验收实例）：对内嵌页发 `Input.dispatchMouseEvent(type=mouseWheel)` 时，
+ * 命令**永不回包**（`scrollY` 读得出来 = 0，但滚轮那条命令一直不返回）；
+ * 一旦挂在里面，整条驾驶循环当场死锁 —— liveLoops 一直是 1、llmCalls 不再增长、
+ * 聊天停在「我往下滚一屏看看」，用户点什么都没用（只有重启窗口才恢复）。
+ * `Page.captureScreenshot` 在页面正忙时也会这样。
+ *
+ * 所以：attach 之后给这个 debugger 打**一次**补丁，让每个 CDP 命令都有上限；
+ * 超时按「这一步失败了」抛出去，由驾驶循环转成「原因 + 一个下一步」，而不是把整条循环挂死。
+ * 打补丁而不是逐个改 15 处调用点 —— 以后新加的动作也自动受这道闸保护。
+ */
+const CDP_TIMEOUT_MS = 8000;
+const cdpPatched = new WeakSet<Electron.Debugger>();
+
 function ensureAttached(wc: Target): Electron.Debugger {
   const dbg = wc.debugger;
   if (!dbg.isAttached()) dbg.attach('1.3');
+  if (!cdpPatched.has(dbg)) {
+    cdpPatched.add(dbg);
+    const raw = dbg.sendCommand.bind(dbg);
+    dbg.sendCommand = ((method: string, commandParams?: unknown, sessionId?: string) =>
+      Promise.race([
+        raw(method, commandParams as never, sessionId),
+        new Promise((_resolve, reject) => {
+          setTimeout(
+            () => reject(new Error(`页面 ${CDP_TIMEOUT_MS / 1000} 秒没有响应这条指令（${method}）`)),
+            CDP_TIMEOUT_MS,
+          );
+        }),
+      ])) as typeof dbg.sendCommand;
+  }
   return dbg;
 }
 
@@ -561,6 +592,30 @@ const PAGE_HELPERS = `(() => {
       return (scheme === 'http' || scheme === 'https') ? '' : scheme;
     } catch (_) { return ''; }
   };
+  /**
+   * 第 21 步：可见正文片段。
+   *
+   * 快照原来只有按钮 / 链接 / 输入框 —— 纯正文的页面（搜索结果、文章、列表）
+   * 在模型眼里几乎等于「空的」：「把这一页整理成列表」这类任务直接做不了
+   * （实测：百度结果页反复读页只拿到顶部导航和热搜链接，抓不到结果标题）。
+   * 这里补一段**短正文**（不是整页 HTML）：内容元素上的可见文字，去重 + 限长 + 限条数。
+   */
+  const contentTexts = () => {
+    const out = [];
+    const seen = Object.create(null);
+    const nodes = document.querySelectorAll('h1, h2, h3, h4, h5, p, li, td, th, dt, dd, blockquote, [role="heading"], [role="listitem"]');
+    const cap = Math.min(nodes.length, 1500);
+    for (let i = 0; i < cap && out.length < 60; i += 1) {
+      const el = nodes[i];
+      if (!visible(el)) continue;
+      const t = text(el);
+      if (t.length < 4 || t.length > 180) continue;
+      if (seen[t]) continue;
+      seen[t] = 1;
+      out.push(t);
+    }
+    return out;
+  };
   const snapshot = () => ({
     url: location.href,
     title: document.title,
@@ -581,8 +636,9 @@ const PAGE_HELPERS = `(() => {
       }).slice(0, 40),
     fields: Array.prototype.filter.call(document.querySelectorAll(INPUT_SEL), visible)
       .map(fieldOf).slice(0, 40),
+    texts: contentTexts(),
   });
-  window.__wbHelper = { __v: 9, visible, text, find, findInput, findClickable, pick, fieldOf, sensitiveish, loginish, overlayish, pageKey, schemeOf, snapshot };
+  window.__wbHelper = { __v: 10, visible, text, find, findInput, findClickable, pick, fieldOf, sensitiveish, loginish, overlayish, pageKey, schemeOf, contentTexts, snapshot };
 })();`;
 
 /** 组合一段「注入 helper + 执行动作」的脚本 */
@@ -1040,19 +1096,48 @@ async function typeInto(
 
 /**
  * scroll：优先发**真实滚轮事件**（CDP Input.dispatchMouseEvent type=mouseWheel），
- * 页面的 wheel 监听器、懒加载、虚拟列表都会像真人滚动一样被触发；
- * 只有滚轮没让页面动（例如滚动的是某个内层容器）才退回 window.scrollBy。
+ * 页面的 wheel 监听器、懒加载、虚拟列表都会像真人滚动一样被触发。
+ *
+ * 第 21 步的两处修正（都是实测踩出来的）：
+ *   1. 滚轮命令在部分状态下**永不回包** —— 只给它 2 秒，超时就当没发出去，
+ *      直接走 JS 兜底（全局 CDP 闸是 8 秒，别在这儿白等）。
+ *   2. 很多站点（百度结果页、各种后台列表）正文在**自己的 overflow 容器**里，
+ *      `window.scrollBy` 一点都不动。所以兜底要连「视口中心那个可滚动容器」一起滚，
+ *      判断「有没有动」也要看容器的 scrollTop，不能只看 window.scrollY。
  */
 async function scrollPage(wc: Target, direction: 'up' | 'down'): Promise<void> {
   const deltaY = direction === 'down' ? 640 : -640;
-  const readY = async (): Promise<number> => {
+  const dirSign = direction === 'down' ? 1 : -1;
+
+  /** 位置指纹：window 的 scrollY + 视口中心那个可滚动容器的 scrollTop（只看 window 会漏判） */
+  const readPos = async (): Promise<{ win: number; inner: number } | null> => {
     try {
-      return await evaluate<number>(wc, pageScript('(() => Math.round(window.scrollY))()'));
+      return await evaluate<{ win: number; inner: number }>(
+        wc,
+        pageScript(`(() => {
+          const cx = Math.round(document.documentElement.clientWidth / 2);
+          const cy = Math.round(document.documentElement.clientHeight / 2);
+          let inner = 0;
+          let node = document.elementFromPoint(cx, cy);
+          while (node && node !== document.body && node !== document.documentElement) {
+            const cs = getComputedStyle(node);
+            if (/(auto|scroll)/.test(cs.overflowY) && node.scrollHeight > node.clientHeight + 8) {
+              inner = Math.round(node.scrollTop);
+              break;
+            }
+            node = node.parentElement;
+          }
+          return { win: Math.round(window.scrollY), inner };
+        })()`),
+      );
     } catch {
-      return -1;
+      return null;
     }
   };
-  const beforeY = await readY();
+
+  const before = await readPos();
+
+  // 1) 先试真滚轮。第 21 步：这条命令可能永不回包，所以只等 2 秒。
   try {
     const geo = await evaluate<{ x: number; y: number }>(
       wc,
@@ -1064,22 +1149,54 @@ async function scrollPage(wc: Target, direction: 'up' | 'down'): Promise<void> {
     const x = geo?.x && geo.x > 0 ? geo.x : 200;
     const y = geo?.y && geo.y > 0 ? geo.y : 200;
     const dbg = ensureAttached(wc);
-    await dbg.sendCommand('Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: 0, deltaY });
+    await Promise.race([
+      dbg.sendCommand('Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: 0, deltaY }),
+      sleep(2000).then(() => {
+        throw new Error('滚轮无响应');
+      }),
+    ]);
     await sleep(650);
   } catch {
-    /* 滚轮发不出去就走下面的兜底 */
+    /* 滚轮发不出去 / 不回包 —— 走下面的 JS 兜底 */
   }
-  const afterY = await readY();
-  if (afterY === beforeY) {
+
+  let after = await readPos();
+  const moved = (a: typeof before, b: typeof after): boolean =>
+    Boolean(a && b && (a.win !== b.win || a.inner !== b.inner));
+
+  if (!moved(before, after)) {
+    // 2) 兜底：让页面自己滚 —— window 和「视口中心那个可滚动容器」都试一遍
     await evaluate(
       wc,
       pageScript(`(() => {
-        const step = Math.round(window.innerHeight * 0.85) * ${direction === 'down' ? 1 : -1};
+        const step = Math.round(window.innerHeight * 0.85) * ${dirSign};
         window.scrollBy({ top: step, behavior: 'smooth' });
+        const cx = Math.round(document.documentElement.clientWidth / 2);
+        const cy = Math.round(document.documentElement.clientHeight / 2);
+        let node = document.elementFromPoint(cx, cy);
+        while (node && node !== document.body && node !== document.documentElement) {
+          const cs = getComputedStyle(node);
+          if (/(auto|scroll)/.test(cs.overflowY) && node.scrollHeight > node.clientHeight + 8) {
+            node.scrollBy({ top: step, behavior: 'smooth' });
+            break;
+          }
+          node = node.parentElement;
+        }
         return true;
       })()`),
     );
     await sleep(500);
+    after = await readPos();
+  }
+
+  // 3) 两条路都试过页面还是没动 —— 明说，别假装滚过。
+  //    循环会把它转成「原因 + 一个下一步」，而不是卡在这儿。
+  if (before && after && !moved(before, after)) {
+    throw new Error(
+      direction === 'down'
+        ? '这一页往下滚不动了：可能已经到底，或者正文在另一个独立的滚动区域里'
+        : '这一页往上滚不动了：可能已经在最上面',
+    );
   }
 }
 
