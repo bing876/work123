@@ -468,8 +468,18 @@ ${
         }
         return errJson(reply, conv.status, conv.err);
       }
+      /**
+       * 第 19 步 fixup：这里原来是 `ORDER BY id ASC LIMIT 200` —— 那是**最老**的 200 条。
+       * 会话一旦超过 200 条，刷新/重启后桌面只能看到开头的旧消息，中间整段（包括刚刚
+       * 那条带来源的回答）在 DOM 里根本不存在，看起来像「聊天记录丢了 / 知识库来源没生效」。
+       * 桌面的诉求是「刷新后还原最近聊的」，所以取**最新** 200 条，再按 id 升序回给前端
+       * （前端按数组顺序渲染，顺序不能反）。
+       */
       const rows = await pool.query<{ id: string; role: string; content_enc: string; created_at: string }>(
-        'SELECT id, role, content_enc, created_at FROM messages WHERE conversation_id = $1 ORDER BY id ASC LIMIT 200',
+        `SELECT id, role, content_enc, created_at FROM (
+           SELECT id, role, content_enc, created_at FROM messages
+           WHERE conversation_id = $1 ORDER BY id DESC LIMIT 200
+         ) AS recent ORDER BY id ASC`,
         [conv.id],
       );
       const out: ChatHistoryResult = {
