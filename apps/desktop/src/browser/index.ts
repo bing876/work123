@@ -18,7 +18,7 @@ export { BrowserPanel } from './BrowserPanel';
 export { useBrowserWorkspace } from './useBrowserWorkspace';
 export type { BrowserWorkspace } from './useBrowserWorkspace';
 export type { BrowserPageInfo, BrowserTabView } from './types';
-export { HOME_URL, detectOpenUrl } from './sites';
+export { HOME_URL, detectOpenUrl, isPureOpenCommand } from './sites';
 export {
   CONFIRM_ASK_RE,
   CONTINUE_STRONG_RE,

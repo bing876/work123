@@ -137,3 +137,44 @@ export function detectOpenUrl(raw: string): string | null {
   if (prefixed) return prefixed[1];
   return null;
 }
+
+/**
+ * 第 18 步：这句是不是**纯开页**（只说「打开某站」，没有别的活要干）。
+ *
+ * 为什么要分清：
+ *   - 纯开页（「打开百度」「打开必应」「打开浏览器」）→ 页开出来就完事了，
+ *     交给工作区（看顶栏的 tab）就行，**不发车**——否则每开一张页聊天里就多一条
+ *     「任务完成 · 某某已打开」，正是本步要治的刷屏，还白烧一次「读页 → 问模型」。
+ *   - 带活的（「打开百度搜天气」）→ 照旧发车交给驾驶员。
+ *
+ * 判定纯字符串、和 detectOpenUrl 同一套剥壳逻辑，不联网不问模型。
+ */
+export function isPureOpenCommand(raw: string): boolean {
+  const t = (raw ?? '').trim();
+  if (!t || t.length > 200 || looksLikeQuestion(t)) return false;
+
+  // 整句就是个地址（首尾只许几个零碎字符）
+  const m = t.match(/https?:\/\/[^\s，,。；;！!？?）)】"'「」]+/i);
+  if (m && m[0].length >= t.length - 3) return true;
+
+  const vm = VERB.exec(t);
+  if (!vm) return false;
+
+  let site = t
+    .slice(vm.index + vm[0].length)
+    .trim()
+    .replace(/\s+/g, '')
+    .replace(/^(一下|一|个|下|個)+/, '');
+  for (let i = 0; i < 3; i += 1) {
+    const next = site.replace(TAIL, '');
+    if (next === site) break;
+    site = next;
+  }
+  // 「打开浏览器」这类没点名站点的，也算纯开页（落默认主页）
+  if (!site || GENERIC.test(site)) return true;
+
+  const lower = site.toLowerCase();
+  if (SITES.some(([name]) => name === lower || name === site)) return true;
+  if (BARE_DOMAIN.test(lower)) return true;
+  return false; // 「打开百度搜天气」：还有活要干
+}

@@ -176,15 +176,6 @@ body {
   word-break: break-all;
 }
 
-/*
- * 第 18 步「工作区框架（治混乱）」：把左栏两个**纯演示/自检**的痕迹用样式藏掉
- * （「切换红点（演示）」按钮、底部那行 preload 桥信息）。
- * 只藏不删：DOM 还在，桥自检照跑，哪天要调试把这条规则去掉就能看见。
- */
-.demoOnly {
-  display: none;
-}
-
 /* ---------- 中栏：聊天 ---------- */
 .middle {
   flex: 1 1 auto;
@@ -595,4 +586,14 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/*
+ * 第 18 步「工作区框架（治混乱）」：把左栏两个**纯演示 / 自检**的痕迹用样式藏掉
+ * （「切换红点（演示）」按钮、底部那行 preload 桥信息）。
+ * 只藏不删：DOM 还在，桥自检照跑，哪天要调试把这条规则去掉就能看见。
+ * ⚠️ 这条规则必须放在文件**最后**：`.buttons-row` 也是单类选择器，谁在后面谁赢。
+ */
+.demoOnly {
+  display: none;
 }

@@ -27,6 +27,7 @@ import {
   detectBrowseIntent,
   detectOpenUrl,
   detectStopIntent,
+  isPureOpenCommand,
   useBrowserWorkspace,
 } from './browser';
 
@@ -1268,9 +1269,12 @@ export default function App() {
     };
 
     if (openUrl) {
-      // 明确开页指令 → 打开（同站则复用）那张页，并把这一路发到它身上
+      // 明确开页指令 → 打开（同站则复用）那张页。
+      // 第 18 步：「打开百度」这类**纯开页**只走工作区——页开出来就完事了，不发车，
+      // 否则每开一张页聊天里就多一条「任务完成 · 某某已打开」（本步要治的刷屏），
+      // 还白烧一次「读页 → 问模型」。带活的（「打开百度搜天气」）照旧发车。
       const tabId = await browser.openUrl(myAgent, openUrl);
-      if (tabId !== null) {
+      if (tabId !== null && !isPureOpenCommand(value)) {
         await startOnTab(tabId, value, '已把这条指令交给驾驶员，在刚打开的那张页上执行（不新开窗口）。');
       }
     } else if (goNow) {
