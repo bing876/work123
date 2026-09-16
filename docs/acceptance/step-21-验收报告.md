@@ -15,22 +15,24 @@ webview 上执行（复用第 17 步的 driver，不另起第二套点页引擎�
 
 | # | 验收项 | 结果 | 证据 |
 | --- | --- | --- | --- |
-| 1 | 闲聊「长颈鹿有多高」不开新 tab、不调开页 | ✅ | webview 0、tab 0、无面板；`llmCalls` 只 +1（纯聊天），`liveLoops` 仍 0；请求体 `tools=[]` |
-| 2 | 「打开百度并搜 AI」：卡片打开百度，搜索框/URL **真的**变成搜 AI | ✅ | 1 张活页，URL `baidu.com/s?…&wd=AI`，标题「AI_百度搜索」 |
-| 3 | 同一任务里连续至少两步，中间不用每步说「继续」 | ✅ | 聊天里「读当前页 → 定位搜索框 → 输入并提交 → 读结果 → 完成」；5 关键词长任务一次跑完（9 步） |
-| 4 | 过程中发一句闲聊：循环不因此整段掐死 | ✅ | T+4.9s 插闲聊（`liveLoops=1`）→ 之后 `llmCalls` 45→50 继续涨、任务照旧跑完（见下「时间线 A」） |
-| 5 | 发「停」才停 | ✅ | T+7.1s 发「停」→ `liveLoops` 立刻 0；此后 24 个采样（约 36s）`llmCalls` 冻在 55、页面 URL 冻结；聊天回「好，停了」（见下「时间线 B」） |
-| 6 | 切到另一个智能体：看不到 A 的 tab；驾驶不会点到 B 的页上 | ✅ | 人在「卡布」时：`who=卡布 的浏览器`、`tabs=1`、A 的页 `--off`；A 的页 URL 从 广州天气→北京天气 一直变（llmCalls 57→66），B 的页**一动不动**（见下「时间线 C」） |
-| 7 | 点不了时：原因 + 一个下一步，不回到「是否确认打开某某网站」 | ✅ | 「整页没有『申请退款』按钮（只有搜索、语音/图像搜索、喜欢/不喜欢等）。请告诉我退款对应的网站或订单页地址，我打开后再点。」 |
-| 8 | 聊天发 123456 仍闸住 | ✅ | 消息数 277 → 277（**根本没入库**、没调模型） |
-| 9 | 知识库带来源仍在（抽查） | ✅ | 「BR-9912，标称容量 4200 毫安时……（来源：《二十一步验收资料.md》第 1 段）」 |
-| 10 | 无第二窗口、无 Playwright、无无头 Chrome | ✅ | 调试目标里 `page` 只有 1 个应用窗口（+1 个 devtools）；`new BrowserWindow` 全仓 1 处；依赖/代码里 0 处 Playwright/Puppeteer/browser-use；无 `headless` 字样 |
+| 1 | `npm run dev` 一窗 | ✅ | 流水线全绿（shared build → build:electron → vite 5173 → electron）；顶层窗口按属主进程归类后，**应用窗口恰好 1 个**（`AI 工作台` 1180x760）；日志里没有「检测到已有实例在运行」（见下「三·补」） |
+| 2 | 闲聊「长颈鹿有多高」不开新 tab、不调开页 | ✅ | webview 0、tab 0、无面板；`llmCalls` 只 +1（纯聊天），`liveLoops` 仍 0；请求体 `tools=[]` |
+| 3 | 「打开百度并搜 AI」：卡片打开百度，搜索框/URL **真的**变成搜 AI | ✅ | 1 张活页，URL `baidu.com/s?…&wd=AI`，标题「AI_百度搜索」 |
+| 4 | 同一任务里连续至少两步，中间不用每步说「继续」 | ✅ | 聊天里「读当前页 → 定位搜索框 → 输入并提交 → 读结果 → 完成」；5 关键词长任务一次跑完（9 步） |
+| 5 | 过程中发一句闲聊：循环不因此整段掐死 | ✅ | T+4.9s 插闲聊（`liveLoops=1`）→ 之后 `llmCalls` 45→50 继续涨、任务照旧跑完（见下「时间线 A」） |
+| 6 | 发「停」才停 | ✅ | T+7.1s 发「停」→ `liveLoops` 立刻 0；此后 24 个采样（约 36s）`llmCalls` 冻在 55、页面 URL 冻结；聊天回「好，停了」（见下「时间线 B」） |
+| 7 | 切到另一个智能体：看不到 A 的 tab；驾驶不会点到 B 的页上 | ✅ | 人在「卡布」时：`who=卡布 的浏览器`、`tabs=1`、A 的页 `--off`；A 的页 URL 从 广州天气→北京天气 一直变（llmCalls 57→66），B 的页**一动不动**（见下「时间线 C」） |
+| 8 | 点不了时：原因 + 一个下一步，不回到「是否确认打开某某网站」 | ✅ | 「整页没有『申请退款』按钮（只有搜索、语音/图像搜索、喜欢/不喜欢等）。请告诉我退款对应的网站或订单页地址，我打开后再点。」 |
+| 9 | 聊天发 123456 仍闸住 | ✅ | 消息数 277 → 277（**根本没入库**、没调模型） |
+| 10 | 知识库带来源仍在（抽查） | ✅ | 「BR-9912，标称容量 4200 毫安时……（来源：《二十一步验收资料.md》第 1 段）」 |
+| 11 | 无第二窗口、无 Playwright、无无头 Chrome | ✅ | 调试目标里 `page` 只有 1 个应用窗口（+1 个 devtools）；`new BrowserWindow` 全仓 1 处；依赖/代码里 0 处 Playwright/Puppeteer/browser-use；无 `headless` 字样 |
 
 **产物**：
 
 - `docs/acceptance/step-21-reason-next-step.png` —— 点不了 → 原因 + 一个下一步（还看得见 2 张活页与真实结果页）
 - `docs/acceptance/step-21-agent-isolation.png` —— 人在「卡布」，只看得见卡布自己的页；小助的页在后台继续被驾驶
 - `docs/acceptance/step-21-kb-source.png` —— 知识库回答带来源
+- `docs/acceptance/step-21-dev-one-window.png` —— 真跑 `npm run dev` 后的主窗口（一窗）
 
 ---
 
@@ -132,6 +134,34 @@ T+26.3s llmCalls=65
 - **第 21 步新修**：舞台里**别的智能体的页不露脸**（`--off` = `opacity:0` + 不接收指针事件），
   但**尺寸与挂载状态完全不变**。原来切到「卡布」时顶栏写着「0 张活页」，屏幕上却还看得见小助那张百度页，
   看起来像「串了」——现在看不见了，而它上面正在跑的那一路照旧点得中、也不会断。
+
+---
+
+## 三·补：`npm run dev` 一窗（清单第 1 条）
+
+本步验收先跑的是**独立实例**（另起 vite 5273 + electron 9333），那是为了不打扰用户自己那份 dev 实例。
+最后**真跑了一次 `npm run dev`**：
+
+```
+> ai-workbench@0.1.0 dev
+> npm run build -w @ai-workbench/shared && npm run dev -w @ai-workbench/desktop
+  @ai-workbench/shared build / @ai-workbench/desktop build:electron   ← 都通过
+[vite] VITE v6.4.3 ready in 877 ms   ➜  Local: http://localhost:5173/
+[electron] [main] 内嵌页 UA 已去掉 Electron token
+[electron] GPU process exited unexpectedly … [launch] 自动回退 --no-sandbox 重试
+```
+
+- GPU 崩溃 → 包装器自动回退 `--no-sandbox`：**本机已知现象**（虚拟机 / 容器环境），不是本步引入的；
+- 日志里**没有**「检测到已有实例在运行」（出现这句就说明撞上了单实例锁）；
+- 顶层窗口按属主进程归类（`EnumWindows` + `GetWindowThreadProcessId`）：**应用窗口恰好 1 个**
+  —— `AI 工作台` 1180x760。另一个可见窗口是 `Developer Tools - http://localhost:5173/`，
+  那是 dev 模式**故意**开的（`main.ts`：`if (isDev) mainWindow.webContents.openDevTools({ mode: 'detach' })`，
+  第 2/3 步就有的行为），不是第二个应用窗口。
+
+**顺手清了一个孤儿**：跑之前 5173 被一个**没有任何窗口挂着的 vite**（PID 61168）占着
+（当时 electron 进程数 0、9222 也没开 —— 是之前那次「单实例锁」事故留下的半截进程）。
+`vite.config.ts` 是 `strictPort: true`，所以它会**硬报「Port 5173 is already in use」**，
+正是那种「看起来像代码坏了」的假故障。已按 PID 停掉整棵树，再跑的 `npm run dev`。
 
 ---
 
