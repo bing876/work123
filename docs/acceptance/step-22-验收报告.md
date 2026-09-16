@@ -4,6 +4,11 @@
 分支：`arena/01a09b16-work123`　基线：`e222f20a066f275fd509b5f095f36ab70bad067f`（第 21 步 tip）
 依据：`docs/browser-multiinstance-fusion-report.md` §10 总控批复 + §11 现状勘误
 
+> ⚠️ **后续变更（同日）**：总控补充指示「Phase 3 暂缓、等新 UI 设计稿」，本报告中**第 4 项（C1 卡片 UI）
+> 已按指示回退**（提交 `d4d5875`），界面回到原来的「顶栏 tab + URL 栏 + 舞台」范式。
+> **第 1/2/3/6/7/8/9/10/11/12 项全部保留且已重新冒烟验证**（见文末「七、回退后复验」）。
+> Phase 3 的实现完整保留在 `80cd92c`（已推送），设计稿到位后可直接取回。
+
 范围：只动 `apps/desktop`（Electron 主进程 + 渲染层）与 `packages/shared` 的类型声明。
 **`apps/server` 一行未改**（对 shared 的改动全部是增量：新增接口 / 可选字段 / 加宽联合类型）。
 
@@ -16,7 +21,7 @@
 | 1 | **A1.5**：`TaskState` 按 target 独立存储，**禁止全局单例** | ✅ | `driver.ts` 里 `phase/phaseDetail/phaseStep/paused/loopToken` 五个模块级单例已全部收进 `Map<number, TargetTask>`；`grep -c "let phase" driver.ts` = 0 |
 | 2 | **A1.5**：第一期并发数配置项（默认 1），调大即解锁并行、**不改数据结构** | ✅ | 默认 `maxConcurrentAgentTasks:1`；设 1 时第 2 路被拒（`lanes_after_B` 仍 `[23]`）；数据结构本身是 per-target 的 Map，调大即生效（见「二·E」） |
 | 3 | **B1**：partition 按 contactId（智能体）隔离 | ✅ | 小助 = `persist:workbench-browser-agent-1`，卡布 = `persist:workbench-browser-agent-8`；**同站点 cookie 不互见**（见「二·B」） |
-| 4 | **C1**：resting card 用 **live webview 缩小**（非截图） | ✅ | 卡片 301×168、里面 webview 视口 **299×142**（非 0，驾驶点得中）；hover 浮出 Open 药丸；点开铺满舞台 944×447（见「二·C」） |
+| 4 | **C1**：resting card 用 **live webview 缩小**（非截图） | ⏸️ **已实现后回退** | 回退前验收通过：卡片 301×168、里面 webview 视口 **299×142**（非 0，驾驶点得中）；hover 浮出 Open 药丸；点开铺满舞台 944×447（见「二·C」）。**现按总控指示回退**，见「六」 |
 | 5 | **D**：多实例上限**默认 4**，设置里可调，**不写死** | ✅ | `DEFAULT_SETTINGS.maxBrowserInstances = 4`；设置面板两行数字输入；改 999 被夹到 20 并落盘 `workbench-settings.json`（见「二·D」） |
 | 6 | fail-fast：禁用 `findWebviewGuest` 盲选后**直接报错** | ✅ | `findWebviewGuest` 函数已**删除**；不点名 → `驾驶目标未指定：…`；点名的页没了 → `指定的内嵌页已经不在了…`（见「二·A」） |
 | 7 | **红线**：密码 / 验证码不代填，支付不代点 | ✅ | 密码框、验证码框 → 拒填且 `value` 仍为 `''`；普通框照常填得进去；`立即支付` → 不代点（见「二·A」） |
@@ -276,3 +281,54 @@ export const DEFAULT_SETTINGS: WorkbenchSettings = {
 - 没把活页硬顶加回来（`MAX_LIVE_PAGES` / `MAX_LANES` 保持删除状态，只提示「开太多会卡」）；
 - 没做重启后恢复 tab（第 20 步遗留，仍不在本步范围）；
 - 没有 force push，没有改 `main`。
+
+---
+
+## 六、Phase 3 回退与回退后复验（2026-09-17 同日）
+
+### 6.1 起因
+
+总控补充指示：**Phase 3（多实例 UI）暂缓不做**，待后续新 UI 设计稿到位后一起处理；
+本步只保留 Phase 0/1/2。
+
+实际情况：Phase 3 在该指示到达前**已完成并推送**（`80cd92c`）。向总控确认后**回退**，提交 `d4d5875`。
+
+### 6.2 回退范围（只两个文件，与其余改动无耦合）
+
+- `apps/desktop/src/browser/BrowserPanel.tsx` → 还原到基线 `e222f20`
+- `apps/desktop/src/browser/styles.css` → 还原到基线 `e222f20`
+
+`git diff e222f20 -- <这两个文件>` 为空，即**逐字节等于基线**。
+
+保留不动：Phase 2 fail-fast、A1.5 per-target 状态、配置层（并发数 / 实例上限）、
+`useBrowserWorkspace` 的实例上限闸（只新增、未删 API）。
+
+**Phase 3 的实现没有丢**，完整保留在 `80cd92c`（已推送）。重做时可直接取回，
+包括那个真机踩出来的坑（webview 吞 hover → 需要透明承接层）也已记录在案。
+
+### 6.3 回退后冒烟验证（独立实例：vite 5273 + electron 9333 + 独立 profile）
+
+| 断言 | 证据 |
+|---|---|
+| UI 回到 tab 范式 | `.browserTab` = **2**、`.browserCard` = **0**、`.browserPanel__stage` 存在 |
+| 多实例并存未受影响 | 两张页各 `944×404` |
+| 按智能体 partition 未受影响 | 两张页均为 `persist:workbench-browser-agent-1` |
+| tab 条正常 | `['Example Domain|✕', 'Example Domain|✕']` |
+| 配置默认值未受影响 | `{maxConcurrentAgentTasks:1, maxBrowserInstances:4}` |
+| fail-fast 未受影响 | `readPage()` →「驾驶目标未指定：必须显式给出内嵌页的 webContentsId…」；`readPage(999999)` →「指定的内嵌页已经不在了…」 |
+| **红线复验** | 密码框拒填（`ok:false`）且 `value` 仍为 `''`；普通框照常写入（`ok:true`，`value = 'hello'`） |
+| 类型检查 | `npm run typecheck` 三个包全绿 |
+
+截图：`docs/acceptance/step-22b-reverted-tab-paradigm.png`（顶栏 tab + URL 栏 + 全尺寸舞台，
+左栏「浏览器设置」两行仍在）。
+
+### 6.4 分支现状
+
+```
+d4d5875  step22b: 回退 Phase 3 多实例 UI（按总控补充指示暂缓，待新 UI 设计稿）
+80cd92c  step22:  浏览器多实例 + 按智能体会话隔离 + 驾驶 fail-fast   ← Phase 3 完整实现保留在此
+e222f20  step21(docs): 验收报告补上清单第 1 条「npm run dev 一窗」   ← 本轮基线
+```
+
+两次推送都是快进（`e222f20..80cd92c`、`80cd92c..d4d5875`），**无 force、未改写历史**。
+

@@ -128,8 +128,15 @@ Postgres 并发「找或建」：`FOR UPDATE` 等锁期间仍是旧快照 → **
   查库写 node 脚本直连（`pg` 提升在**根** `node_modules`），别用 `docker`（本机被拦）。
 
 ## 十二、第 22 步契约：多实例 / 按智能体隔离 / fail-fast（易踩坏）
-- 本步提交 `80cd92c`（`step22: …`），父 `e222f20`，**快进推送无 force**。
-  **下一轮基线由用户给，别自己认。**
+- 本步提交 `80cd92c`（`step22: …`）+ `d4d5875`（`step22b: 回退 Phase 3 UI`），父 `e222f20`，
+  两次都是**快进推送无 force**。**下一轮基线由用户给，别自己认。**
+- **Phase 3（多实例 UI：卡片 / hover Open / 全屏 viewer）已实现后回退**：总控补充指示「暂缓，
+  等新 UI 设计稿」。回退只动 `browser/BrowserPanel.tsx` + `browser/styles.css`（还原到 `e222f20`）；
+  **完整实现保留在 `80cd92c`**，重做时直接取回，别从头再写。
+  回退干净的前提是这两个文件与其余改动**无耦合**（`useBrowserWorkspace` 只新增上限闸、未删 API；
+  `BrowserPanel` props 签名前后一致）——改 UI 时保持这个「UI 文件自包含」的性质，将来才好进退。
+- **流程教训**：批复里「暂缓 / 不做」的项，**动手前先确认它是不是已经做完了**（本轮先做完推了才收到
+  「Phase 3 暂缓」）。遇到「指示与实际状态冲突」→ **如实报告 + 让总控定夺**，绝不自己悄悄删或悄悄留。
 - **`driver.ts` 里没有任何驾驶状态是全局单例**：`phase/detail/step/paused/loopToken` 全在
   `Map<number, TargetTask>` 里（`taskOf(wcId)` 取或建、`phaseOf`/`pausedOf` **不建条目**）。
   新增任何驾驶状态**必须**进这个 Map，不许再起模块级 `let`。

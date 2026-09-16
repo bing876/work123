@@ -1,7 +1,8 @@
 # 浏览器多实例 + 会话隔离 + 统一代理空间：融合分析与开发报告
 
-> 状态：**已获总控批复（2026-09-17，见 §10）**；开发已完成并通过真机验收（见 §13 与
-> `docs/acceptance/step-22-验收报告.md`）
+> 状态：**已获总控批复（2026-09-17，见 §10）**；Phase 0/1/2 + 配置层 + A1.5 已完成并通过真机验收
+> （见 §13 与 `docs/acceptance/step-22-验收报告.md`）。
+> ⚠️ **Phase 3（多实例 UI）按总控补充指示暂缓**：曾实现并通过验收，后按要求回退，**等新 UI 设计稿到位后再一起做**（见 §13.6）。
 > ⚠️ §1 现状审计已过期，勘误见 §11（相对 HEAD `e222f20`）
 > 范围：仅 `apps/desktop`（Electron 渲染层 + 主进程）+ `packages/shared` 类型声明。`apps/server` 一行未改。
 > 依据：已读 `browserCard.tsx` / `App.tsx` / `electron/main.ts` / `electron/preload.ts` / `electron/driver.ts` / `packages/shared/src/index.ts`。
@@ -211,7 +212,7 @@
 |---|---|---|---|
 | **A1.5** 驾驶模型 | `TaskState` 按 target 独立存储，**禁止全局单例**；第一期用并发数配置项限 1 路 | `driver.ts`：`interface TargetTask` + `const tasks = new Map<number, TargetTask>()`；`electron/settings.ts` + `main.ts` 并发闸 | 模块级单例（`let phase/phaseDetail/phaseStep/paused/loopToken`）**残留 0 处**；并发设 1 时第 2 路被拒（`lanes` 仍 `[23]`） |
 | **B1** partition 粒度 | 按 contactId 隔离 | `browser/url.ts` `partitionFor(agentId)`（第 20 步已就位，本步未改） | 小助 `…agent-1` 设的 cookie，卡布 `…agent-8` **看不到**（`hasWbwho=false`） |
-| **C1** resting card | live webview 缩小，不用截图 | `browser/BrowserPanel.tsx` 重写（工具条 + URL 栏 + 卡片舞台 + 全屏 viewer） | 卡片 301×168 内 webview 视口 **299×142（非 0）**；hover → `Open ↗`；点开 944×447 |
+| **C1** resting card | live webview 缩小，不用截图 | ~~`browser/BrowserPanel.tsx` 重写~~ → **已回退**（见 §13.6） | 回退前曾验收通过：卡片 301×168 内 webview 视口 **299×142（非 0）**；hover → `Open ↗`；点开 944×447。**现已回到 tab 范式** |
 | **D** 多实例上限 | **默认 4**，设置里可调，**不写死** | `shared` 的 `DEFAULT_SETTINGS.maxBrowserInstances = 4`；左栏「浏览器设置」两行数字输入 | `setSettings({maxBrowserInstances:999})` → 夹到 **20** 并落盘；到顶拒开且**页表逐项不变** |
 
 ### 13.2 红线复验（批复要求「每个 Phase 验收时都要重新验证一次」）
@@ -258,4 +259,45 @@ readPage(999999) → 指定的内嵌页已经不在了（webContents 999999 已�
   （**绝不 `display:none`**）、一个智能体一套浏览器、tab 状态按智能体分桶、
   「停」是唯一刹车、纯开页不发车、开页成功不写聊天。
 - 活页硬顶**保持删除状态**（只提示「开太多会卡」）；D 上限是**新增的显式配置闸**，到顶只拒开、**绝不关页**。
+
+### 13.6 Phase 3（多实例 UI）处置：按总控补充指示暂缓并回退
+
+**总控补充指示（2026-09-17）**：Phase 3 暂缓不做，**待后续新 UI 设计稿到位后再一起处理**；
+本步只保留 Phase 0/1/2。
+
+实际情况：**Phase 3 在该指示到达前已经完成并推送**（`80cd92c`）。经向总控确认后**回退**，
+提交 `d4d5875`（`step22b`）。
+
+**回退范围（只两个渲染层文件，与其余改动无耦合）**：
+
+| 文件 | 处置 |
+|---|---|
+| `apps/desktop/src/browser/BrowserPanel.tsx` | 还原到基线 `e222f20`（顶栏 tab + URL 栏 + 舞台） |
+| `apps/desktop/src/browser/styles.css` | 同上 |
+
+**保留（均与 Phase 3 UI 无耦合）**：
+
+- Phase 2 路由整改（`findWebviewGuest` 删除 + `resolveTarget` fail-fast）；
+- A1.5（`driver.ts` 的 `TaskState` 按 target 独立存储）；
+- 配置层（`maxConcurrentAgentTasks` / `maxBrowserInstances`，默认 1 / 4，设置里可调）；
+- `useBrowserWorkspace` 的实例上限闸（只新增，未删任何 API）。
+
+**Phase 3 的实现没有丢**：完整保留在 `80cd92c` 里（已推送）。设计稿到位后可直接取回参考或重做——
+包括那个真机踩出来的坑（指针落在 `<webview>` 上时鼠标事件被 guest 吞掉、宿主 `:hover` 永不成立，
+需要一层透明承接层）都已记录在案，重做时不必再踩一遍。
+
+**回退后冒烟验证**（独立实例 vite 5273 + electron 9333，独立 profile）：
+
+| 断言 | 证据 |
+|---|---|
+| UI 回到 tab 范式 | `.browserTab` = **2**、`.browserCard` = **0** |
+| 多实例并存未受影响 | 两张页各 `944×404` |
+| 按智能体 partition 未受影响 | 两张页均为 `persist:workbench-browser-agent-1` |
+| 配置默认值未受影响 | `{maxConcurrentAgentTasks:1, maxBrowserInstances:4}` |
+| fail-fast 未受影响 | `readPage()` →「驾驶目标未指定…」；`readPage(999999)` →「指定的内嵌页已经不在了…」 |
+| **红线复验** | 密码框拒填且 `value` 仍为 `''`；普通框照常写入 `'hello'` |
+| 类型检查 | `npm run typecheck` 三包全绿 |
+
+截图：`docs/acceptance/step-22b-reverted-tab-paradigm.png`。
+
 
