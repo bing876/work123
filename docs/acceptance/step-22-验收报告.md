@@ -332,3 +332,42 @@ e222f20  step21(docs): 验收报告补上清单第 1 条「npm run dev 一窗」
 
 两次推送都是快进（`e222f20..80cd92c`、`80cd92c..d4d5875`），**无 force、未改写历史**。
 
+---
+
+## 七、Phase 1 补充取证：按智能体的存储与下载隔离
+
+Phase 0/1 是第 20 步落地的，本步没有重做。但复核时发现**主进程侧那条路**（分区名 → 智能体 id →
+下载落盘目录）一直没有直接的运行证据，而它依赖 `session.getStoragePath()` 里真的含分区名——
+一旦不含，`AGENT_PARTITION_RE` 匹配不上，下载就会**静默落到默认目录**（不报错，只是串了）。
+所以补了这次取证。
+
+**A. 磁盘上的分区目录（证明 `getStoragePath()` 含分区名）**
+
+在智能体「小助」与「卡布」上各开一张页后：
+
+```
+<userData>/Partitions/
+├── workbench-browser-agent-1      ← 小助（example.com）
+└── workbench-browser-agent-8      ← 卡布（example.org）
+```
+
+两个智能体各一个独立目录，命名与 `partitionFor(agentId)` 一致 →
+正则 `workbench-browser-agent-(\d+)` 能正确解出 agentId。
+
+**B. 真的触发一次下载（端到端验穿）**
+
+在 **agent-8（卡布）** 那张页里触发一次 blob 下载，然后看落盘位置：
+
+```
+<userData>/browser-agents/8/downloads/wb22c-agent8.txt
+内容：wb22c download routing test      ← 与触发时写入的内容一字不差
+```
+
+`browser-agents/` 目录在下载前**并不存在**（按需创建，符合设计）。
+文件准确落进 **agent-8 自己的** `downloads/`，没有落到默认下载目录、也没有串到 agent-1。
+
+**结论**：Phase 1 的两条隔离（**存储** partition + **下载**落盘）都在运行中验证通过。
+这条链路的两个易踩点已记录在代码注释里：主进程 `AGENT_PARTITION_RE` 与渲染层 `partitionFor`
+是**同规则的两份**，**改一处必须同时改两处**。
+
+
