@@ -137,6 +137,14 @@ Postgres 并发「找或建」：`FOR UPDATE` 等锁期间仍是旧快照 → **
   `BrowserPanel` props 签名前后一致）——改 UI 时保持这个「UI 文件自包含」的性质，将来才好进退。
 - **流程教训**：批复里「暂缓 / 不做」的项，**动手前先确认它是不是已经做完了**（本轮先做完推了才收到
   「Phase 3 暂缓」）。遇到「指示与实际状态冲突」→ **如实报告 + 让总控定夺**，绝不自己悄悄删或悄悄留。
+- **Phase 2 的完成度判据是报告 §6 附的那张「禁用 fallback 排查清单」**（容易漏看）：
+  `main.ts` 各 `drive(...)` 调用、`App.tsx:getWebviewId`、`sensitiveHold` 聚焦路径**必须全量**改成显式 id。
+  现状：main.ts 只剩 3 处 drive 调用且全部带 target；`getWebviewId` 已删；
+  `focus_sensitive_field` 走已解析的 `wc` 且只聚焦不读值；
+  **渲染层完全不直接调 `workbench.drive`**，驾驶一律经 agent 循环。
+- **Phase 4（统一接入）已被 A1.5 覆盖**（并发闸串行驾驶 + `aggregateState()` 镜像），不必另做。
+- 报告 §6 的 Phase 编号与总控口中的编号一致（0 数据模型 / 1 partition / 2 路由整改 / 3 UI / 4 统一接入 / 5 回归）。
+
 - **`driver.ts` 里没有任何驾驶状态是全局单例**：`phase/detail/step/paused/loopToken` 全在
   `Map<number, TargetTask>` 里（`taskOf(wcId)` 取或建、`phaseOf`/`pausedOf` **不建条目**）。
   新增任何驾驶状态**必须**进这个 Map，不许再起模块级 `let`。
