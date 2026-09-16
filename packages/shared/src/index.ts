@@ -407,6 +407,17 @@ export interface KnowledgeUploadResult {
   document: KnowledgeDocument;
 }
 
+/**
+ * 第 19 步 DELETE /knowledge/:id 成功响应。
+ * 删除范围是「当前账号的这份资料 + 它的全部切块」；别人的资料删不到，只会得到 404。
+ */
+export interface KnowledgeDeleteResult {
+  id: number;
+  deleted: true;
+  /** 这次一并删掉的切块数，用于桌面侧回一句人话 */
+  removedChunks: number;
+}
+
 // ---------------------------------------------------------------------------
 // 第 15 步：多智能体（添加 + 聊天内引导表）+ 两层记忆
 //

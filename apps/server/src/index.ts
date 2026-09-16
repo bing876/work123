@@ -33,7 +33,9 @@ async function main(): Promise<void> {
 
   // 桌面 dev 是 http://localhost:5173、生产是 file://（Origin: null）——回显来源即可；
   // 服务只听 127.0.0.1，不暴露局域网。
-  await app.register(cors, { origin: true, methods: ['GET', 'POST', 'OPTIONS'] });
+  // 第 19 步：DELETE 是新增的方法（删知识库资料）。带 authorization 头的 DELETE 会先发
+  // OPTIONS 预检，这里不列出来就会被浏览器拦在门外（前端只看到「连不上后端」，很像服务没起）。
+  await app.register(cors, { origin: true, methods: ['GET', 'POST', 'DELETE', 'OPTIONS'] });
   // 第 11 步：只给知识库上传用。文件只在内存解析，不保存原始上传文件。
   await app.register(multipart, {
     limits: { files: 1, fields: 4, parts: 5, fileSize: KNOWLEDGE_MAX_UPLOAD_BYTES },

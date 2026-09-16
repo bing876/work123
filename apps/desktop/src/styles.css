@@ -582,10 +582,32 @@ body {
   line-height: 1.35;
   overflow: hidden;
 }
-.knowledgePanel__row > span:first-child {
+/* 第 19 步：文件名 + 删除按钮同一行；名字过长省略号，按钮永远可见 */
+.knowledgePanel__line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.knowledgePanel__name {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.knowledgePanel__del {
+  flex: none;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #dc2626;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.knowledgePanel__del:disabled {
+  color: #9ca3af;
+  cursor: default;
 }
 
 /*

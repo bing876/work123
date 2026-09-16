@@ -11,6 +11,7 @@ import type {
   ChatHistoryResult,
   ChatStateResult,
   ConversationStateView,
+  KnowledgeDeleteResult,
   KnowledgeDocument,
   KnowledgeListResult,
   KnowledgeUploadResult,
@@ -512,6 +513,8 @@ export default function App() {
   const [knowledgeOpen, setKnowledgeOpen] = useState(false);
   const [knowledgeUploading, setKnowledgeUploading] = useState(false);
   const [knowledgeNote, setKnowledgeNote] = useState('');
+  /** 第 19 步：正在删的那条资料 id（按钮显示「删除中…」并防连点），null = 没有删除在跑 */
+  const [knowledgeDeletingId, setKnowledgeDeletingId] = useState<number | null>(null);
   const knowledgeFileRef = useRef<HTMLInputElement | null>(null);
   /** 第 7 步：主进程 'agent' 事件的镜像（步摘要/文档结论），权威循环在主进程 */
   const [agentSteps, setAgentSteps] = useState<string[]>([]);
@@ -881,6 +884,38 @@ export default function App() {
     if (file) void uploadKnowledgeFile(file);
   };
 
+  /**
+   * 第 19 步：删掉当前账号的一条资料（服务端连它的切块一起删）。
+   *
+   * 一点就删、只回一句人话 —— 不做二次确认弹窗，也不做回收站/重命名（本步明确不做）。
+   * 删除权限完全由服务端的 JWT 决定：这里只传资料 id，删不到别人的资料（会得到 404）。
+   * 本地列表用「过滤掉这条」而不是整表重拉，避免删完闪烁；刷新页面时以服务端为准。
+   */
+  const deleteKnowledgeDoc = async (doc: KnowledgeDocument) => {
+    const sess = sessionRef.current;
+    if (!sess || knowledgeDeletingId !== null) return;
+    setKnowledgeNote('');
+    setKnowledgeDeletingId(doc.id);
+    try {
+      const r = await authFetchJson<KnowledgeDeleteResult>(`/knowledge/${doc.id}`, {
+        method: 'DELETE',
+        // 空 body 会被 fastify 判 400，这里明确送一个 JSON 空对象。
+        body: '{}',
+        headers: { authorization: `Bearer ${sess.token}` },
+      });
+      // 删除期间切了账号：不要拿 A 号的结果去动 B 号的列表/提示。
+      if (sessionRef.current?.token !== sess.token) return;
+      setKnowledgeDocs((prev) => prev.filter((d) => d.id !== doc.id));
+      setKnowledgeNote(`《${doc.filename}》已删除${r.removedChunks ? `（连同 ${r.removedChunks} 个片段）` : ''}。`);
+    } catch (e) {
+      if (sessionRef.current?.token !== sess.token) return;
+      setKnowledgeNote(`删除失败：${(e as Error).message}`);
+      void loadKnowledge(); // 服务端说没有这份资料时，用真实列表把界面拉回来
+    } finally {
+      setKnowledgeDeletingId(null);
+    }
+  };
+
   const refreshTask = async () => {
     const sess = sessionRef.current;
     if (!sess) return;
@@ -1003,6 +1038,7 @@ export default function App() {
     setKnowledgeDocs([]);
     setKnowledgeOpen(false);
     setKnowledgeUploading(false);
+    setKnowledgeDeletingId(null);
     setKnowledgeNote('');
   };
 
@@ -1603,7 +1639,20 @@ export default function App() {
                 {knowledgeDocs.length === 0 && <div className="small">还没有上传资料。</div>}
                 {knowledgeDocs.map((doc) => (
                   <div className="knowledgePanel__row" role="listitem" key={doc.id} title={doc.filename}>
-                    <span>{doc.filename}</span>
+                    {/* 第 19 步：每条资料一行 + 一个「删除」。一点就删，删完在下面回一句人话。 */}
+                    <div className="knowledgePanel__line">
+                      <span className="knowledgePanel__name">{doc.filename}</span>
+                      <button
+                        type="button"
+                        className="knowledgePanel__del"
+                        title={`删除《${doc.filename}》`}
+                        aria-label={`删除 ${doc.filename}`}
+                        disabled={knowledgeDeletingId !== null}
+                        onClick={() => void deleteKnowledgeDoc(doc)}
+                      >
+                        {knowledgeDeletingId === doc.id ? '删除中…' : '删除'}
+                      </button>
+                    </div>
                     <span className="small">{doc.kind.toUpperCase()} · {doc.chunkCount} 段</span>
                   </div>
                 ))}
