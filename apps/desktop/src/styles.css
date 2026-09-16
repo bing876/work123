@@ -400,6 +400,18 @@ body {
   border-radius: 8px;
 }
 
+/* ---- 第 22 步：浏览器可调配置（左栏账号块里那两行：标签 + 数字输入）---- */
+.settingsRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.settingsRow__num {
+  width: 72px;
+  flex: 0 0 auto;
+}
+
 /* ---- 第 6 步：打字机光标 + 聊天提示条（error/notice，不是 AI 的话）---- */
 .caret {
   display: inline-block;

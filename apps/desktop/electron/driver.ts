@@ -28,10 +28,13 @@ import type {
  * 明确**不接大模型**：恢复运行时的"下一步"是基于 read_page 快照的规则判断（planNext），
  * 并且每一步执行前都复查状态机 —— 暂停后不会再发出任何一次自动 click / type，也永远
  * 不重放暂停前的步骤（恢复 = 先读用户当前真实页面，再据此决定）。
+ *
+ * 第 22 步（浏览器多实例融合 · 原计划 Phase 2）：**驾驶目标必须点名**。
+ *   - 删掉 `findWebviewGuest()` 盲选兜底，`resolveTarget()` 在「没给 id」和「id 已失效」
+ *     两种情况下都当场抛错（详见该函数注释）；
+ *   - 第 4 步的 demo 循环随之必须由调用方传 `webContentsId`（`startTask(id)`），
+ *     没点名就置 failed，而不是随便挑一张页去点。
  */
-
-/** 暂停开关（第 3 步语义保留）：为 true 时调试区的 click / type 一律拒绝执行，把页面交还给用户 */
-let paused = false;
 
 /** 被暂停拦截的动作（其余动作如 open_url / scroll / read_page 仍然允许） */
 const PAUSED_BLOCKED: ReadonlySet<BrowserActionType> = new Set<BrowserActionType>(['click', 'type', 'fill_form']);
@@ -39,15 +42,118 @@ const PAUSED_BLOCKED: ReadonlySet<BrowserActionType> = new Set<BrowserActionType
 type Target = Electron.WebContents;
 
 // ---------------------------------------------------------------------------
-// 第 4 步：状态机
+// 第 4 步：状态机 —— 第 22 步起**按 target 独立存储**（A1.5）
+//
+// 以前这里是一组模块级全局变量（phase / phaseDetail / phaseStep / paused / loopToken），
+// 因为全窗口只有一张 webview。多实例之后那样必然串味：
+// 「A 那张页在跑」会显示成「B 那张页在跑」，一路暂停会把另一路也按住。
+//
+// 现在状态一律按 **target（内嵌页的 webContentsId）** 存在 Map 里，**没有全局单例**。
+// 一期并发数配置是 1（settings.ts 的 maxConcurrentAgentTasks），
+// 也就是**同一时刻只会有一张页有活任务**；把那个配置调大就是真并行，
+// 这份数据结构不用再动 —— 这正是 A1.5 要的「一期串行、以后能解锁并行」。
 // ---------------------------------------------------------------------------
 
-let phase: TaskPhase = 'idle';
-let phaseDetail = 'idle · 待命（任务：在百度搜索「AI 工作台」并进入结果页）';
-let phaseStep = 0;
+/** 一张内嵌页自己那一份任务状态 */
+interface TargetTask {
+  phase: TaskPhase;
+  detail: string;
+  step: number;
+  /** 自动 click / type 当前是否被拒（第 3 步语义，**按 target 独立**） */
+  paused: boolean;
+  /** 循环令牌：每次开始 / 暂停都自增；循环只在令牌仍有效时才继续下一步 */
+  loopToken: number;
+  /** 写入顺序号：只用于「没有活任务时，回放**最近一次**终止态」 */
+  seq: number;
+}
 
-/** 循环令牌：每次开始 / 暂停都自增；循环只在令牌与状态都仍有效时才继续下一步 */
-let loopToken = 0;
+const IDLE_DETAIL = 'idle · 待命（任务：在百度搜索「AI 工作台」并进入结果页）';
+
+/** 每个 target 一份任务状态 —— **这就是被替换掉的那组全局单例** */
+const tasks = new Map<number, TargetTask>();
+
+let seqCounter = 0;
+/** 最近一次被任务碰过的 target（「暂停 → 继续」在调用方没点名时靠它回到同一张页） */
+let lastTouchedWcId: number | null = null;
+
+/** 取（必要时新建）某个 target 的任务状态 */
+function taskOf(wcId: number): TargetTask {
+  let t = tasks.get(wcId);
+  if (!t) {
+    t = { phase: 'idle', detail: IDLE_DETAIL, step: 0, paused: false, loopToken: 0, seq: 0 };
+    tasks.set(wcId, t);
+  }
+  return t;
+}
+
+/** 只读地取 phase（**不建条目**：drive 一次不该就多出一条记录） */
+function phaseOf(wcId: number): TaskPhase {
+  return tasks.get(wcId)?.phase ?? 'idle';
+}
+
+/** 只读地取这张页的暂停门（同上，不建条目） */
+function pausedOf(wcId: number): boolean {
+  return tasks.get(wcId)?.paused ?? false;
+}
+
+/** 某个 target 的状态快照 */
+function snapshotOf(wcId: number): TaskState {
+  const t = tasks.get(wcId);
+  return {
+    phase: t?.phase ?? 'idle',
+    detail: t?.detail ?? IDLE_DETAIL,
+    step: t?.step ?? 0,
+    blocked: t?.paused ?? false,
+    wcId,
+  };
+}
+
+/** 「此刻在跑的那张页」；没有在跑的，就取最近一次被任务碰过的那张 */
+function activeTaskWcId(): number | null {
+  for (const [wcId, t] of tasks) if (t.phase === 'running') return wcId;
+  return lastTouchedWcId;
+}
+
+/**
+ * **没有点名 target 时的聚合视图**（左栏横幅用）。
+ *
+ * 它**不是**「全局单例状态」，而是从 per-target 状态**推导**出来的：
+ *   有 running → running；否则有 paused → paused；否则回放最近一次终止态；都没有 → idle。
+ * 一期并发是 1，所以它和「那一张页的状态」基本是同一个东西；
+ * 以后并发调大了，它就是一句「N 路在跑」的汇总。
+ */
+function aggregateState(): TaskState {
+  let running: number | null = null;
+  let runningSeq = -1;
+  let pausedWc: number | null = null;
+  let pausedSeq = -1;
+  let settledWc: number | null = null;
+  let settledSeq = -1;
+  for (const [wcId, t] of tasks) {
+    /**
+     * ⚠️ 取**最近被更新**的那一条（seq 最大），不是 Map 里的第一条。
+     *
+     * 按插入顺序取会踩这个坑：某张页上有一份**陈旧**的 running（例如用户「停」了、
+     * 但那一轮的收尾还没来得及改状态），后来另一张页真的开始跑 ——
+     * 聚合视图会一直显示那张旧页的状态，看起来像「新任务根本没起来」。
+     */
+    if (t.phase === 'running' && t.seq > runningSeq) {
+      runningSeq = t.seq;
+      running = wcId;
+    } else if (t.phase === 'paused' && t.seq > pausedSeq) {
+      pausedSeq = t.seq;
+      pausedWc = wcId;
+    }
+    if ((t.phase === 'done' || t.phase === 'failed') && t.seq > settledSeq) {
+      settledSeq = t.seq;
+      settledWc = wcId;
+    }
+  }
+  if (running !== null) return snapshotOf(running);
+  if (pausedWc !== null) return snapshotOf(pausedWc);
+  if (settledWc !== null) return snapshotOf(settledWc);
+  return { phase: 'idle', detail: IDLE_DETAIL, step: 0, blocked: false };
+}
 
 /** 主进程注册的状态监听（main.ts 用于向渲染层广播） */
 let stateListener: ((s: TaskState) => void) | null = null;
@@ -56,18 +162,33 @@ export function setTaskListener(fn: ((s: TaskState) => void) | null): void {
   stateListener = fn;
 }
 
+/**
+ * 广播**聚合视图**给渲染层。
+ *
+ * 为什么广播聚合而不是「刚刚变的那一路」：左栏横幅只有一个，
+ * 渲染层拿到聚合就能直接显示，不必自己再合并多路状态（少一次 IPC 往返）。
+ * 每一路自己的话由 `emitAgent`（带 wcId）走聊天区，两条路互不干扰。
+ */
 function broadcast(): void {
-  stateListener?.(getTaskState());
+  stateListener?.(aggregateState());
 }
 
-export function getTaskState(): TaskState {
-  return { phase, detail: phaseDetail, step: phaseStep, blocked: paused };
+/**
+ * 读状态。
+ * @param targetWebContentsId 传了就是**那张页**的状态；不传是聚合视图（左栏横幅用）。
+ */
+export function getTaskState(targetWebContentsId?: number): TaskState {
+  if (typeof targetWebContentsId === 'number') return snapshotOf(targetWebContentsId);
+  return aggregateState();
 }
 
-function setPhase(next: TaskPhase, detail: string, step = phaseStep): void {
-  phase = next;
-  phaseDetail = detail;
-  phaseStep = step;
+function setPhase(wcId: number, next: TaskPhase, detail: string, step?: number): void {
+  const t = taskOf(wcId);
+  t.phase = next;
+  t.detail = detail;
+  if (typeof step === 'number') t.step = step;
+  t.seq = ++seqCounter;
+  lastTouchedWcId = wcId;
   broadcast();
 }
 
@@ -82,97 +203,180 @@ class TaskAborted extends Error {
 const trunc = (s: string, n = 28): string => (s.length > n ? `${s.slice(0, n)}…` : s);
 
 /**
- * 统一的暂停 / 恢复入口：
- * - 暂停 = 置起 paused 标志（挡住调试区的自动 click/type）+ running 的任务循环立即停；
- * - 恢复 = 解除标志；若任务处于 paused，则重启循环（循环第一步就是 read_page，天然满足
- *   "先读用户当前真实页面再决定下一步"）。
+ * 统一的暂停 / 恢复入口（**按 target**）：
+ * - 暂停 = 置起这张页的 paused 标志（挡住自动 click/type）+ 它的任务循环立即停；
+ * - 恢复 = 解除标志；若这张页处于 paused，则重启循环（循环第一步就是 read_page，
+ *   天然满足"先读用户当前真实页面再决定下一步"）。
  */
-function applyPaused(value: boolean): void {
-  paused = value;
+function applyPaused(wcId: number, value: boolean): void {
+  const t = taskOf(wcId);
+  t.paused = value;
   if (value) {
-    loopToken += 1; // 让在途循环在下一个检查点退出
-    if (phase === 'running') {
-      setPhase('paused', '已暂停 — 自动 click/type 已停止，内嵌页可手点（点「继续」先读你停留的页面）');
+    t.loopToken += 1; // 让在途循环在下一个检查点退出
+    if (t.phase === 'running') {
+      setPhase(wcId, 'paused', '已暂停 — 自动 click/type 已停止，内嵌页可手点（点「继续」先读你停留的页面）');
     } else {
-      setPhase(phase, '已暂停 — 自动 click/type 被拒绝（当前不在任务运行中，无其它副作用）');
+      setPhase(wcId, t.phase, '已暂停 — 自动 click/type 被拒绝（当前不在任务运行中，无其它副作用）');
     }
-  } else if (phase === 'paused') {
-    void beginRun('继续驾驶 — 先 read_page 读你当前的真实页面，再决定下一步（不重放暂停前的步骤）');
+  } else if (t.phase === 'paused') {
+    void beginRun(wcId, '继续驾驶 — 先 read_page 读你当前的真实页面，再决定下一步（不重放暂停前的步骤）');
   } else {
-    setPhase(phase, '自动 click/type 已解除限制');
+    setPhase(wcId, t.phase, '自动 click/type 已解除限制');
   }
-}
-
-export function setDrivingPaused(value: boolean): boolean {
-  applyPaused(value);
-  return paused;
-}
-
-export function isDrivingPaused(): boolean {
-  return paused;
-}
-
-/** 启动任务：只从 idle / done / failed 进入 running；running / paused 中调用不重复启动 */
-export function startTask(): TaskState {
-  if (phase === 'running') {
-    setPhase('running', '任务已在运行中，无需重复启动');
-    return getTaskState();
-  }
-  if (phase === 'paused') {
-    setPhase('paused', '当前是暂停态 — 请点「继续」（会先读你当前的真实页面，再决定下一步）');
-    return getTaskState();
-  }
-  paused = false;
-  return beginRun('启动任务 — 先 read_page 读当前真实页面，再决定下一步');
-}
-
-export function pauseTask(): TaskState {
-  applyPaused(true);
-  return getTaskState();
-}
-
-export function resumeTask(): TaskState {
-  if (phase === 'paused') {
-    applyPaused(false); // 解除 paused 门 + 重启循环（循环第一步就是 read_page）
-  } else {
-    // 非 paused 态点「继续」：不做其它事，但必须解除 paused 门
-    // （idle 下按过「暂停」的用户，再按「继续」应恢复单发 click/type 放行）
-    paused = false;
-    setPhase(phase, `当前不是暂停态（${phase}），无需「继续」；已解除 click/type 限制，要开始任务请点「开始任务」`);
-  }
-  return getTaskState();
 }
 
 /**
- * 第 7 步：主进程外部编排循环（agent.ts 的云端驾驶员）接管状态机。
- * 效果 = ++loopToken（把内置 demo runLoop / 上一个外部循环踢下线）+ 解除驾驶暂停 + 置 running。
+ * 第 22 步：暂停门**按 target**。
+ *
+ * 不点名时取「此刻在跑的那张页」，没有就取最近一次被任务碰过的那张 ——
+ * 这是**从状态表里精确推出来的**，不是「从所有 webContents 里挑一个」那种盲选，
+ * 所以不违反 fail-fast；真的一个目标都没有就什么都不做（返回 false），绝不乱按一张页。
+ */
+export function setDrivingPaused(value: boolean, targetWebContentsId?: number): boolean {
+  const wcId = typeof targetWebContentsId === 'number' ? targetWebContentsId : activeTaskWcId();
+  if (wcId === null) return false;
+  applyPaused(wcId, value);
+  return pausedOf(wcId);
+}
+
+/** 这张页（不点名 = 此刻在跑 / 最近碰过的那张）的自动 click/type 是不是被按住了 */
+export function isDrivingPaused(targetWebContentsId?: number): boolean {
+  const wcId = typeof targetWebContentsId === 'number' ? targetWebContentsId : activeTaskWcId();
+  return wcId === null ? false : pausedOf(wcId);
+}
+
+/**
+ * 启动任务：只从 idle / done / failed 进入 running；running / paused 中调用不重复启动。
+ *
+ * 第 22 步：目标必须点名，或者至少有「上一次那张」。**不猜**：
+ * 一个目标都没有时当场返回 failed 并说明原因。
+ */
+export function startTask(targetWebContentsId?: number): TaskState {
+  const wcId = typeof targetWebContentsId === 'number' ? targetWebContentsId : lastTouchedWcId;
+  if (wcId === null) return failNoTarget();
+  const t = taskOf(wcId);
+  if (t.phase === 'running') {
+    setPhase(wcId, 'running', '任务已在运行中，无需重复启动');
+    return snapshotOf(wcId);
+  }
+  if (t.phase === 'paused') {
+    setPhase(wcId, 'paused', '当前是暂停态 — 请点「继续」（会先读你当前的真实页面，再决定下一步）');
+    return snapshotOf(wcId);
+  }
+  t.paused = false;
+  return beginRun(wcId, '启动任务 — 先 read_page 读当前真实页面，再决定下一步');
+}
+
+export function pauseTask(targetWebContentsId?: number): TaskState {
+  const wcId = typeof targetWebContentsId === 'number' ? targetWebContentsId : activeTaskWcId();
+  if (wcId === null) return getTaskState();
+  applyPaused(wcId, true);
+  return snapshotOf(wcId);
+}
+
+export function resumeTask(targetWebContentsId?: number): TaskState {
+  const wcId = typeof targetWebContentsId === 'number' ? targetWebContentsId : activeTaskWcId();
+  if (wcId === null) return getTaskState();
+  const t = taskOf(wcId);
+  if (t.phase === 'paused') {
+    applyPaused(wcId, false); // 解除 paused 门 + 重启循环（循环第一步就是 read_page）
+  } else {
+    // 非 paused 态点「继续」：不做其它事，但必须解除 paused 门
+    // （idle 下按过「暂停」的用户，再按「继续」应恢复单发 click/type 放行）
+    t.paused = false;
+    setPhase(
+      wcId,
+      t.phase,
+      `当前不是暂停态（${t.phase}），无需「继续」；已解除 click/type 限制，要开始任务请点「开始任务」`,
+    );
+  }
+  return snapshotOf(wcId);
+}
+
+/** 一个目标都没有时的统一失败话术（第 22 步：宁可说清楚，也不瞎挑一张页） */
+function failNoTarget(): TaskState {
+  return {
+    phase: 'failed',
+    detail: '任务失败 — 没有指定要驾驶的页（webContentsId）。请先在聊天里打开一个网页，再从那张页发起任务。',
+    step: 0,
+    blocked: false,
+  };
+}
+
+/**
+ * 第 7 步：主进程外部编排循环（agent.ts 的云端驾驶员）接管**这一张页**的状态机。
+ * 效果 = 这张页的 loopToken 自增（把内置 demo runLoop / 上一个外部循环踢下线）
+ *        + 解除这张页的驾驶暂停 + 置 running。
  * **不会**启动 demo 的 runLoop —— AI 循环自己按「读页→问一步→执行一步」走。
  */
-export function takeoverRun(detail: string): TaskState {
-  loopToken += 1;
-  paused = false;
-  setPhase('running', detail, 0);
-  return getTaskState();
+export function takeoverRun(targetWebContentsId: number, detail: string): TaskState {
+  const t = taskOf(targetWebContentsId);
+  t.loopToken += 1;
+  t.paused = false;
+  setPhase(targetWebContentsId, 'running', detail, 0);
+  return snapshotOf(targetWebContentsId);
 }
 
-/** 第 7 步：外部循环汇报状态（running 步摘要 / ask_user→paused / done / failed），只动状态机不动执行 */
-export function setExternalPhase(next: TaskPhase, detail: string, step = phaseStep): void {
-  setPhase(next, detail, step);
+/**
+ * 第 7 步：外部循环汇报**这一张页**的状态
+ * （running 步摘要 / ask_user→paused / done / failed），只动状态机不动执行。
+ */
+export function setExternalPhase(
+  targetWebContentsId: number,
+  next: TaskPhase,
+  detail: string,
+  step?: number,
+): void {
+  setPhase(targetWebContentsId, next, detail, step);
 }
 
-export function resetTask(): TaskState {
-  loopToken += 1;
-  paused = false;
-  setPhase('idle', '已复位到 idle（done / failed 之后回到这里，再点「开始任务」）', 0);
-  return getTaskState();
+/**
+ * 复位。
+ * @param targetWebContentsId 传了就只复位**那张页**；不传则清空所有页的状态
+ *        （登出 / 全部停止时用，语义与以前一致）。
+ */
+export function resetTask(targetWebContentsId?: number): TaskState {
+  if (typeof targetWebContentsId === 'number') {
+    const t = taskOf(targetWebContentsId);
+    t.loopToken += 1;
+    t.paused = false;
+    setPhase(targetWebContentsId, 'idle', '已复位到 idle（done / failed 之后回到这里，再点「开始任务」）', 0);
+    return snapshotOf(targetWebContentsId);
+  }
+  for (const t of tasks.values()) {
+    t.loopToken += 1;
+    t.paused = false;
+  }
+  tasks.clear();
+  lastTouchedWcId = null;
+  const idle: TaskState = {
+    phase: 'idle',
+    detail: '已复位到 idle（done / failed 之后回到这里，再点「开始任务」）',
+    step: 0,
+    blocked: false,
+  };
+  stateListener?.(idle);
+  return idle;
 }
 
-/** 进入 running 并在后台跑循环；同步返回初始状态（循环结果由 'state' 广播） */
-function beginRun(detail: string): TaskState {
-  const token = ++loopToken;
-  setPhase('running', detail, 0);
-  void runLoop(token);
-  return getTaskState();
+/**
+ * 进入 running 并在后台跑循环；同步返回初始状态（循环结果由 'state' 广播）。
+ *
+ * 第 22 步：先**验证目标真的在**（resolveTarget 会 fail-fast）——
+ * 以前这里是「没给 id 就盲选第一个 webview」，现在宁可当场失败也不猜。
+ */
+function beginRun(wcId: number, detail: string): TaskState {
+  try {
+    resolveTarget(wcId);
+  } catch (err) {
+    setPhase(wcId, 'failed', `任务失败 — ${(err as Error).message}`, 0);
+    return snapshotOf(wcId);
+  }
+  const t = taskOf(wcId);
+  const token = ++t.loopToken;
+  setPhase(wcId, 'running', detail, 0);
+  void runLoop(token, wcId);
+  return snapshotOf(wcId);
 }
 
 /** 第 4 步 demo 任务的规则常量（与第 3 步调试区一致，不接 AI、选择器写成逗号列表降级） */
@@ -212,8 +416,8 @@ export function planNext(s: PageSnapshot): Decision {
 }
 
 /** 执行任务的一步：复用第 3 步的执行原语，但把失败抛出来（由循环转成 failed） */
-async function runStep(action: BrowserAction, shouldAbort: () => boolean): Promise<void> {
-  const wc = resolveTarget(undefined);
+async function runStep(action: BrowserAction, shouldAbort: () => boolean, wcId: number): Promise<void> {
+  const wc = resolveTarget(wcId);
   if (!shouldAbort()) throw new TaskAborted();
   switch (action.action) {
     case 'open_url':
@@ -240,34 +444,37 @@ async function runStep(action: BrowserAction, shouldAbort: () => boolean): Promi
   }
 }
 
-async function runLoop(token: number): Promise<void> {
-  const alive = (): boolean => token === loopToken && phase === 'running';
+async function runLoop(token: number, wcId: number): Promise<void> {
+  // 第 22 步：令牌与 phase 都从**这张页自己**那份状态里读（以前是模块级全局变量）
+  const alive = (): boolean => (tasks.get(wcId)?.loopToken ?? -1) === token && phaseOf(wcId) === 'running';
   try {
     for (let step = 1; step <= MAX_TASK_STEPS; step += 1) {
       if (!alive()) return;
-      const wc = resolveTarget(undefined);
+      // 每一步都重新解析**点名的那张页**：中途被关掉会当场抛错转成 failed，
+      // 而不是（像以前那样）悄悄换一张别的页继续点。
+      const wc = resolveTarget(wcId);
       // 每一步都先读用户当前真实页面（恢复后的第一次决策同样走这里）
       const snap = await readSnapshot(wc);
       if (!alive()) return;
-      setPhase('running', `步 ${step}：读页「${trunc(snap.title || snap.url)}」`, step);
+      setPhase(wcId, 'running', `步 ${step}：读页「${trunc(snap.title || snap.url)}」`, step);
       const d = planNext(snap);
       if (d.kind === 'goal') {
-        setPhase('done', `任务完成 — ${d.reason}`, step);
+        setPhase(wcId, 'done', `任务完成 — ${d.reason}`, step);
         return;
       }
       if (d.kind === 'stuck') {
-        setPhase('failed', `任务失败 — ${d.reason}`, step);
+        setPhase(wcId, 'failed', `任务失败 — ${d.reason}`, step);
         return;
       }
-      setPhase('running', `步 ${step}：${d.note}`, step);
+      setPhase(wcId, 'running', `步 ${step}：${d.note}`, step);
       // 步内每个会动鼠标键盘的原语都会复查 alive；步后也复查，暂停后绝不进入下一步
-      await runStep(d.action, alive);
+      await runStep(d.action, alive, wcId);
       if (!alive()) return;
     }
-    setPhase('failed', `任务失败 — 超过步数上限（第 ${MAX_TASK_STEPS} 步仍在进行），已停止`, MAX_TASK_STEPS);
+    setPhase(wcId, 'failed', `任务失败 — 超过步数上限（第 ${MAX_TASK_STEPS} 步仍在进行），已停止`, MAX_TASK_STEPS);
   } catch (err) {
     if (err instanceof TaskAborted) return; // 用户接管的正常中止，保持 paused 显示
-    setPhase('failed', `任务失败 — ${(err as Error).message}`, phaseStep);
+    setPhase(wcId, 'failed', `任务失败 — ${(err as Error).message}`, tasks.get(wcId)?.step ?? 0);
   }
 }
 
@@ -275,36 +482,28 @@ async function runLoop(token: number): Promise<void> {
 // 找到要驾驶的那块内嵌页
 // ---------------------------------------------------------------------------
 
-/** 兜底：从所有 webContents 里挑出类型为 webview 的 guest */
-function findWebviewGuest(): Target | null {
-  for (const wc of webContents.getAllWebContents()) {
-    if (wc.isDestroyed()) continue;
-    if (wc.getType() === 'webview') return wc;
-  }
-  return null;
-}
-
 /**
- * 解析驾驶目标。
+ * 解析驾驶目标。**必须点名**——这里没有「自己找一张」这条路了。
  *
- * 第 17 步：多张活页可以各跑一路（第 20 步起连路数上限也取消了），
- * 所以**传了 id 就必须用那张**——以前 id 失效会静默退回「随便挑第一个 webview」，
- * 多路并行时那等于把动作打到别人那张页上
- * （一路在抖音搜索、另一路却在 B 站页面上点），是必须 fail-fast 的。
- * 只有调用方**根本没给 id**（第 4 步的 demo 循环）才允许自动寻找。
+ * 第 22 步（原计划 Phase 2）删掉了 `findWebviewGuest()` 盲选兜底，理由是它**不可预期**：
+ *   - 多张活页可以各跑一路，不传 id 就挑「第一个 webview」，
+ *     等于把动作打到别人那张页上（一路在抖音搜索、另一路却在 B 站页面上点）；
+ *   - 「第一个」取决于 `getAllWebContents()` 的返回顺序，**出问题时极难复现**。
+ * 所以两种错法都当场抛错（fail-fast），**绝不猜**：
+ *   - 给了 id 但那张页已经关了 / 不是内嵌页 → 报错；
+ *   - 根本没给 id → 也报错（调用方必须显式传 target）。
+ *
+ * ⚠️ 这是**预期行为，不是回归**：历史上任何漏传 id 的调用点，都应该在这里当场暴露出来。
  */
 function resolveTarget(id?: number): Target {
-  if (typeof id === 'number') {
-    const wc = webContents.fromId(id);
-    if (wc && !wc.isDestroyed() && wc.getType() === 'webview') return wc;
-    throw new Error(`指定的内嵌页已经不在了（webContents ${id} 已关闭或不是内嵌页），这一路停止。`);
+  if (typeof id !== 'number') {
+    throw new Error(
+      '驾驶目标未指定：必须显式给出内嵌页的 webContentsId（多张页并存时不允许再自动挑一张）。',
+    );
   }
-  const auto = findWebviewGuest();
-  if (!auto) {
-    // 第 13 步起，内嵌页挂在**中栏聊天的浏览器卡片**里（右栏那块已经撤了）
-    throw new Error('没有找到内嵌 webview 的 webContents —— 请先在聊天里打开一个网页（例如发一句「打开百度」）');
-  }
-  return auto;
+  const wc = webContents.fromId(id);
+  if (wc && !wc.isDestroyed() && wc.getType() === 'webview') return wc;
+  throw new Error(`指定的内嵌页已经不在了（webContents ${id} 已关闭或不是内嵌页），这一路停止。`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1218,22 +1417,26 @@ async function captureScreenshot(wc: Target): Promise<string> {
 export async function drive(action: BrowserAction, targetWebContentsId?: number): Promise<DriveResult> {
   const actionName = action.action;
 
-  // 第 3 步语义保留：paused 标志挡住调试区/外来的自动 click / type。
-  // 第 4 步起 paused 与状态机同进同退（「暂停」按钮走 pauseTask → applyPaused），
-  // 所以任务 running 时该门恒开、paused 时恒关。
-  if (paused && PAUSED_BLOCKED.has(actionName)) {
-    return {
-      ok: false,
-      action: actionName,
-      error: `驾驶已暂停（状态机：${phase}），「${actionName}」不会自动执行；你可以在内嵌页上自己点。`,
-    };
-  }
-
+  // 第 22 步：**先解析目标**（没点名 / 页没了都当场报错），因为下面的暂停门是按 target 判的
+  // —— 先知道是哪张页，才谈得上它有没有被按住。
   let wc: Target;
   try {
     wc = resolveTarget(targetWebContentsId);
   } catch (err) {
     return { ok: false, action: actionName, error: (err as Error).message };
+  }
+  const wcId = wc.id;
+
+  // 第 3 步语义保留：paused 门挡住调试区/外来的自动 click / type。
+  // 第 4 步起 paused 与状态机同进同退（「暂停」按钮走 pauseTask → applyPaused），
+  // 所以任务 running 时该门恒开、paused 时恒关。
+  // 第 22 步起这个门**按 target**（以前是全局开关，一路暂停会把别路也一起按住）。
+  if (pausedOf(wcId) && PAUSED_BLOCKED.has(actionName)) {
+    return {
+      ok: false,
+      action: actionName,
+      error: `这张页的驾驶已暂停（状态机：${phaseOf(wcId)}），「${actionName}」不会自动执行；你可以在内嵌页上自己点。`,
+    };
   }
 
   try {
@@ -1332,7 +1535,7 @@ export async function drive(action: BrowserAction, targetWebContentsId?: number)
         const refused: string[] = [];
         const missed: string[] = [];
         for (const f of (Array.isArray(action.fields) ? action.fields : []).slice(0, 12)) {
-          if (paused) throw new TaskAborted();
+          if (pausedOf(wcId)) throw new TaskAborted();
           const g = await typeSensitiveGuard(wc, f.target);
           if (g) {
             refused.push(String(f.target));

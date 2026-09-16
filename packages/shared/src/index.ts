@@ -25,8 +25,12 @@ export interface ChatSession {
   updatedAt: string;
 }
 
-/** 内嵌浏览器区域可订阅的事件名（state：第 4 步状态机广播，payload 为 TaskState 的 JSON） */
-export type BrowserEvent = 'open' | 'show' | 'hide' | 'focus' | 'state' | 'agent';
+/**
+ * 内嵌浏览器区域可订阅的事件名
+ * （state：第 4 步状态机广播，payload 为 TaskState 的 JSON；
+ *   settings：第 22 步配置变更广播，payload 为 WorkbenchSettings 的 JSON）
+ */
+export type BrowserEvent = 'open' | 'show' | 'hide' | 'focus' | 'state' | 'agent' | 'settings';
 
 // ---------------------------------------------------------------------------
 // 第 4 步：任务状态机
@@ -49,6 +53,13 @@ export interface TaskState {
   step: number;
   /** 自动 click / type 当前是否被拒（主进程 paused 门的镜像，调试区据此如实显示） */
   blocked: boolean;
+  /**
+   * 第 22 步：这份状态属于**哪一张内嵌页**（guest webContents id）。
+   *
+   * 状态机本身已按 target 独立存储，所以每份状态都知道自己是谁的；
+   * 左栏横幅拿到的**聚合视图**也会带上「代表性那一张」的 id（多路时可能省略）。
+   */
+  wcId?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -170,10 +181,15 @@ export interface WorkbenchBridge {
    *
    * @param action 要执行的动作
    * @param targetWebContentsId 内嵌 webview 的 guest webContents id
-   *        （渲染层用 `webview.getWebContentsId()` 拿）；省略时主进程会自行寻找内嵌 webview。
+   *        （渲染层用 `webview.getWebContentsId()` 拿）。
+   *        ⚠️ 第 22 步起**必须显式给出**：多张页并存时主进程不再「自己找一张」，
+   *        省略（或给了已失效的 id）会直接返回失败 —— 这是预期的 fail-fast，不是回归。
    */
   drive: (action: BrowserAction, targetWebContentsId?: number) => Promise<DriveResult>;
-  /** 只读一次当前页面（等价于 drive({ action: 'read_page' })） */
+  /**
+   * 只读一次当前页面（等价于 drive({ action: 'read_page' })）。
+   * ⚠️ 同 drive：第 22 步起必须显式给出 targetWebContentsId。
+   */
   readPage: (targetWebContentsId?: number) => Promise<DriveResult>;
   /** 暂停驾驶：之后 click / type 一律拒绝执行，把页面交还给用户手动操作 */
   pauseDriving: () => Promise<boolean>;
@@ -181,8 +197,12 @@ export interface WorkbenchBridge {
   resumeDriving: () => Promise<boolean>;
 
   // ---- 第 4 步：任务状态机（idle | running | paused | done | failed）----
-  /** 启动任务：主进程先 read_page 读当前真实页面，再决定下一步；running/paused 中调用不产生副作用 */
-  startTask: () => Promise<TaskState>;
+  /**
+   * 启动任务：主进程先 read_page 读当前真实页面，再决定下一步；running/paused 中调用不产生副作用。
+   * @param targetWebContentsId 第 22 步：要驾驶**哪一张**页。必须显式给出（不再盲选）；
+   *        省略时沿用上一次那张（「暂停 → 继续」场景）；从来没有目标则当场置 failed。
+   */
+  startTask: (targetWebContentsId?: number) => Promise<TaskState>;
   /** 暂停：立即停止自动 click/type，内嵌页交还用户手点（running 时中断任务循环） */
   pauseTask: () => Promise<TaskState>;
   /** 继续：先 read_page 读用户当前真实页面再决定下一步，禁止重放暂停前的步骤 */
@@ -244,6 +264,17 @@ export interface WorkbenchBridge {
 
   /** 读取主进程权威状态（渲染进程挂载时初始同步用） */
   getTaskState: () => Promise<TaskState>;
+
+  /**
+   * 第 22 步：读可调配置。权威副本在主进程（userData 下的 JSON），
+   * 渲染层启动时同步一次，之后跟随 'settings' 广播。
+   */
+  getSettings: () => Promise<WorkbenchSettings>;
+  /**
+   * 第 22 步：改配置（只传要改的字段即可）。主进程会夹到合法区间、落盘，并广播 'settings'，
+   * 返回值是夹过之后的**完整**配置，调用方以它为准。
+   */
+  setSettings: (patch: Partial<WorkbenchSettings>) => Promise<WorkbenchSettings>;
 
   /** 订阅主进程转发过来的 UI 指令，返回取消订阅函数 */
   on: (event: BrowserEvent, callback: (payload?: string) => void) => () => void;
@@ -593,3 +624,37 @@ export interface AgentLoopStartResult {
 export interface AgentLoopNextResult {
   decision: AgentLoopDecision;
 }
+
+// ---------------------------------------------------------------------------
+// 第 22 步（浏览器多实例融合）：可调配置
+//
+// 两条都是**设置里可调**的，绝不写死在代码里：
+//   - maxConcurrentAgentTasks —— A1.5 的「一期只允许 1 路 active agent task」。
+//     数据结构按 target 独立设计（见 electron/driver.ts），所以以后把这个数调大就能
+//     解锁真并行，**不需要重新设计数据结构**；
+//   - maxBrowserInstances —— D 的多实例上限（默认 4，不是 6）。每张内嵌页 = 一个独立
+//     渲染进程 + 一块 session 存储，所以必须有上限防内存失控。
+// ---------------------------------------------------------------------------
+
+/** 主进程持久化的可调配置（权威副本在主进程 userData 下的 JSON 里） */
+export interface WorkbenchSettings {
+  /** 同时最多几路 agent 任务在跑（默认 1；调大即解锁多实例真并行） */
+  maxConcurrentAgentTasks: number;
+  /** 最多同时开几张内嵌页（默认 4；**只拒绝新开，绝不偷偷关掉已有页**） */
+  maxBrowserInstances: number;
+}
+
+/**
+ * 配置的取值范围。主进程读写时一律夹到这个区间里 ——
+ * 防止有人手改 JSON 改出负数或 0（那会让功能直接不可用）。
+ */
+export const SETTINGS_RANGE = {
+  maxConcurrentAgentTasks: { min: 1, max: 8 },
+  maxBrowserInstances: { min: 1, max: 20 },
+} as const;
+
+/** 默认值（D：多实例上限默认 **4**） */
+export const DEFAULT_SETTINGS: WorkbenchSettings = {
+  maxConcurrentAgentTasks: 1,
+  maxBrowserInstances: 4,
+};

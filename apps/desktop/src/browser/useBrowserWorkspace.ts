@@ -10,8 +10,9 @@ import type { BrowserPageInfo, BrowserTabView } from './types';
  *   - 仍是 Electron 的 <webview>，**不套 Edge / Chrome / CEF，不用 Playwright**；
  *   - 每张页的分区是 `partitionFor(agentId)` —— **一个智能体一套 cookie / 登录态**，
  *     绝不再用全局的 `persist:workbench-browser`；
- *   - **没有活页上限**（第 20 步取消了 MAX_LIVE_PAGES=10）：开多少张都行，只提示「开太多会卡」，
- *     **绝不偷偷关页、也绝不顶掉最旧那张**；
+ *   - **活页上限由配置项 `maxBrowserInstances` 决定**（第 22 步起，默认 4，设置里可调）：
+ *     到顶只**拒绝新开**并说一句人话，**绝不偷偷关页、也绝不顶掉最旧那张**
+ *     （第 20 步取消的是写死的 `MAX_LIVE_PAGES = 10`，不是「有上限」这件事本身）；
  *   - 切 tab = 把对应那张 webview 放到最前面（z-index），**不为每个 tab 开 BrowserWindow**；
  *   - 收起不是把页面藏没：舞台仍留一块高度（webview 尺寸为 0 会让驾驶点不中任何元素）。
  *
@@ -32,7 +33,22 @@ interface BrowserWorkspaceOptions {
   currentAgentId: number | null;
   /** 同上，给异步流程取「此刻」的值（回调里读，避免闭包拿到过期的） */
   getCurrentAgent: () => number | null;
+  /**
+   * 第 22 步 · D：**多实例上限**（默认 4，设置里可调）的取值函数。
+   * 传函数而不是数值：配置随时可能被改，用函数才能永远读到最新值，
+   * 也避免「改了配置 → 整个 hook 重建 → 页的引用全换一遍」。
+   */
+  getMaxInstances?: () => number;
 }
+
+/**
+ * 第 22 步：多实例上限的兜底值。
+ *
+ * ⚠️ 这是 `packages/shared` 里 `DEFAULT_SETTINGS.maxBrowserInstances` 的**第二份**。
+ * 正常路径下上限永远由主进程的配置经 `getMaxInstances` 给到，这里只在
+ * 「配置还没同步过来 / 桥异常」时兜底 —— 宁可兜一个保守值，也不要静默变成无上限。
+ */
+const FALLBACK_MAX_INSTANCES = 4;
 
 export interface BrowserWorkspace {
   /** 此刻正在聊的那个智能体（舞台靠它决定「谁的页该露出来」） */
@@ -101,6 +117,9 @@ export function useBrowserWorkspace(options: BrowserWorkspaceOptions): BrowserWo
   onNoteRef.current = options.onNote;
   const getAgentRef = useRef(options.getCurrentAgent);
   getAgentRef.current = options.getCurrentAgent;
+  /** 第 22 步：多实例上限的取值函数（同样是每次调用时读最新配置） */
+  const getMaxInstancesRef = useRef(options.getMaxInstances);
+  getMaxInstancesRef.current = options.getMaxInstances;
   /** 当前可见的智能体：切它只换「哪一桶可见」，页本身一张都不卸载 */
   const visibleAgentId = options.currentAgentId;
   const visibleAgentRef = useRef<number | null>(visibleAgentId);
@@ -283,11 +302,13 @@ export function useBrowserWorkspace(options: BrowserWorkspaceOptions): BrowserWo
 
   /**
    * 给某个智能体开一张页：
-   *   1. **只在这个智能体自己的页里**找同站 → 有就复用那张改道，不新开；
-   *   2. 没有就新开一张 —— **没有上限、不排队、不顶掉最旧**（第 20 步取消硬顶）；
+   *   1. **只在这个智能体自己的页里**找同站 → 有就复用那张改道，不新开（复用不占额度）；
+   *   2. 没有就新开一张 —— 不排队、不顶掉最旧；**第 22 步起受配置项
+   *      `maxBrowserInstances`（默认 4）约束**：到顶就拒绝新开并说一句人话，返回 null；
    *   3. 页数刚跨过 SOFT_TAB_HINT 时说一句「开太多会卡」，**但绝不关页**。
    *
    * ⚠️ 成功开页**不往聊天里写任何东西**——工作区顶栏多出一个 tab 就是结果。
+   *    （只有「到上限被拒」「开太多会卡」这两种情况才说话。）
    */
   const openUrl = async (agentId: number, rawUrl: string): Promise<number | null> => {
     const url = toHttpUrl(rawUrl) ?? HOME_URL;
@@ -299,6 +320,23 @@ export function useBrowserWorkspace(options: BrowserWorkspaceOptions): BrowserWo
       return same.id;
     }
     const id = Date.now() + Math.floor(Math.random() * 1000);
+    /**
+     * 第 22 步 · D：**多实例上限**（默认 4，设置里可调）。
+     *
+     * 上限是**全局**的（跨智能体一起算）—— 每张页 = 一个独立渲染进程 + 一块 session 存储，
+     * 吃的是整机内存，不是某个智能体的配额。
+     *
+     * ⚠️ 到顶只**拒绝新开**并把话说清楚，**绝不偷偷关掉已有页**
+     *    （第 20 步钉死的规矩：宁可提示「开太多会卡」，也不替用户关页）。
+     */
+    const cap = Math.max(1, Math.floor(getMaxInstancesRef.current?.() ?? FALLBACK_MAX_INSTANCES));
+    const live = flatTabs().length;
+    if (live >= cap) {
+      note(
+        `已经开了 ${live} 张页，到上限 ${cap} 张了（这个数可以在设置里调大）。要开新的，先关掉一张。`,
+      );
+      return null;
+    }
     setBucket(agentId, bucket.concat({ id, agentId, bootUrl: url, url, title: hostLabel(url) }));
     setActiveFor(agentId, id);
     setExpanded(true);

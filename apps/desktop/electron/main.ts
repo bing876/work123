@@ -17,7 +17,15 @@ import {
 } from './driver';
 import { runToolLoop } from './agent';
 import { startSensitiveAutoResume } from './driver';
-import type { AgentEventPayload, AgentLoopNextResult, AgentLoopStartResult, BrowserAction } from '@ai-workbench/shared';
+import { getSettings, onSettingsChange, setSettings } from './settings';
+import type {
+  AgentEventPayload,
+  AgentLoopNextResult,
+  AgentLoopStartResult,
+  BrowserAction,
+  TaskPhase,
+  WorkbenchSettings,
+} from '@ai-workbench/shared';
 
 /**
  * Electron 主进程 —— 只有它能碰 Node / 系统能力。
@@ -294,7 +302,10 @@ setTaskListener((state) => {
   sendToMainWindow('workbench:browser:state', JSON.stringify(state));
 });
 
-ipcMain.handle('workbench:task:start', () => startTask());
+// 第 22 步：启动任务必须点名要驾驶哪张页（driver.resolveTarget 已删掉盲选兜底）
+ipcMain.handle('workbench:task:start', (_event, targetWebContentsId?: number) =>
+  startTask(targetWebContentsId),
+);
 ipcMain.handle('workbench:task:pause', () => pauseTask());
 // 第 7 步：有挂起的驾驶员任务时，「继续」= 重启 AI 循环（第一步仍是 read_page，按当前页决策，
 // 不重放旧动作）；没有则维持第 4 步 demo 语义。
@@ -323,6 +334,18 @@ ipcMain.handle('workbench:task:reset', () => {
   return resetTask();
 });
 ipcMain.handle('workbench:task:state', () => getTaskState());
+
+// ---------------------------------------------------------------------------
+// 第 22 步：可调配置（A1.5 的并发数 / D 的多实例上限）
+//
+// 权威副本在 electron/settings.ts（userData 下的 JSON，用户手改也认）；
+// 这里只做两件事：转发 IPC + 变更时广播给渲染层。
+// ---------------------------------------------------------------------------
+ipcMain.handle('workbench:settings:get', () => getSettings());
+ipcMain.handle('workbench:settings:set', (_event, patch: unknown) =>
+  setSettings((patch ?? {}) as Partial<WorkbenchSettings>),
+);
+onSettingsChange((s) => sendToMainWindow('workbench:browser:settings', JSON.stringify(s)));
 
 // ---------------------------------------------------------------------------
 // 第 7 步：云端驾驶员「一步一问」循环的编排层（就在主进程；渲染进程不直连 CDP）
@@ -476,7 +499,8 @@ async function agentPost<T>(path: string, body: unknown): Promise<T> {
  * 第 17 步：在某一张内嵌页上发车（或改道）。
  *
  * - 这张页上已经有一路在跑 → **最新指令优先**：旧循环作废，用新目标重发（第一步仍是读当前页）；
- * - 这张页上没有 → 新起一路（第 20 步起**没有路数上限**，不再拒绝）；
+ * - 这张页上没有 → 新起一路（第 20 步取消了**按活页数**的硬顶；
+ *   第 22 步改由配置项 `maxConcurrentAgentTasks` 管并发，默认 1 —— 见下面的 A1.5 注释）；
  * - 别路（别的页）**完全不动** —— 第二句不会把第一张降级成不能动的占位。
  *
  * 第 21 步：循环的**脑在服务端**。这里要么用渲染层带下来的 loopId（/chat/stream 已经建好），
@@ -495,6 +519,29 @@ function startAgentLoop(
     // 旧那一路在服务端的循环也要停：否则它还会被问下一步（白烧 token）
     if (prev.loopId) void agentPost('/agent/loop/stop', { loopId: prev.loopId, reason: 'superseded' }).catch(() => undefined);
     notifyResume(prev);
+  } else {
+    /**
+     * 第 22 步 · A1.5：**并发上限**（默认 1，设置里可调，绝不写死）。
+     *
+     * 「同一张页上的新指令覆盖旧指令」不算新增一路，所以只在 `!prev` 时判。
+     * 超限就**拒绝发车**并把话说清楚 —— 既不静默丢弃，也不偷偷挤掉正在跑的那一路。
+     * 一期把默认值定成 1，是为了让「驾驶状态按 target 独立存储」的数据结构先跑起来；
+     * 以后在设置里把它调大就是真并行，**不需要改数据结构**（这正是 A1.5 的意思）。
+     */
+    const limit = getSettings().maxConcurrentAgentTasks;
+    if (lanes.size >= limit) {
+      emitAgent(
+        {
+          kind: 'note',
+          level: 'info',
+          text:
+            `现在已经有 ${lanes.size} 路在驾驶了，并发上限是 ${limit}（可以在设置里调大）。` +
+            '要换一张页跑，先对正在跑的那张点「停」，或者把上限调大。',
+        },
+        wcId,
+      );
+      return getTaskState();
+    }
   }
 
   const lane: Lane = {
@@ -517,7 +564,11 @@ function startAgentLoop(
   const detail = fresh
     ? `AI 驾驶中 · 任务：${goal.slice(0, 36)}`
     : `继续任务（先读当前页）：${goal.slice(0, 36)}`;
-  const state = takeoverRun(lanes.size > 1 ? `${lanes.size} 路驾驶中 · 本路任务：${goal.slice(0, 30)}` : detail);
+  // 第 22 步：状态机**按 target**，所以接管时要把「哪一张页」说清楚
+  const state = takeoverRun(
+    wcId,
+    lanes.size > 1 ? `${lanes.size} 路驾驶中 · 本路任务：${goal.slice(0, 30)}` : detail,
+  );
 
   void (async () => {
     // 1) 拿到这一路的循环 id（渲染层没带就自己建一个：同一条服务端引擎，没有第二套）
@@ -549,7 +600,8 @@ function startAgentLoop(
         }),
       // 第 17 步：动作一律打到**这一路自己的那张页**上（两路并行时绝不能盲选 guest）
       exec: (action) => drive(action, wcId),
-      isPaused: () => isDrivingPaused(),
+      // 第 22 步：暂停门按 target 判 —— 只问**这一路自己那张页**有没有被按住
+      isPaused: () => isDrivingPaused(wcId),
       aborted: () => lane.aborted,
       emit: (payload) => {
         if (payload.kind === 'ask' || payload.kind === 'sensitive') lane.awaiting = true;
@@ -567,7 +619,8 @@ function startAgentLoop(
         lane.awaiting = true;
         emitAgent({ kind: 'sensitive', fieldReason: 'sensitive', message: question }, wcId);
       },
-      phase: setExternalPhase,
+      // 第 22 步：外部循环汇报的状态同样落到**这一路那张页**上
+      phase: (next, detail) => setExternalPhase(wcId, next, detail),
       taskStart: async (g) => {
         try {
           const r = await agentPost<{ taskId: number }>('/agent/task/start', { goal: g });
@@ -610,7 +663,7 @@ function startAgentLoop(
       // 循环本体不抛穿（内部都 catch 了）；真到这就是编程错误，也得说人话而不是崩
       console.error('[agent] 循环异常：', err);
       emitAgent({ kind: 'note', level: 'error', text: `驾驶员内部错误：${(err as Error).message}` }, wcId);
-      setExternalPhase('failed', `驾驶员内部错误 — ${(err as Error).message}`);
+      setExternalPhase(wcId, 'failed', `驾驶员内部错误 — ${(err as Error).message}`);
       finishLane(lane, 'brain_failed');
     });
   return state;
@@ -624,6 +677,19 @@ function finishLane(lane: Lane, reason: string): void {
   console.log(`[agent] 第 ${lane.wcId} 路循环结束：${reason}`);
   if (lane.aborted) {
     pendingGoals.delete(lane.wcId); // 被新指令顶掉：旧目标不再提起
+    /**
+     * 第 22 步：把**这张页**的状态收干净，否则聚合视图会一直显示「AI 驾驶中」
+     * （用户点了「停」、状态却永远停在 running，确认按钮跟着一直是灰的）。
+     *
+     * 但要小心两种「已中止」：
+     *   - 同一张页上**换了新的一路**（最新指令优先）→ 绝不能动状态，否则会把新循环的
+     *     running 覆盖成 idle；
+     *   - 用户停手 / 登出（`abortAllLanes` 已把 lanes 清空）→ 这时才收。
+     */
+    const current = lanes.get(lane.wcId);
+    if (!current || current === lane) {
+      setExternalPhase(lane.wcId, 'idle', '已停手（这一路已结束）');
+    }
     return;
   }
   if (reason === 'done' || reason === 'read_failed' || reason === 'brain_failed') {
@@ -632,14 +698,26 @@ function finishLane(lane: Lane, reason: string): void {
     // paused / ask_user / stuck / budget：留着目标等「继续」或用户答复
     pendingGoals.set(lane.wcId, lane.goal);
   }
-  if (lanes.size > 0) {
-    setExternalPhase('running', `${lanes.size} 路仍在驾驶中（另一路已停：${reason}）`);
-    return;
-  }
-  if (reason === 'done') setExternalPhase('done', `完成 — ${lane.goal.slice(0, 40)}`);
-  else if (reason === 'paused' || reason === 'ask_user' || reason === 'stuck' || reason === 'budget') {
-    setExternalPhase('paused', `等你的下一步：${lane.goal.slice(0, 30)}`);
-  } else setExternalPhase('failed', `驾驶员已停止（${reason}）`);
+  /**
+   * 第 22 步：状态按 target 存 —— 这一路如实记成**它自己的结局**。
+   *
+   * 以前这里会把**全局**状态硬写成 running 并说「N 路仍在驾驶中」；
+   * 现在「还有别的路在跑」由左栏的聚合视图自然体现（它会挑一条在跑的显示），
+   * 不需要把已经停下的这一路也说成 running。
+   */
+  const mine: TaskPhase =
+    reason === 'done'
+      ? 'done'
+      : reason === 'paused' || reason === 'ask_user' || reason === 'stuck' || reason === 'budget'
+        ? 'paused'
+        : 'failed';
+  const tail =
+    mine === 'done'
+      ? `完成 — ${lane.goal.slice(0, 40)}`
+      : mine === 'paused'
+        ? `等你的下一步：${lane.goal.slice(0, 30)}`
+        : `驾驶员已停止（${reason}）`;
+  setExternalPhase(lane.wcId, mine, tail);
 }
 
 ipcMain.handle(

@@ -18,6 +18,7 @@ import type {
   MemoryEntry,
   MemoryLayerList,
   TaskState,
+  WorkbenchSettings,
 } from '@ai-workbench/shared';
 import {
   BrowserPanel,
@@ -174,6 +175,18 @@ interface CurrentTask {
 /** 后端地址：默认 127.0.0.1:8787；联调别的端口时在 devtools 里 setItem('workbench.apiBase', ...) */
 const API_BASE = () => localStorage.getItem('workbench.apiBase') || 'http://127.0.0.1:8787';
 const TOKEN_KEY = 'workbench.token';
+
+/**
+ * 第 22 步：可调配置的**兜底值** —— `packages/shared` 里 `DEFAULT_SETTINGS` 的第二份。
+ *
+ * 只用于「主进程还没把配置同步过来」的那一瞬间（首帧）。正常路径永远以主进程为准
+ * （挂载时 getSettings 拉一次，之后跟随 'settings' 广播）。
+ * 之所以不复用 shared 的运行时值：渲染层至今只从 shared 取类型，不引入打包期依赖更稳。
+ */
+const SETTINGS_FALLBACK: WorkbenchSettings = {
+  maxConcurrentAgentTasks: 1,
+  maxBrowserInstances: 4,
+};
 
 async function authFetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
@@ -412,6 +425,13 @@ export default function App() {
     step: 0,
     blocked: false,
   });
+  /**
+   * 第 22 步：可调配置的镜像（权威副本在主进程 userData 下的 JSON）。
+   * 挂载时拉一次 + 跟随 'settings' 广播；`settingsRef` 给开页等同步逻辑取「此刻」的值。
+   */
+  const [settings, setSettings] = useState<WorkbenchSettings>(SETTINGS_FALLBACK);
+  const settingsRef = useRef<WorkbenchSettings>(settings);
+  settingsRef.current = settings;
   const [input, setInput] = useState('');
   /**
    * 第 15 步：**一个智能体一份聊天**。
@@ -545,6 +565,22 @@ export default function App() {
       ...c,
       messages: c.messages.concat({ id: Date.now() + Math.floor(Math.random() * 1000), role: 'assistant', text }),
     }));
+  };
+
+  /**
+   * 第 22 步：改可调配置（并发数 / 多实例上限）。
+   *
+   * 主进程是权威：它会夹到合法区间、落盘，并广播 'settings'。
+   * 所以这里**不本地猜结果**，用返回/广播的值回填（手输越界会立刻被纠正回来）。
+   */
+  const onSettingsChange = async (patch: Partial<WorkbenchSettings>): Promise<void> => {
+    const bridge = window.workbench;
+    if (!bridge) return;
+    try {
+      setSettings(await bridge.setSettings(patch));
+    } catch {
+      setChatNote('改配置没成功（preload 桥异常），数值保持原样。');
+    }
   };
 
   /**
@@ -1070,6 +1106,8 @@ export default function App() {
     onNote: setChatNote,
     currentAgentId: curAgentId,
     getCurrentAgent: () => curAgentRef.current,
+    // 第 22 步 · D：多实例上限由主进程的配置说了算（改配置立刻生效，不用重建 hook）
+    getMaxInstances: () => settingsRef.current.maxBrowserInstances,
   });
 
   useEffect(() => {
@@ -1105,6 +1143,20 @@ export default function App() {
       }
     });
 
+    // 第 22 步：可调配置同样「初始拉一次 + 跟随广播」，主进程是权威
+    bridge
+      .getSettings()
+      .then((s) => setSettings(s))
+      .catch(() => undefined); // 拉不到就先用兜底值，不打断界面
+    const offSettings = bridge.on('settings', (payload) => {
+      if (!payload) return;
+      try {
+        setSettings(JSON.parse(payload) as WorkbenchSettings);
+      } catch {
+        /* 坏负载忽略，等下一次广播 */
+      }
+    });
+
     // 第 18 步：主进程的浏览器指令交给**浏览器工作区**处理（它才知道 tab 的事）。
     // 'open' 开/复用一张页；'focus'（敏感字段等待时会发）确保那张页存在并把焦点给它。
     // 'show' / 'hide' 不再有对应界面（网页始终在中栏工作区里），保留订阅只是不炸。
@@ -1126,6 +1178,7 @@ export default function App() {
       offHide();
       offFocus();
       offState();
+      offSettings();
     };
   }, []);
 
@@ -1623,6 +1676,43 @@ export default function App() {
             </button>
           </div>
           {pwMsg && <div className="small">{pwMsg}</div>}
+          {/*
+            第 22 步：浏览器可调配置（A1.5 的并发数 / D 的多实例上限）。
+            不弹独立设置窗、不开新 BrowserWindow —— 就摆在这儿（沿用既有设计）。
+            主进程是权威：输入越界会被夹回来，改完立刻生效并落盘到 userData。
+          */}
+          <div className="small">浏览器设置</div>
+          <div className="settingsRow">
+            <label className="small" htmlFor="setConcurrency">
+              同时驾驶路数
+            </label>
+            <input
+              id="setConcurrency"
+              className="authInput settingsRow__num"
+              type="number"
+              min={1}
+              max={8}
+              value={settings.maxConcurrentAgentTasks}
+              onChange={(e) => void onSettingsChange({ maxConcurrentAgentTasks: Number(e.target.value) })}
+            />
+          </div>
+          <div className="settingsRow">
+            <label className="small" htmlFor="setMaxPages">
+              最多同时开页
+            </label>
+            <input
+              id="setMaxPages"
+              className="authInput settingsRow__num"
+              type="number"
+              min={1}
+              max={20}
+              value={settings.maxBrowserInstances}
+              onChange={(e) => void onSettingsChange({ maxBrowserInstances: Number(e.target.value) })}
+            />
+          </div>
+          <div className="small">
+            并发默认 1：一期只跑一路（调大即解锁多实例并行，数据结构无需改）。开页上限默认 4：到顶只拒绝新开，绝不关掉已有页。
+          </div>
           {/* 第 15 步：两层记忆分开展示——上面那份是「这个人」的，下面那份是当前智能体的 */}
           <div className="buttons-row">
             <button type="button" className="btn" onClick={() => setUserMemOpen((v) => !v)}>

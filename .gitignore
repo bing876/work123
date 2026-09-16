@@ -18,6 +18,10 @@ pnpm-debug.log*
 .env
 .env.local
 
+# NVIDIA 驱动在本机跑 Electron 时自己写出来的日志目录（umdlogs），是运行时残留，不是源码。
+# 不写死单一路径：驱动按 cwd 落盘，任何层级的同名目录都不该进版本库。
+NVIDIA Corporation/
+
 # 编辑器 / 系统
 .DS_Store
 Thumbs.db

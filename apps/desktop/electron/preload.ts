@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { IpcRendererEvent } from 'electron';
-import type { BrowserAction, BrowserEvent, WorkbenchBridge } from '@ai-workbench/shared';
+import type { BrowserAction, BrowserEvent, WorkbenchBridge, WorkbenchSettings } from '@ai-workbench/shared';
 
 /**
  * preload —— 渲染进程与主进程之间唯一的桥。
@@ -33,7 +33,9 @@ const bridge: WorkbenchBridge = {
   resumeDriving: () => ipcRenderer.invoke('workbench:pause-driving', false),
 
   // ---- 第 4 步：任务状态机（权威状态在主进程，这里只发指令 / 取镜像）----
-  startTask: () => ipcRenderer.invoke('workbench:task:start'),
+  // 第 22 步：启动任务必须点名要驾驶哪张页（主进程不再盲选第一个 webview）
+  startTask: (targetWebContentsId?: number) =>
+    ipcRenderer.invoke('workbench:task:start', targetWebContentsId),
   pauseTask: () => ipcRenderer.invoke('workbench:task:pause'),
   resumeTask: () => ipcRenderer.invoke('workbench:task:resume'),
   resetTask: () => ipcRenderer.invoke('workbench:task:reset'),
@@ -62,6 +64,11 @@ const bridge: WorkbenchBridge = {
   // ---- 第 8 步：结果文档下载 + 服务端任务快照（红点以它为准）----
   downloadDoc: (taskId: number, apiBase: string, token: string) =>
     ipcRenderer.invoke('workbench:doc:download', taskId, apiBase, token),
+
+  // ---- 第 22 步：可调配置（并发数 / 多实例上限）。权威副本在主进程 userData 下的 JSON ----
+  getSettings: () => ipcRenderer.invoke('workbench:settings:get'),
+  setSettings: (patch: Partial<WorkbenchSettings>) =>
+    ipcRenderer.invoke('workbench:settings:set', patch),
 
   /**
    * 简易订阅：把主进程发来的 'workbench:browser:*' 转成回调。
