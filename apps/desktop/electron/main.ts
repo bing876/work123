@@ -288,7 +288,7 @@ ipcMain.handle('workbench:task:state', () => getTaskState());
  * 硬顶 10（本步修订：2 → 10）：多出来的开页请求在渲染层排队或顶掉最旧那张空闲页，
  * 主进程这里再兜一道。
  *
- * ⚠️ 必须与渲染层的 `MAX_LIVE_PAGES`（apps/desktop/src/browserCard.tsx）保持一致 ——
+ * ⚠️ 必须与渲染层的 `MAX_LIVE_PAGES`（apps/desktop/src/browser/url.ts）保持一致 ——
  * 主进程不能 import 渲染层代码，所以这里是同值的第二份，改一处要同时改两处。
  */
 const MAX_LANES = 10;

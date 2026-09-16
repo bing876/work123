@@ -1,4 +1,3 @@
-import type { DetailedHTMLProps, HTMLAttributes } from 'react';
 import type { WorkbenchBridge } from '@ai-workbench/shared';
 
 declare global {
@@ -6,22 +5,12 @@ declare global {
     /** 由 electron/preload.ts 通过 contextBridge 注入 */
     workbench?: WorkbenchBridge;
   }
-
-  namespace JSX {
-    interface IntrinsicElements {
-      /**
-       * Electron 的 <webview> 标签（需要主窗口 webPreferences.webviewTag: true）。
-       * React 本身不认识这个标签，这里补上类型声明。
-       */
-      webview: DetailedHTMLProps<HTMLAttributes<HTMLElement>, HTMLElement> & {
-        src?: string;
-        /** 独立会话分区，例如 persist:workbench-browser */
-        partition?: string;
-        allowpopups?: string;
-        useragent?: string;
-      };
-    }
-  }
 }
+
+/**
+ * 第 18 步：<webview> 的 JSX 类型声明搬到了浏览器模块自己家：
+ *   apps/desktop/src/browser/webview.d.ts
+ * 因为只有那块 UI 用得到它（边界：浏览器相关的东西都收在 browser/ 里）。
+ */
 
 export {};
