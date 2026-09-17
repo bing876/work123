@@ -43,12 +43,32 @@ function clampValue(key: keyof WorkbenchSettings, raw: unknown): number {
   return Math.min(range.max, Math.max(range.min, Math.round(n)));
 }
 
-/** 任意输入 → 一份**完整且合法**的配置（缺字段补默认、越界夹回来） */
+/**
+ * 任意输入 → 一份**完整且合法**的配置（缺字段补默认、越界夹回来）
+ *
+ * ⚠️ **每个字段都必须在这里显式列一遍** —— 这就是子阶段 A 那次「新旧默认值合并」的做法：
+ * 老版本落盘的 `workbench-settings.json` 里没有新字段，`clampValue` 会给它回落到
+ * `DEFAULT_SETTINGS`，于是**老文件 + 新代码 = 新字段拿到默认值**。
+ * 反过来，如果偷懒写成 `{...DEFAULT_SETTINGS, ...src}`，旧文件里那些**被夹过**的字段
+ * 会盖住新默认值（子阶段 A 真踩过：改默认值不生效，因为磁盘上的老值说了算）。
+ *
+ * Phase 4 新加的 8 个资源字段走的就是这条路：**用户不手改，也会自动拿到本阶段定案的默认值**，
+ * 不需要写迁移脚本、也不需要等"测出问题再回头补"。
+ */
 export function normalizeSettings(raw: unknown): WorkbenchSettings {
   const src = (raw ?? {}) as Partial<Record<keyof WorkbenchSettings, unknown>>;
   return {
     maxConcurrentAgentTasks: clampValue('maxConcurrentAgentTasks', src.maxConcurrentAgentTasks),
     maxBrowserInstances: clampValue('maxBrowserInstances', src.maxBrowserInstances),
+    // Phase 4：资源守护者（阈值 / 频率 / 开关）
+    resourceGuardEnabled: clampValue('resourceGuardEnabled', src.resourceGuardEnabled),
+    resourceSampleMs: clampValue('resourceSampleMs', src.resourceSampleMs),
+    resourceMemHealthMB: clampValue('resourceMemHealthMB', src.resourceMemHealthMB),
+    resourceMemWarnMB: clampValue('resourceMemWarnMB', src.resourceMemWarnMB),
+    resourceCpuHealthPct: clampValue('resourceCpuHealthPct', src.resourceCpuHealthPct),
+    resourceCpuWarnPct: clampValue('resourceCpuWarnPct', src.resourceCpuWarnPct),
+    resourceSysMemGuard: clampValue('resourceSysMemGuard', src.resourceSysMemGuard),
+    resourceSysMemFloorMB: clampValue('resourceSysMemFloorMB', src.resourceSysMemFloorMB),
   };
 }
 

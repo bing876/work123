@@ -754,9 +754,15 @@ def main():
         wc = wl[0]['wcId']
         evidence['task']['wcId'] = wc
         evidence['task']['partition'] = wl[0]['partition']
-        check('这张页的分区仍按智能体隔离（persist:workbench-browser-agent-<A1>）',
-              wl[0]['partition'] == 'persist:workbench-browser-agent-%d' % a1['id'],
-              'partition=%s' % wl[0]['partition'])
+        # 【已随 Phase 3 更新】Phase 3 已把分区规则从"按智能体"改成"按项目"
+        # （`persist:workbench-browser-agent-<agentId>` → `persist:workbench-browser-project-<projectId>`，
+        #  并已在 Phase 3 验收里证明老规则不再写任何新目录）。
+        # 这条断言原先钉的是老规则，Phase 3 之后必然红 —— 属于**被取代的期望值**，不是回归。
+        # 语义（同一项目内复用同一套登录态 / 分区不是全局混用）保持不变，只把规则换成现行规则。
+        check('这张页的分区按**项目**隔离（persist:workbench-browser-project-<项目A>）'
+              '—— Phase 3 起规则由"按智能体"改为"按项目"',
+              wl[0]['partition'] == 'persist:workbench-browser-project-%d' % pa_id,
+              'partition=%s 期望=persist:workbench-browser-project-%d' % (wl[0]['partition'], pa_id))
 
         ok, _, _ = wait_until(lambda: (lambda h: h.get('llmCalls', 0) >= 1 and h.get('liveLoops', 0) >= 1)(http_json('/health')[1]),
                               timeout=40, interval=0.6)

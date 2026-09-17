@@ -248,6 +248,27 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // ---- 重页（供 Phase 4 第 7 节的「自然负载」用）----
+  //
+  // 为什么需要它：验收用的 /page-* 只有 3~4 个正文节点，而驱动员的 read_page 最多要抓
+  // **1500 个正文节点**（driver 里 `h1..p/li/td` 的选择器 + cap 1500）——
+  // 真实站点通常几百到几千个，所以只拿 5 行的验收页去量"跑任务的资源成本"，
+  // 量到的是**下界**，甚至可能低估一个数量级。
+  // 这里按 n 生成正文节点（默认 2000 → 正好吃满 1500 的 cap），用来对照同一并发下
+  // 「页变重」对整机 CPU 的影响。**只新增路由，不动 /page-***。
+  if (req.method === 'GET' && url.pathname.startsWith('/page-heavy-')) {
+    const n = Math.max(1, Math.min(6000, Number(url.pathname.slice('/page-heavy-'.length)) || 2000));
+    const rows = [];
+    for (let i = 0; i < n; i += 1) {
+      rows.push(`<h3>重页小节 ${i + 1}</h3><p>第 ${i + 1} 段正文：真实站点的一屏内容，用来让快照抽取有真东西可抽。</p>`);
+    }
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(`<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>重页 HEAVY-${n}-${argName}</title></head>
+<body><h1>重页 ${n} 节点</h1><p>这是给「自然负载」用的重页。</p>${rows.join('')}</body></html>`);
+    return;
+  }
+
   // ---- 测试页 ----
   if (req.method === 'GET' && url.pathname.startsWith('/page-')) {
     const name = url.pathname.slice(1);

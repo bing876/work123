@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { BrowserInstanceInfo } from '@ai-workbench/shared';
 import { HOME_URL } from './sites';
 import { SOFT_TAB_HINT, hostLabel, sameSite, toHttpUrl } from './url';
 import type { BrowserPageInfo, BrowserTabView } from './types';
@@ -98,6 +99,21 @@ export interface BrowserWorkspace {
   noteOwner: (tabId: number) => void;
 
   /**
+   * Phase 4：记一次「这个实例刚被用过」（用户切到它 / 它导航了 / 它被驾驶员推进一步）。
+   *
+   * 只有时间戳，不产生任何副作用，也不触发渲染 —— 它就是「最久未使用」排序的原料。
+   * 驾驶员推进时由 App.tsx 代调（那边才收得到主进程的 step 事件）。
+   */
+  touchTab: (tabId: number) => void;
+  /**
+   * Phase 4：把当前**所有**浏览器实例（含最后使用时间）摘一份给资源守护者。
+   *
+   * ⚠️ 只报「已经拿到 guest id」的页 —— 还没 dom-ready 的页在主进程那边
+   *    也对应不到进程，报上去只会让排序里多一条对不上的记录。
+   */
+  instanceList: () => BrowserInstanceInfo[];
+
+  /**
    * 给**某个智能体**开页（同站复用只在它自己那些页里找）。
    * 第 20 步：没有上限、没有排队、没有顶掉最旧 —— 一定能开出新页，返回它的 tabId。
    */
@@ -181,6 +197,28 @@ export function useBrowserWorkspace(options: BrowserWorkspaceOptions): BrowserWo
   /** tabId → <webview> 元素 */
   const webviewRefs = useRef<Record<number, HTMLElement | null>>({});
 
+  /**
+   * Phase 4：每个浏览器实例的时间线 —— 「最久未使用」排序的依据。
+   *
+   * 刻意只放 **ref** 不放 state：`lastActiveAt` 每次用时都要变，若走 state 会让
+   * 整块浏览器 UI 跟着重渲染（监控不该成为新的性能负担）。它只在**上报给主进程**时被读，
+   * 而"需要真实时刻"的那几处（授权 / 隔离 / 提示）本来就是事件驱动，不用它触发渲染。
+   */
+  const createdRef = useRef<Record<number, number>>({});
+  const lastActiveRef = useRef<Record<number, number>>({});
+
+  /**
+   * Phase 4：记一次「这个实例刚被用过」。
+   *
+   * 触发点 = 用户切到这张 tab / 这张页导航或标题变化 / 这张页被驾驶员推进一步。
+   * 不做「页面内鼠标点击」级别的追踪：那需要往 guest 页里注入监听（侵入别人的页面），
+   * 而上面四个触发点已经足够回答"哪几个实例最该被关掉"这个问题。
+   */
+  const touchTab = (tabId: number): void => {
+    if (!findTab(tabId)) return;
+    lastActiveRef.current[tabId] = Date.now();
+  };
+
   const note = (text: string): void => onNoteRef.current?.(text);
 
   /** 标签上显示什么：标题优先，兜底域名 */
@@ -257,6 +295,30 @@ export function useBrowserWorkspace(options: BrowserWorkspaceOptions): BrowserWo
     void window.workbench?.browserOwner?.(wcId, t.agentId);
   };
 
+  /**
+   * Phase 4：当前所有浏览器实例（资源守护者排序用）。
+   * `driving` 这里只是初值 —— 主进程会用自己 lanes 的权威值覆盖它（见 resource-guard.ts）。
+   */
+  const instanceList = (): BrowserInstanceInfo[] => {
+    const out: BrowserInstanceInfo[] = [];
+    for (const t of flatTabs()) {
+      const wcId = webContentsIdOf(t.id);
+      if (typeof wcId !== 'number') continue;
+      const created = createdRef.current[t.id] ?? Date.now();
+      out.push({
+        wcId,
+        agentId: t.agentId,
+        projectId: t.projectId,
+        title: label(t),
+        url: t.url || t.bootUrl,
+        createdAt: created,
+        lastActiveAt: lastActiveRef.current[t.id] ?? created,
+        driving: drivingIdsRef.current.includes(t.id),
+      });
+    }
+    return out;
+  };
+
   /** 主进程当前在驾驶哪几张页 → 映射成 tabId（标签圆点） */
   const refreshDriving = async (): Promise<void> => {
     const list = await window.workbench?.agentLanes?.();
@@ -276,6 +338,8 @@ export function useBrowserWorkspace(options: BrowserWorkspaceOptions): BrowserWo
     if (!t) return;
     setActiveFor(t.agentId, tabId);
     setExpanded(true);
+    // Phase 4：切到这张页 = 它刚被用过（「最久未使用」的排序依据）
+    touchTab(tabId);
     window.setTimeout(() => {
       const el = webviewRefs.current[tabId] as unknown as { focus?: () => void } | null;
       el?.focus?.();
@@ -292,6 +356,7 @@ export function useBrowserWorkspace(options: BrowserWorkspaceOptions): BrowserWo
     }
     const t = findTab(tabId);
     if (!t) return;
+    touchTab(tabId); // Phase 4：导航也是「用过」
     setBucket(
       t.agentId,
       bucketOf(t.agentId).map((x) => (x.id === tabId ? { ...x, url, title: hostLabel(url) } : x)),
@@ -308,6 +373,9 @@ export function useBrowserWorkspace(options: BrowserWorkspaceOptions): BrowserWo
     const wcId = webContentsIdOf(tabId);
     if (typeof wcId === 'number') void window.workbench?.agentDrop?.(wcId);
     delete webviewRefs.current[tabId];
+    // Phase 4：实例没了，它的时间线也一起清掉（否则 tabId 复用时会认错）
+    delete createdRef.current[tabId];
+    delete lastActiveRef.current[tabId];
     setBucket(
       t.agentId,
       bucketOf(t.agentId).filter((x) => x.id !== tabId),
@@ -389,6 +457,10 @@ export function useBrowserWorkspace(options: BrowserWorkspaceOptions): BrowserWo
         title: hostLabel(url),
       }),
     );
+    // Phase 4：记下建页时刻（时间线的起点）—— 放在"过了上限检查"之后，
+    // 免得被拒的开页请求在 ref 里留一条对不上的时间线。
+    createdRef.current[id] = Date.now();
+    lastActiveRef.current[id] = createdRef.current[id];
     setActiveFor(agentId, id);
     setExpanded(true);
     if (bucket.length + 1 === SOFT_TAB_HINT) {
@@ -467,6 +539,7 @@ export function useBrowserWorkspace(options: BrowserWorkspaceOptions): BrowserWo
   const notePageInfo = (tabId: number, info: BrowserPageInfo): void => {
     const t = findTab(tabId);
     if (!t) return;
+    touchTab(tabId); // Phase 4：页面自己动了（点链接 / SPA 跳转 / 标题变化）= 它刚被用过
     setBucket(
       t.agentId,
       bucketOf(t.agentId).map((x) =>
@@ -501,6 +574,8 @@ export function useBrowserWorkspace(options: BrowserWorkspaceOptions): BrowserWo
     registerWebview,
     notePageInfo,
     noteOwner,
+    touchTab,
+    instanceList,
     openUrl,
     openHome,
     openNewTab,

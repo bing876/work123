@@ -36,6 +36,7 @@ import {
   isPureOpenCommand,
   useBrowserWorkspace,
 } from './browser';
+import { useResourceGuard } from './resources/useResourceGuard';
 
 /**
  * 第 2 步（内嵌版）「脸和门」：
@@ -204,12 +205,21 @@ const TOKEN_KEY = 'workbench.token';
  * 之所以不复用 shared 的运行时值：渲染层至今只从 shared 取类型，不引入打包期依赖更稳。
  */
 const SETTINGS_FALLBACK: WorkbenchSettings = {
-  // ⚠️ 这两个数必须与 packages/shared 的 DEFAULT_SETTINGS 保持一致（权威值在主进程 settings.ts，
+  // ⚠️ 这几个数必须与 packages/shared 的 DEFAULT_SETTINGS 保持一致（权威值在主进程 settings.ts，
   // 这里只是首帧兜底）。之所以不复用 shared 的运行时值：渲染层至今只从 shared 取**类型**，
   // 不引入打包期依赖更稳 —— 代价就是**改默认值时要记得同步这一处**。
-  // 当前：并发默认 20（子阶段 A 起）、开页上限默认 4。
+  // 当前：并发默认 20（子阶段 A 起）、开页上限默认 4；
+  // Phase 4 新增的资源守护者字段（开关 / 频率 / 两档阈值 / 系统内存兜底）同样照抄一份。
   maxConcurrentAgentTasks: 20,
   maxBrowserInstances: 4,
+  resourceGuardEnabled: 1,
+  resourceSampleMs: 5000,
+  resourceMemHealthMB: 3072,
+  resourceMemWarnMB: 4096,
+  resourceCpuHealthPct: 20,
+  resourceCpuWarnPct: 35,
+  resourceSysMemGuard: 0,
+  resourceSysMemFloorMB: 1536,
 };
 
 async function authFetchJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -1357,6 +1367,32 @@ export default function App() {
     getProjectOfAgent: (agentId: number) => agentProjectRef.current.get(agentId) ?? null,
   });
 
+  /**
+   * Phase 4：资源守护者（持续资源监控）。
+   *
+   * 采集与判定全在主进程（那边才有 app.getAppMetrics 与 lanes 的权威视图），
+   * 这边只做两件事：把**浏览器实例清单 + 最后使用时间**报上去（「最久未使用」排序要用），
+   * 以及收到警戒提示时**复用既有的单行人话通道**说一句 —— 本阶段不新增任何 UI 元素与样式。
+   *
+   * 红线照旧：它不关任何页、不限开页、不插进驾驶循环；关掉它（配置 resourceGuardEnabled=0）
+   * 也只是不再采集与提示，浏览器行为一模一样。
+   */
+  const resources = useResourceGuard({
+    ws: browser,
+    onAlert: (alert) => setChatNote(alert.text),
+  });
+
+  /**
+   * 配置一变（阈值 / 采集频率 / 开关）就把快照重拉一次。
+   *
+   * 主进程那边本来就按新配置在算，这里只是让**读出来的那份视图**跟上 ——
+   * 否则界面上还挂着旧阈值，看着像"改了没用"。本阶段没有资源相关的 UI，
+   * 这一步是为 UI 阶段准备的（也让验收里"改阈值立刻生效"这件事有据可查）。
+   */
+  useEffect(() => {
+    void resources.refresh();
+  }, [settings, resources.refresh]);
+
   useEffect(() => {
     const bridge = window.workbench;
 
@@ -1448,6 +1484,9 @@ export default function App() {
        * 再把话落回那个智能体的聊天里。两路分属两个智能体时，绝不把 A 的步摘要写进 B。
        */
       const tabId = typeof p.wcId === 'number' ? browser.tabIdOfWebContents(p.wcId) : null;
+      // Phase 4：主进程报事件 = 这张页刚被驾驶员推进一步 = 它刚被用过
+      //（「最久未使用」排序靠这条；正在跑任务的实例因此不会被排到最前面去挨关）
+      if (tabId !== null) browser.touchTab(tabId);
       const ownerAgent = (tabId !== null ? browser.ownerOf(tabId) : undefined) ?? curAgentRef.current;
       const say = (text: string) => {
         if (ownerAgent !== null && ownerAgent !== undefined) pushChatLineFor(ownerAgent, text);

@@ -18,6 +18,7 @@ import {
 import { runToolLoop } from './agent';
 import { startSensitiveAutoResume } from './driver';
 import { getSettings, onSettingsChange, setSettings } from './settings';
+import { initResourceGuard, syncDrivingFlags } from './resource-guard';
 import type {
   AgentEventPayload,
   AgentLoopNextResult,
@@ -1032,6 +1033,19 @@ if (!gotTheLock) {
     }
 
     createMainWindow();
+
+    /**
+     * Phase 4：资源守护者 —— 持续采集本应用的内存 / CPU、按两档阈值判定、落盘并暴露 IPC。
+     *
+     * 注入两样东西：
+     *   - `sendToMainWindow`：警戒提示往渲染层广播（本阶段复用既有单行提示通道，不新增 UI）；
+     *   - `getDriving`：**有未结束任务的页**（lanes 里在跑的 + pendingGoals 里挂着等继续的）
+     *     —— 主进程才是权威，提示里"这个别关"必须按它说，不能听渲染层转述。
+     *
+     * ⚠️ 它**不改任何浏览器行为**：不关页、不限开、不插进驾驶循环。
+     *    监控自己出问题时，配置里 `resourceGuardEnabled=0` 就能让它闭嘴，不用改代码。
+     */
+    initResourceGuard(sendToMainWindow, () => [...lanes.keys(), ...pendingGoals.keys()]);
 
     // macOS：点 Dock 图标且无窗口时重建
     app.on('activate', () => {

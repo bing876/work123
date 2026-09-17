@@ -24,42 +24,139 @@ PORT = os.environ.get('WB20_PORT', '9333')
 MATCH = os.environ.get('WB20_MATCH', 'localhost:5273')
 
 
-def _http(path):
-    op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    return json.load(op.open('http://127.0.0.1:%s%s' % (PORT, path), timeout=15))
+def _http(path, tries=3):
+    """
+    读 CDP 的 HTTP 端点。
+
+    这里必须带重试：实测 Chromium 的 /json/list 会**偶发**直接把连接 reset 掉
+    （第 4 阶段第一轮验收就栽在这上面 —— 一次 reset 落在"登录门"那一步，
+    后面 5/8/12 张页全成了 0，连带 9 条断言全红，看起来像功能坏了，其实不是）。
+    重试带退避、成功路径零额外开销，换来的是**一次抖动不再污染整轮结论**。
+    """
+    last = None
+    for k in range(tries):
+        try:
+            op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            return json.load(op.open('http://127.0.0.1:%s%s' % (PORT, path), timeout=15))
+        except Exception as e:  # noqa: BLE001
+            last = e
+            time.sleep(0.2 * (2 ** k))
+    raise RuntimeError('CDP HTTP %s 连续 %d 次失败：%s' % (path, tries, last))
 
 
-def page(url_part=MATCH):
-    for t in _http('/json/list'):
-        if t.get('type') == 'page' and url_part in (t.get('url') or ''):
-            return t
-    raise SystemExit('NO_PAGE for ' + url_part)
+def _find(url_part, kind='page', tries=8, delay=0.5):
+    """
+    在 /json/list 里找目标 —— **带时间窗**，不是"问一次没有就判死"。
+
+    为什么要有这个时间窗（两次真机验收换来的教训）：
+      * 第 4 阶段第一轮：/json/list 一次连接 reset，把"登录门"整段带走；
+      * 第 4 阶段第二轮回归：2-B 那套在 Electron 窗口**刚被确认存在**的几毫秒后调 `page()`，
+        拿到了一份"只有 devtools、没有应用页"的列表 → 直接 NO_PAGE 判死。
+        /json/list 在浏览器进程忙的时候给不出完整目标列表，这是端点本身的性质，
+        不能当成"窗口没了"。
+    所以这里改成：窗口期内反复问，问到了就走。找不到再抛，并把最后看到的列表带上，
+    便于事后判断到底是"真没窗口"还是"端点抖动"。
+    """
+    last_seen = None
+    for k in range(tries):
+        try:
+            lst = _http('/json/list')
+            last_seen = [(t.get('type'), t.get('url')) for t in lst]
+            for t in lst:
+                if kind and t.get('type') != kind:
+                    continue
+                if url_part in (t.get('url') or ''):
+                    return t
+        except Exception as e:  # noqa: BLE001
+            last_seen = 'HTTP 失败：%s' % e
+        time.sleep(delay * (2 ** k) if k < 4 else delay * 8)
+    raise RuntimeError('NO_%s for %s（窗口期内都没出现；最后看到的目标=%s）'
+                       % (kind.upper(), url_part, last_seen))
 
 
-def any_target(url_part):
+def page(url_part=MATCH, tries=8):
+    # 找不到目标时抛 RuntimeError 而**不是** SystemExit：本模块现在主要是被验收脚本
+    # 当库 import 的，SystemExit 属于 BaseException，`except Exception` 兜不住它，
+    # 会把"一次找不到目标"升级成"整轮验收直接退出"。
+    return _find(url_part, kind='page', tries=tries)
+
+
+def any_target(url_part, tries=8):
     """连到任意目标（含 webview 访客）——用来在内嵌页里跑 JS（验 cookie 隔离）。"""
-    for t in _http('/json/list'):
-        if url_part in (t.get('url') or ''):
-            return t
-    raise SystemExit('NO_TARGET for ' + url_part)
+    return _find(url_part, kind=None, tries=tries)
+
+
+# 连接类异常：只有"对面把连接关掉/重置"才重试。
+# 故意**不包括** WebSocketTimeoutException —— 超时可能意味着对面正忙着执行一个
+# 有副作用的调用（点击、输入），重做一遍会变成"点两次"，那不是稳健，是制造新问题。
+_RETRYABLE = (websocket.WebSocketConnectionClosedException, ConnectionResetError,
+              ConnectionAbortedError, BrokenPipeError)
 
 
 class Cdp:
-    def __init__(self, t=None):
-        t = t or page()
-        self.ws = websocket.create_connection(t['webSocketDebuggerUrl'], timeout=90, suppress_origin=True)
+    def __init__(self, t=None, tries=3):
         self.i = 0
-        self.send('Runtime.enable')
+        self._t = t
+        self._connect(tries)
+
+    def _connect(self, tries=3):
+        """
+        连一次并启用 Runtime —— **握手整体可重试**。
+
+        第二轮回归里 Phase 3 就是栽在这里：ws 连上了，可紧接着 `Runtime.enable` 的
+        recv 报 "Connection to remote host was lost."。上一版只对 create_connection
+        做了重试，握手半途掉线就漏过去了 —— 结果一次抖动 = 1 条失败断言。
+        现在把"连 + 启用"当成一个整体重做。
+        """
+        last = None
+        for k in range(tries):
+            try:
+                target = self._t or page()
+                self.ws = websocket.create_connection(target['webSocketDebuggerUrl'],
+                                                      timeout=90, suppress_origin=True)
+                self._t = target          # 记住目标，掉线后能原地重连
+                self.i += 1
+                self.ws.send(json.dumps({'id': self.i, 'method': 'Runtime.enable', 'params': {}}))
+                while True:               # 同名/无关通知直接丢，等自己的 id
+                    msg = json.loads(self.ws.recv())
+                    if msg.get('id') == self.i:
+                        break
+                return
+            except Exception as e:  # noqa: BLE001
+                last = e
+                try:
+                    self.ws.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                time.sleep(0.25 * (2 ** k))
+        raise RuntimeError('CDP 连接+握手连续 %d 次失败：%s' % (tries, last))
 
     def send(self, method, **params):
-        self.i += 1
-        self.ws.send(json.dumps({'id': self.i, 'method': method, 'params': params}))
-        while True:
-            msg = json.loads(self.ws.recv())
-            if msg.get('id') == self.i:
-                if 'error' in msg:
-                    raise SystemExit('CDP error: %s' % msg['error'])
-                return msg.get('result', {})
+        """一次调用；连接被对面关掉时换新连接重做（最多 3 次）。"""
+        last = None
+        for k in range(3):
+            try:
+                self.i += 1
+                self.ws.send(json.dumps({'id': self.i, 'method': method, 'params': params}))
+                while True:
+                    msg = json.loads(self.ws.recv())
+                    if msg.get('id') == self.i:
+                        if 'error' in msg:
+                            # 抛 RuntimeError 而不是 SystemExit：调用方（验收脚本）
+                            # 用 `except Exception` 兜异常，SystemExit 会直接穿过去把整轮带走。
+                            raise RuntimeError('CDP error: %s' % msg['error'])
+                        return msg.get('result', {})
+            except _RETRYABLE as e:
+                last = e
+                if k == 2:
+                    break
+                try:
+                    self.ws.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                time.sleep(0.4 * (2 ** k))
+                self._connect(tries=2)
+        raise RuntimeError('CDP 调用 %s 连续 3 次掉线：%s' % (method, last))
 
     def js(self, expr, await_promise=False):
         r = self.send('Runtime.evaluate', expression=expr, returnByValue=True,

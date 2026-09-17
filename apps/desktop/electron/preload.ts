@@ -1,6 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { IpcRendererEvent } from 'electron';
-import type { BrowserAction, BrowserEvent, WorkbenchBridge, WorkbenchSettings } from '@ai-workbench/shared';
+import type {
+  BrowserAction,
+  BrowserEvent,
+  BrowserInstanceInfo,
+  WorkbenchBridge,
+  WorkbenchSettings,
+} from '@ai-workbench/shared';
 
 /**
  * preload —— 渲染进程与主进程之间唯一的桥。
@@ -82,6 +88,21 @@ const bridge: WorkbenchBridge = {
   getSettings: () => ipcRenderer.invoke('workbench:settings:get'),
   setSettings: (patch: Partial<WorkbenchSettings>) =>
     ipcRenderer.invoke('workbench:settings:set', patch),
+
+  // ---- Phase 4：资源守护者（采集在主进程；这里只读 + 上报实例清单）----
+  /**
+   * 读实时视图（最新采样 / 档位 / 阈值 / 去抖计数 / 落盘目录）。
+   * 这是"数据可查"的正门 —— 后续 UI 阶段的提示界面就读它，本阶段先用它取证。
+   */
+  resourceSnapshot: () => ipcRenderer.invoke('workbench:resources:snapshot'),
+  resourceHistory: (minutes?: number) => ipcRenderer.invoke('workbench:resources:history', minutes),
+  resourceEvents: (limit?: number) => ipcRenderer.invoke('workbench:resources:events', limit),
+  /**
+   * 上报浏览器实例清单（含每个实例的最后使用时间）。
+   * 「最久未使用」排序靠它 —— 主进程看不到标签页；只在**变化时**发，没有固定心跳。
+   */
+  resourceInstances: (list: BrowserInstanceInfo[]) =>
+    ipcRenderer.invoke('workbench:resources:instances', list),
 
   /**
    * 简易订阅：把主进程发来的 'workbench:browser:*' 转成回调。

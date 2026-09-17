@@ -28,9 +28,18 @@ export interface ChatSession {
 /**
  * 内嵌浏览器区域可订阅的事件名
  * （state：第 4 步状态机广播，payload 为 TaskState 的 JSON；
- *   settings：第 22 步配置变更广播，payload 为 WorkbenchSettings 的 JSON）
+ *   settings：第 22 步配置变更广播，payload 为 WorkbenchSettings 的 JSON；
+ *   resources：Phase 4 资源守护者广播，payload 为 ResourceAlert 的 JSON）
  */
-export type BrowserEvent = 'open' | 'show' | 'hide' | 'focus' | 'state' | 'agent' | 'settings';
+export type BrowserEvent =
+  | 'open'
+  | 'show'
+  | 'hide'
+  | 'focus'
+  | 'state'
+  | 'agent'
+  | 'settings'
+  | 'resources';
 
 // ---------------------------------------------------------------------------
 // 第 4 步：任务状态机
@@ -284,6 +293,26 @@ export interface WorkbenchBridge {
    * 返回值是夹过之后的**完整**配置，调用方以它为准。
    */
   setSettings: (patch: Partial<WorkbenchSettings>) => Promise<WorkbenchSettings>;
+
+  // ---- Phase 4：资源守护者（采集在主进程；渲染层只读 + 上报实例清单）----
+  /**
+   * 读资源守护者实时视图（最新采样 + 档位 + 阈值 + 去抖计数 + 落盘目录）。
+   * 这是本阶段「数据可查」的正门：后续 UI 阶段做提示界面时用的就是它。
+   */
+  resourceSnapshot: () => Promise<ResourceGuardSnapshot>;
+  /**
+   * 读历史：最近 `minutes` 分钟内的**汇总点**（60s 粒度）。
+   * 原始 5s 采样只在主进程内存里留最近 1 小时，落盘的只有汇总（不让监控自己变成磁盘负担）。
+   */
+  resourceHistory: (minutes?: number) => Promise<ResourceAggregate[]>;
+  /** 读历史警戒事件（最近的在前？不是——按时间正序，取最后 `limit` 条） */
+  resourceEvents: (limit?: number) => Promise<ResourceAlert[]>;
+  /**
+   * 上报当前浏览器实例清单（含每个实例的最后使用时间）——
+   * 「最久未使用」排序靠它，主进程自己看不到标签页。
+   * 只在**变化时**发（事件驱动），不做固定心跳。
+   */
+  resourceInstances: (list: BrowserInstanceInfo[]) => Promise<void>;
 
   /** 订阅主进程转发过来的 UI 指令，返回取消订阅函数 */
   on: (event: BrowserEvent, callback: (payload?: string) => void) => () => void;
@@ -684,6 +713,36 @@ export interface WorkbenchSettings {
   maxConcurrentAgentTasks: number;
   /** 最多同时开几张内嵌页（默认 4；**只拒绝新开，绝不偷偷关掉已有页**） */
   maxBrowserInstances: number;
+
+  // ---- Phase 4：资源守护者（阈值与采集频率都在这里，**绝不写死在代码里**）----
+  /**
+   * 资源守护者开关：**1 = 开（默认）**，0 = 关。
+   *
+   * 关掉只影响「采集 + 判定 + 提示」，**不影响任何浏览器行为**（不关页、不限开）。
+   * 存在的意义有两个：① 验收时做「开监控 / 关监控」的对照测量；
+   * ② 万一监控自己出问题，用户/我们有一个开关能立刻让它闭嘴（而不是去改代码）。
+   */
+  resourceGuardEnabled: number;
+  /** 采集间隔（毫秒，默认 5000）。见 electron/resource-guard.ts 顶部对频率取舍的说明。 */
+  resourceSampleMs: number;
+  /** 内存健康线（MB，默认 3072）：在这条线以下**完全不打扰用户** */
+  resourceMemHealthMB: number;
+  /** 内存警戒线（MB，默认 4096）：越过它（连续 3 个采样点）触发一次提示 */
+  resourceMemWarnMB: number;
+  /** CPU 健康线（**全机口径**百分比，默认 20） */
+  resourceCpuHealthPct: number;
+  /** CPU 警戒线（**全机口径**百分比，默认 35） */
+  resourceCpuWarnPct: number;
+  /**
+   * 「系统可用内存」兜底信号：**1 = 开，0 = 关（默认关）**。
+   *
+   * 它看的不是本应用占了多少，而是**整机还剩多少**——别的程序先把内存吃掉时，
+   * 本应用占用很正常却照样会卡死，这个信号就是为那种情况准备的。
+   * 默认关是因为它天然更吵（聊的是整机，不只是我们自己）。
+   */
+  resourceSysMemGuard: number;
+  /** 兜底信号的底线（MB，默认 1536）：系统可用内存低于它 → 也算越线 */
+  resourceSysMemFloorMB: number;
 }
 
 /**
@@ -697,10 +756,219 @@ export const SETTINGS_RANGE = {
    */
   maxConcurrentAgentTasks: { min: 1, max: 20 },
   maxBrowserInstances: { min: 1, max: 20 },
+
+  // Phase 4：资源守护者（开关类的用 0/1 —— 本套配置全是数值字段，保持同一形态）
+  resourceGuardEnabled: { min: 0, max: 1 },
+  resourceSampleMs: { min: 1000, max: 60000 },
+  resourceMemHealthMB: { min: 256, max: 65536 },
+  resourceMemWarnMB: { min: 512, max: 131072 },
+  resourceCpuHealthPct: { min: 1, max: 100 },
+  resourceCpuWarnPct: { min: 2, max: 100 },
+  resourceSysMemGuard: { min: 0, max: 1 },
+  resourceSysMemFloorMB: { min: 128, max: 32768 },
 } as const;
 
-/** 默认值（子阶段 A：并发默认 **20**；D：多实例上限默认 **4**） */
+/**
+ * 默认值（子阶段 A：并发默认 **20**；D：多实例上限默认 **4**；Phase 4：资源阈值见下）。
+ *
+ * Phase 4 这几个数的依据（本机 15.82 GB / 12 逻辑核，子阶段 A 实测 8 页 ≈ 0.67~1.04 GB）：
+ *   - 单页边际 ≈ 123 MB → 4 GB ≈ 30 页，是本机内存的 25%；
+ *   - 空闲 CPU 基线只有 0.03~0.23%（全机口径），35% = 约 4.2 个核在满载；
+ *   - 3072/4096 之间留一段「灰区」，避免阈值抖动导致反复提示。
+ * 这三个数**都是可调的**（见上），改配置即可，不需要改代码。
+ */
 export const DEFAULT_SETTINGS: WorkbenchSettings = {
   maxConcurrentAgentTasks: 20,
   maxBrowserInstances: 4,
+  resourceGuardEnabled: 1,
+  resourceSampleMs: 5000,
+  resourceMemHealthMB: 3072,
+  resourceMemWarnMB: 4096,
+  resourceCpuHealthPct: 20,
+  resourceCpuWarnPct: 35,
+  resourceSysMemGuard: 0,
+  resourceSysMemFloorMB: 1536,
 };
+
+// ---------------------------------------------------------------------------
+// Phase 4：资源守护者（持续资源监控）
+//
+// 产品理念：**不写死浏览器数量上限**，而是「接近资源极限时才友好提示」。
+// 所以这一层只做三件事，**任何一件都不改浏览器行为**：
+//   1. 持续采集本应用整体的内存 / CPU（主进程 app.getAppMetrics()，不与任务抢线程）；
+//   2. 两档阈值：健康线以内完全不打扰；越过警戒线触发**一次**提示（不阻止任何操作）；
+//   3. 把数据落盘 + 经 IPC 暴露，供后续 UI 阶段渲染提示界面（本阶段不做正式 UI）。
+//
+// 三条红线（与本阶段边界一一对应）：
+//   - 不设任何写死的实例数量上限（上限仍只有 maxBrowserInstances 那一个可调配置）；
+//   - **绝不自动关闭任何浏览器**，决定权永远在用户手里；
+//   - 提示里必须标出「正在跑任务」的实例，否则用户可能照着列表关掉正在干活的页。
+// ---------------------------------------------------------------------------
+
+/** 资源档位：ok 健康 / elevated 灰区（不提示，只记录）/ warning 警戒（触发提示） */
+export type ResourceLevel = 'ok' | 'elevated' | 'warning';
+
+/** 越线原因（可同时成立）：内存 / CPU / 系统可用内存兜底 */
+export type ResourceReason = 'mem' | 'cpu' | 'sys-mem';
+
+/** 单个 Electron 进程的资源明细（与任务管理器逐进程对齐用） */
+export interface ResourceProcInfo {
+  pid: number;
+  /** Electron 给的进程类型：Browser / Tab / GPU / Utility … */
+  type: string;
+  name?: string;
+  /** 工作集（MB）—— 与 tasklist / 任务管理器的「内存」同口径 */
+  memMB: number;
+  /**
+   * 这个进程占**整机** CPU 的百分比（= Electron `percentCPUUsage` 原值）。
+   *
+   * ⚠️ 别看见它就除以核数：Electron 源码里已经除过了 ——
+   * `cpu_dict.Set("percentCPUUsage", GetPlatformIndependentCPUUsage() / processor_count)`
+   * （`shell/browser/api/electron_api_app.cc`）。所以 12 核机器上一个核满载，这个值读出来是
+   * **8.33**（= 100/12），不是 100。整机口径 100% = 所有逻辑核一起跑满。
+   */
+  cpuPct: number;
+}
+
+/**
+ * 一条资源采样（主进程算好，渲染层只读 —— 采集口径只有一份，避免两边算得不一样）。
+ */
+export interface ResourceSample {
+  /** epoch 毫秒 */
+  at: number;
+  atIso: string;
+  /** 本应用**全部进程**的工作集之和（MB）。判定用的就是它。 */
+  memMB: number;
+  /**
+   * 本应用**全部进程**占整机 CPU 的百分比 = 各进程 `percentCPUUsage` 之和。
+   *
+   * **判定与展示都用它**，且**不要再除核数**：Electron 给的每个进程读数已经是整机口径
+   * （源码里除过 `processor_count` 了），再加总就是"本应用占整机多少"，
+   * 与任务管理器 / `typeperf \Process(*)\% Processor Time` 逐进程求和**同一口径、可直接对比**
+   * （100% = 所有逻辑核跑满）。
+   *
+   * 第一版这里犯的错：把"各进程之和"当成"占一个核的百分比"又除以一次核数 ——
+   * 12 核机器上把 CPU 判定灵敏度整整缩小 12 倍（20% 的警戒线实际要等 240% 才可能触发）。
+   * 真机取证时发现：一个内嵌页跑满一个核，单进程读数 8.25 ≈ 100/12，正是这个口径的证据。
+   */
+  cpuPct: number;
+  /** 把 cpuPct 换算成"相当于几个核"（`cpuPct/100*logicalCores`）—— 只用于文案，不参与判定 */
+  cpuCoresUsed: number;
+  /** 逻辑核数（随样本一起给出，便于复核 cpuPct ↔ 核数之间的换算关系） */
+  logicalCores: number;
+  procCount: number;
+  procs: ResourceProcInfo[];
+  /** 系统可用内存（MB）；**兜底信号关闭时为 null**（不采集就不假装知道） */
+  sysFreeMB: number | null;
+  /** 本机物理内存总量（MB），用于把阈值换算成"占整机多少"给人看 */
+  sysTotalMB: number;
+  /**
+   * 这一点所属的**状态档位**（已去抖，与 ResourceGuardSnapshot.level 同一口径）：
+   * `ok` 健康 / `elevated` 灰区（只记录、不提示）/ `warning` 已进入警戒。
+   */
+  level: ResourceLevel;
+  /**
+   * **这一点自己**的越线原因（**未去抖**；没越线就是空数组）。
+   * 所以会出现「reasons 非空但 level=ok」的采样点 —— 那正是一次还没凑够
+   * 连续 3 点的毛刺，如实记录而不当成问题。
+   */
+  reasons: ResourceReason[];
+}
+
+/** 一个浏览器实例（给「最久未使用」排序用）——由渲染层上报（它才掌握标签页生命周期） */
+export interface BrowserInstanceInfo {
+  /** guest webContents id（实例的唯一身份） */
+  wcId: number;
+  /** 开这张页的智能体（标签页/任务归属仍按它，Phase 3 起没变） */
+  agentId: number;
+  /** 这张页所属项目（登录态归属，Phase 3 起） */
+  projectId: number | null;
+  /** 标签显示名（标题优先，兜底域名） */
+  title: string;
+  url: string;
+  /** 建页时间 */
+  createdAt: number;
+  /** 最后一次「有用」的时间：切到它 / 导航 / 标题变化 / 被驾驶员推进 */
+  lastActiveAt: number;
+  /** **正在被驾驶员操作** —— 提示里必须标出来（别让用户把在干活的页关掉） */
+  driving: boolean;
+}
+
+/** 阈值快照（提示事件里存一份：事后能复核"当时是按哪套阈值判的"） */
+export interface ResourceThresholds {
+  memHealthMB: number;
+  memWarnMB: number;
+  cpuHealthPct: number;
+  cpuWarnPct: number;
+  sysMemGuard: number;
+  sysMemFloorMB: number;
+}
+
+/** 一次警戒提示（主进程拼装好；本阶段只落盘 + 广播，正式样式留给 UI 阶段） */
+export interface ResourceAlert {
+  /** 事件号（同一次警戒只发一个） */
+  id: string;
+  at: number;
+  atIso: string;
+  level: 'warning';
+  /** 触发那一刻的采样 */
+  sample: ResourceSample;
+  reasons: ResourceReason[];
+  thresholds: ResourceThresholds;
+  /**
+   * **最久未使用的排在最前**（按 lastActiveAt 升序）。
+   * 含全部实例；`driving=true` 的实例**不从列表里剔除**，只做标记 ——
+   * 关不关是用户的决定，我们的责任是把"这个正在干活"如实说清楚。
+   */
+  idleRanking: BrowserInstanceInfo[];
+  /** 人话文案（本阶段复用既有单行提示通道显示，UI 阶段可换成正式组件） */
+  text: string;
+}
+
+/**
+ * 一条**汇总**采样（60s 粒度，落盘的就是这个）。
+ *
+ * 为什么落盘的不是原始 5s 点：5s × 86400 = 17280 条/天 ≈ 3.5MB/天，
+ * 而 60s 汇总只要 1440 条/天 ≈ 290KB/天。监控**不能自己变成新的负担**，
+ * 所以落盘只留汇总；原始 5s 点留在主进程内存的环形缓冲里（最近 1 小时）。
+ */
+export interface ResourceAggregate {
+  /** 这个汇总窗口的起点（epoch 毫秒，按 60s 对齐） */
+  windowAt: number;
+  windowAtIso: string;
+  /** 窗口内的点数 */
+  count: number;
+  memAvgMB: number;
+  memMaxMB: number;
+  cpuAvgPct: number;
+  cpuMaxPct: number;
+  /** 窗口内出现过的最高档位 */
+  maxLevel: ResourceLevel;
+}
+
+/** 资源守护者的实时视图（IPC `workbench:resources:snapshot` 的返回） */
+export interface ResourceGuardSnapshot {
+  enabled: boolean;
+  sampleMs: number;
+  /**
+   * 主进程自己的 pid。
+   *
+   * 有了它，"监控自身的开销"才能被**单独**量出来（只看这一个进程的 CPU，
+   * 而不是把整个应用的进程一起算）—— 那正是验收标准③要的那个数。
+   */
+  mainPid: number;
+  level: ResourceLevel;
+  /** 最新一次采样（还没采到时为 null） */
+  sample: ResourceSample | null;
+  thresholds: ResourceThresholds;
+  /** 连续越线计数（去抖用，暴露出来便于验收核对"连续 3 点"这条） */
+  overStreak: number;
+  underStreak: number;
+  lastAlertAt: number | null;
+  /** 同类提示的冷却（毫秒） */
+  cooldownMs: number;
+  /** 落盘位置（数据可查处，供后续 UI / 排查用） */
+  dir: string;
+  /** 内存环形缓冲里现有多少点（默认保留最近 1 小时） */
+  buffered: number;
+}
