@@ -12,7 +12,7 @@ declare global {
     interface IntrinsicElements {
       webview: DetailedHTMLProps<HTMLAttributes<HTMLElement>, HTMLElement> & {
         src?: string;
-        /** 独立会话分区；第 20 步起按智能体：persist:workbench-browser-agent-{id} */
+        /** 独立会话分区；Phase 3 起按**项目**：persist:workbench-browser-project-{projectId} */
         partition?: string;
         allowpopups?: string;
         useragent?: string;

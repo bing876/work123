@@ -17,6 +17,10 @@ import type {
   KnowledgeUploadResult,
   MemoryEntry,
   MemoryLayerList,
+  ProjectCreateResult,
+  ProjectListResult,
+  ProjectSummary,
+  ProjectUpdateResult,
   TaskState,
   WorkbenchSettings,
 } from '@ai-workbench/shared';
@@ -75,7 +79,7 @@ import {
  * 第 13 步「聊天内浏览器卡片 + 收干净右栏」：
  *   - 用户发**明确开网页指令**（打开百度 / 打开抖音 / 打开 https://… / 打开浏览器）时不再要确认：
  *     中栏聊天里直接插一张卡片，卡片里是**真实 <webview>**
- *     （第 20 步起分区按智能体：persist:workbench-browser-agent-{id}；第 18 步起已改挂在中栏工作区），
+ *     （第 20 步起按智能体分桶；Phase 3 起**登录态**按项目：persist:workbench-browser-project-{projectId}；第 18 步起已改挂在中栏工作区），
  *     能点、能在页面输入框打字；卡片上只有「展开 / 收起」一个按钮，不新开窗口、不做多标签；
  *   - 纯闲聊 / 问知识库 / 问「你是谁」：不弹网页、不加载（判定见 browser/sites.ts 的 detectOpenUrl）；
  *   - 右栏驾驶台（开始任务/暂停/继续/我来操作/复位/示例任务/黄框调试区/浏览器开关）全部撤掉，
@@ -115,13 +119,28 @@ import {
  *     聊天里最多留一句人话（单条提示，不列「已关闭」清单）。
  *   - 闲聊不打断驾驶；只有明确的「停」口令才停手（见 browser/intent.ts 的 detectStopIntent）。
  *
- * 第 20 步「每智能体独立浏览器 + 取消活页硬顶」：
- *   - **一个智能体 = 一套独立浏览器**：tab / 当前页 / 滚动 / cookie / 登录态全按智能体分开，
- *     分区是 `persist:workbench-browser-agent-{id}`（见 browser/url.ts 的 partitionFor），
- *     不再用全局的 `persist:workbench-browser`；新建智能体 = 空浏览器。
+ * 第 20 步「每智能体独立浏览器 + 取消活页硬顶」（Phase 3 只动了其中的**登录态粒度**）：
+ *   - **标签页 / 当前页 / 滚动 / 任务** 仍按智能体分开：一个智能体 = 一桶；
+ *   - **登录态粒度 = 项目**（Phase 3 起）：分区是 `persist:workbench-browser-project-{projectId}`
+ *     （见 browser/url.ts 的 partitionFor）——**同项目的智能体共用一套 cookie / 登录态**，
+ *     跨项目完全隔离；**标签页 / 任务 / 暂停继续仍然按 agentId 隔离**，没跟着合并。
  *   - 切智能体只换「哪一桶可见」：**所有页的 webview 一直挂着**，切回来页面和滚动都还在。
  *   - **取消活页上限**：开多少张都行，不再「第 11 张顶掉最旧」；页数多了只提示「开太多会卡」。
  *   - 驾驶只动当前智能体自己的页（点名的 tab 一定来自它自己那一桶）。
+ *
+ * 子阶段 2-B「项目层接进前端（最小化验证，不是最终 UI）」：
+ *   - 左栏顶部加一个**最简项目入口**：能看全部项目、能新建、点一下切换当前项目
+ *     （不做下拉动效 / 双击切换 / 全屏小圆圈这类正式交互，那是后面独立 UI 阶段的事）；
+ *   - 切项目 = 换一份名单：`GET /agents?projectId=<当前项目>` 只画这个项目的智能体，
+ *     知识库列表也按项目重拉（`GET /knowledge?projectId=`）；互不串；
+ *   - **切项目绝不动浏览器**：所有智能体、所有页的 webview 一直挂着（第 20 步的规矩），
+ *     项目 A 里正在跑的那一路驾驶在切到项目 B 之后照旧推进、切回来它还在 ——
+ *     这正是本子阶段最关键的一条验收（用假模型时间戳 + 循环 step 证明，不靠嘴说）；
+ *   - 「＋ 添加」不再发空 body（2-A 起 `asAgentId` 是必填，空 body 会被 400 挡回来）：
+ *     前端从**当前项目**的名单里自动挑 `canCreateAgents === true` 的那个（母鸡；
+ *     默认项目里没有母鸡，由自带小助承担这个角色）当调用者，用户不需要手动选身份。
+ *     挑不到就明确报错、**绝不自作主张猜一个身份**（那等于绕开权限闸）。
+ *   - 分区规则、母鸡调度、项目级记忆都不在本子阶段范围内。
  */
 
 /** 第 18 步：聊天只剩这两种角色 —— 网页不再以消息形式出现在聊天里（看中栏工作区） */
@@ -527,6 +546,31 @@ export default function App() {
   const [agents, setAgents] = useState<AgentView[]>([]);
   const [agentBusy, setAgentBusy] = useState(false);
   const [agentNote, setAgentNote] = useState('');
+  /**
+   * 子阶段 2-B：项目层（**最小化验证版**，不做正式 UI）。
+   *   - `projects` / `curProjectId` 一律以服务端 `/projects` 为准；
+   *   - 两个 ref 是给异步回调读**最新值**用的（闭包会拿到旧的，切项目在异步里最容易串）；
+   *   - `agents` 与 `curProjectId` **永远一起更新**（见 enterProject），
+   *     所以「名单里挑母鸡」不会挑到别的项目的人。
+   */
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [curProjectId, setCurProjectId] = useState<number | null>(null);
+  const curProjectRef = useRef<number | null>(null);
+  const agentsRef = useRef<AgentView[]>([]);
+  agentsRef.current = agents;
+  /**
+   * Phase 3：`agentId → projectId`（**只喂浏览器的分区**，不参与任何 UI 分桶）。
+   *
+   * 为什么要单独一份：`agents` 里只有**当前项目**的名单，切过项目就查不到别的项目的智能体了；
+   * 而浏览器分区要在「这张页属于哪个项目」这件事上永远答得准（答不准就会把登录态串到别的项目）。
+   * 每次拿到名单（`fetchAgentsFor`）就补进来；实在没有的**不猜** —— 返回 null，
+   * 那张页落到兜底分区 `…-project-none`，宁可让它登出，也绝不让它跟真项目混。
+   */
+  const agentProjectRef = useRef<Map<number, number>>(new Map());
+  const [projectsOpen, setProjectsOpen] = useState(false);
+  const [newProjectName, setNewProjectName] = useState('');
+  const [projectBusy, setProjectBusy] = useState(false);
+  const [projectNote, setProjectNote] = useState('');
   /** 第 15 步 · 第一层：用户记忆库（账号级，所有智能体都能读，界面上也列出来） */
   const [userMem, setUserMem] = useState<MemoryEntry[]>([]);
   const [userMemOpen, setUserMemOpen] = useState(false);
@@ -700,13 +744,41 @@ export default function App() {
     }
   };
 
-  /** 拉智能体列表；当前选中的那个不在了就回到第一个（小助） */
-  const loadAgents = async () => {
+  /**
+   * 子阶段 2-B：按项目取智能体名单（**纯取，不动 state**）。
+   *
+   * 拆出来是为了让「切项目」能先把新名单拿到手、再和新项目 id **一次性**写进 state ——
+   * 中间不存在「项目已换、名单还是旧的」那一帧（那种帧里「＋ 添加」会挑到别的项目的母鸡）。
+   * `projectId` 为 null（列表还没回来）时不带参数，保持 2-A 的旧语义（这个账号的全部智能体）。
+   */
+  const fetchAgentsFor = async (projectId: number | null): Promise<AgentListResult | null> => {
+    const sess = sessionRef.current;
+    if (!sess) return null;
+    const qs = projectId === null ? '' : `?projectId=${projectId}`;
+    const r = await authFetchJson<AgentListResult>(`/agents${qs}`, {
+      headers: { authorization: `Bearer ${sess.token}` },
+    });
+    if (sessionRef.current?.token !== sess.token) return null; // 切号期间晚到的响应丢掉
+    /**
+     * Phase 3：顺手登记「这些智能体分别属于哪个项目」（浏览器分区要用它）。
+     * 服务端已经在每条 AgentView 上带 projectId；老响应没带就退回这次查询用的 pid，
+     * 两个都没有 → 不记（那台页会落兜底分区，不跟任何真项目混）。
+     */
+    for (const a of r.agents) {
+      const pid = Number(a.projectId ?? projectId);
+      if (Number.isInteger(pid) && pid > 0) agentProjectRef.current.set(a.id, pid);
+    }
+    return r;
+  };
+
+  /** 拉智能体列表（按当前项目）；当前选中的那个不在了就回到第一个 */
+  const loadAgents = async (projectId?: number | null) => {
     const sess = sessionRef.current;
     if (!sess) return;
+    const pid = projectId === undefined ? curProjectRef.current : projectId;
     try {
-      const r = await authFetchJson<AgentListResult>('/agents', { headers: { authorization: `Bearer ${sess.token}` } });
-      if (sessionRef.current?.token !== sess.token) return;
+      const r = await fetchAgentsFor(pid);
+      if (!r) return;
       setAgents(r.agents);
       setAgentNote('');
       const cur = curAgentRef.current;
@@ -727,6 +799,103 @@ export default function App() {
     }
   };
 
+  // ---- 子阶段 2-B：项目层（最小化验证版；不做正式 UI 交互）----
+  /** 读项目列表；把「当前使用中的项目」同步到 state 与 ref，并返回它 */
+  const loadProjects = async (): Promise<number | null> => {
+    const sess = sessionRef.current;
+    if (!sess) return null;
+    try {
+      const r = await authFetchJson<ProjectListResult>('/projects', {
+        headers: { authorization: `Bearer ${sess.token}` },
+      });
+      if (sessionRef.current?.token !== sess.token) return null;
+      setProjects(r.projects);
+      curProjectRef.current = r.currentProjectId;
+      setCurProjectId(r.currentProjectId);
+      setProjectNote('');
+      return r.currentProjectId;
+    } catch (e) {
+      setProjectNote(`读不到项目列表：${(e as Error).message}`);
+      return null;
+    }
+  };
+
+  /**
+   * 进入某个项目：先把「新项目 id」和「它的名单」**一次性**写进 state，再补拉历史 / 项目记忆 /
+   * 会话状态 / 资料列表。这样中间不会出现「项目已经换了、名单还是上一个项目的」那一帧。
+   *
+   * **绝不碰浏览器**：所有智能体、所有页的 webview 一直挂着（第 20 步的规矩），
+   * 项目 A 里正在跑的那一路驾驶切到 B 之后照旧推进 —— 这是本子阶段最关键的一条验收。
+   */
+  const enterProject = async (id: number): Promise<void> => {
+    const listed = await fetchAgentsFor(id);
+    if (!listed) return;
+    curProjectRef.current = id;
+    setCurProjectId(id);
+    setAgents(listed.agents);
+    setAgentNote('');
+    setChatNote('');
+    setProjMem([]);
+    setProjMemOpen(false);
+    setKnowledgeDocs([]); // 资料按项目隔离：先清空，等新项目的列表回来
+    const first = listed.agents[0] ?? null;
+    curAgentRef.current = first ? first.id : null;
+    setCurAgentId(first ? first.id : null);
+    if (first) {
+      void loadProjectMemory(first.id);
+      void loadAgentHistory(first);
+      void loadAgentState(first.id);
+    }
+    void loadKnowledge(id);
+  };
+
+  /** 切换当前项目：服务端 activate 先落地，再进这个项目（名单与资料一起换） */
+  const switchProject = async (id: number) => {
+    const sess = sessionRef.current;
+    if (!sess || projectBusy || id === curProjectRef.current) return;
+    setProjectBusy(true);
+    setProjectNote('');
+    try {
+      await authFetchJson<ProjectUpdateResult>(`/projects/${id}/activate`, {
+        method: 'POST',
+        body: '{}',
+        headers: { authorization: `Bearer ${sess.token}` },
+      });
+      if (sessionRef.current?.token !== sess.token) return;
+      await enterProject(id);
+      await loadProjects();
+    } catch (e) {
+      setProjectNote(`切换项目没成：${(e as Error).message}`);
+    } finally {
+      setProjectBusy(false);
+    }
+  };
+
+  /** 新建项目（服务端连带建一只母鸡并设为当前项目）→ 直接进这个新项目 */
+  const createProject = async () => {
+    const sess = sessionRef.current;
+    const name = newProjectName.trim();
+    if (!sess || projectBusy || !name) return;
+    setProjectBusy(true);
+    setProjectNote('');
+    try {
+      const r = await authFetchJson<ProjectCreateResult>('/projects', {
+        method: 'POST',
+        body: JSON.stringify({ name }),
+        headers: { authorization: `Bearer ${sess.token}` },
+      });
+      if (sessionRef.current?.token !== sess.token) return;
+      setNewProjectName('');
+      setProjectNote(`项目「${r.project.name}」建好了（自带一只母鸡），已经切过去。`);
+      await enterProject(r.project.id);
+      await loadProjects();
+    } catch (e) {
+      setProjectNote(`建项目没成：${(e as Error).message}`);
+    } finally {
+      setProjectBusy(false);
+    }
+  };
+
   /** 切智能体 = 换一份聊天：换消息列表、换项目记忆 */
   const selectAgent = (agent: AgentView) => {
     if (agent.id === curAgentRef.current) return;
@@ -743,8 +912,28 @@ export default function App() {
   };
 
   /**
+   * 子阶段 2-B：从一份名单里挑出**当前项目**里「有建智能体权限」的那个调用者。
+   *
+   * 规矩：只认 `canCreateAgents` 这个**字段**，不按 kind / 名字猜 —— 闸门就在服务端认这个字段，
+   * 前端这边必须和它同一套口径。默认项目里没有母鸡，由自带小助承担（它也是 true）。
+   * 名单本身已经是按当前项目过滤过的；再加一道 projectId 比对，防止拿到过期的名单。
+   */
+  const pickCreator = (list: AgentView[]): AgentView | null => {
+    const pid = curProjectRef.current;
+    return (
+      list.find(
+        (a) => a.canCreateAgents === true && (pid === null || a.projectId === undefined || a.projectId === pid),
+      ) ?? null
+    );
+  };
+
+  /**
    * 点「添加」：服务端建一个智能体 + 立刻给它建一条空会话，界面直接切到那个新会话。
    * 不弹独立设置窗、不开新 BrowserWindow —— 引导表就摆在这个新会话里。
+   *
+   * 子阶段 2-B：`asAgentId` 从「当前项目里 canCreateAgents=true 的那个」**自动推断**（母鸡 / 小助），
+   * 用户不需要选身份。名单没到位就现拉一次再挑；**挑不到就明确报错，绝不猜一个身份发出去**
+   * （2-A 起 asAgentId 必填、无回落，猜身份 == 绕过权限闸）。
    */
   const addAgent = async () => {
     const sess = sessionRef.current;
@@ -752,12 +941,31 @@ export default function App() {
     setAgentBusy(true);
     setAgentNote('');
     try {
+      let creator = pickCreator(agentsRef.current);
+      if (!creator) {
+        const fresh = await fetchAgentsFor(curProjectRef.current);
+        if (!fresh) return;
+        setAgents(fresh.agents);
+        creator = pickCreator(fresh.agents);
+      }
+      if (!creator) {
+        setAgentNote('这个项目里没有能建智能体的角色（母鸡 / 自带小助），先新建一个项目再试。');
+        return;
+      }
       const r = await authFetchJson<AgentCreateResult>('/agents', {
         method: 'POST',
-        body: '{}',
+        body: JSON.stringify({ asAgentId: creator.id }),
         headers: { authorization: `Bearer ${sess.token}` },
       });
       const a = r.agent;
+      // 归属兜底：万一拿到的是过期名单（那就会落到别的项目），**不要**把它塞进当前列表误导用户。
+      if (curProjectRef.current !== null && a.projectId !== undefined && a.projectId !== curProjectRef.current) {
+        setAgentNote(`新智能体落到了别的项目（项目 ${a.projectId}），这里不显示它；列表已重拉。`);
+        await loadAgents(curProjectRef.current);
+        return;
+      }
+      // Phase 3：把新智能体也登记进「agentId → projectId」（它马上就可能开页，分区要算对）
+      if (curProjectRef.current !== null) agentProjectRef.current.set(a.id, curProjectRef.current);
       setAgents((prev) => prev.concat(a));
       historyLoadedRef.current.add(a.id);
       patchChat(a.id, () => ({ messages: [], convId: a.conversationId }));
@@ -875,11 +1083,16 @@ export default function App() {
 
   // ---- 第 11 步：资料上传/列表。文件直接由当前渲染进程 POST 到本机服务端，
   // 不经过 preload，不开新窗口；multipart 的 Content-Type 必须让浏览器自己带 boundary。 ----
-  const loadKnowledge = async () => {
+  /**
+   * 子阶段 2-B：资料列表**按项目**拉（`?projectId=`）。
+   * 不传就走服务端的「当前使用中的项目」——两条路都以服务端为准，前端不自己过滤。
+   */
+  const loadKnowledge = async (projectId?: number | null) => {
     const sess = sessionRef.current;
     if (!sess) return;
+    const pid = projectId === undefined ? curProjectRef.current : projectId;
     try {
-      const r = await authFetchJson<KnowledgeListResult>('/knowledge', {
+      const r = await authFetchJson<KnowledgeListResult>(pid === null ? '/knowledge' : `/knowledge?projectId=${pid}`, {
         headers: { authorization: `Bearer ${sess.token}` },
       });
       // 切号期间晚到的 A 号响应不能覆盖 B 号列表。
@@ -922,7 +1135,7 @@ export default function App() {
       if (sessionRef.current?.token !== sess.token) return;
       const doc = data.document;
       setKnowledgeNote(`《${doc.filename}》已入库，共 ${doc.chunkCount} 个片段。`);
-      await loadKnowledge();
+      await loadKnowledge(curProjectRef.current);
     } catch (e) {
       setKnowledgeNote(`上传没有入库：${(e as Error).message}`);
     } finally {
@@ -962,7 +1175,7 @@ export default function App() {
     } catch (e) {
       if (sessionRef.current?.token !== sess.token) return;
       setKnowledgeNote(`删除失败：${(e as Error).message}`);
-      void loadKnowledge(); // 服务端说没有这份资料时，用真实列表把界面拉回来
+      void loadKnowledge(curProjectRef.current); // 服务端说没有这份资料时，用真实列表把界面拉回来
     } finally {
       setKnowledgeDeletingId(null);
     }
@@ -1028,11 +1241,26 @@ export default function App() {
     setAgentNote('');
     setUserMem([]);
     setProjMem([]);
+    setProjects([]);
+    curProjectRef.current = null;
+    // Phase 3：换号了就把「agentId → projectId」清掉（id 会跨账号复用，留着会把分区认错人）
+    agentProjectRef.current.clear();
+    setCurProjectId(null);
+    setProjectsOpen(false);
+    setNewProjectName('');
+    setProjectNote('');
     if (!session) return;
     void refreshTask();
-    void loadAgents();
     void loadUserMemory();
-    void loadKnowledge(); // 第 11 步：只拉本人资料的文件名/段数，不把正文拉回前端
+    /**
+     * 子阶段 2-B：顺序不能反 —— **先**拿到「当前使用中的项目」，再按它拉智能体名单与资料列表。
+     * 反过来的话首帧会打一次不带 projectId 的 `/agents`（= 老语义：这个账号的全部智能体），
+     * 界面上就会闪一下别的项目的智能体。
+     */
+    void (async () => {
+      const pid = await loadProjects();
+      await Promise.all([loadAgents(pid), loadKnowledge(pid)]);
+    })();
   }, [session]);
 
   const onSubmitPassword = async () => {
@@ -1073,6 +1301,14 @@ export default function App() {
     setUserMemOpen(false);
     setProjMem([]);
     setProjMemOpen(false);
+    // 子阶段 2-B：项目层也清掉（换号不该看见上一个号的项目名/名单）
+    setProjects([]);
+    curProjectRef.current = null;
+    setCurProjectId(null);
+    setProjectsOpen(false);
+    setNewProjectName('');
+    setProjectNote('');
+    setProjectBusy(false);
     setAgentStates({}); // 第 16 步：会话状态（当前任务/保活）不留在登录页
     setKeepaliveBusy(false);
     // 第 7 步：驾驶员循环和 token 一并停掉/清掉（主进程里也不留）
@@ -1113,6 +1349,12 @@ export default function App() {
     getCurrentAgent: () => curAgentRef.current,
     // 第 22 步 · D：多实例上限由主进程的配置说了算（改配置立刻生效，不用重建 hook）
     getMaxInstances: () => settingsRef.current.maxBrowserInstances,
+    /**
+     * Phase 3：**这个智能体属于哪个项目** —— 只用来算这张页的分区（登录态粒度）。
+     * 桶键（标签页归属）仍然是 agentId，不经过这里，所以「同项目共享登录态」不会
+     * 顺带把标签页也合并了。查不到就返回 null（落兜底分区，不跟任何真项目混）。
+     */
+    getProjectOfAgent: (agentId: number) => agentProjectRef.current.get(agentId) ?? null,
   });
 
   useEffect(() => {
@@ -1580,18 +1822,17 @@ export default function App() {
    * 正常情况以服务端 /agents 为准；刚登录还没拉回来时先用登录响应里的 agents 顶上，
    * 免得首屏左栏是空的（那种「点了没反应」的错觉最难查）。
    */
-  const sidebarAgents: AgentView[] =
-    agents.length > 0
-      ? agents
-      : (session.agents ?? []).map((a) => ({
-          id: a.id,
-          name: a.name,
-          kind: 'assistant',
-          deletable: false,
-          personaStatus: 'ready' as const,
-          persona: null,
-          conversationId: null,
-        }));
+  // 已经进了某个项目就不再拿登录响应兜底 —— 否则会拿登录时那份（默认项目的）名单冒充当前项目。
+  const loginAgentsFallback: AgentView[] = (session.agents ?? []).map((a) => ({
+    id: a.id,
+    name: a.name,
+    kind: 'assistant',
+    deletable: false,
+    personaStatus: 'ready' as const,
+    persona: null,
+    conversationId: null,
+  }));
+  const sidebarAgents: AgentView[] = agents.length > 0 ? agents : curProjectId !== null ? [] : loginAgentsFallback;
   const curAgent = sidebarAgents.find((a) => a.id === curAgentId) ?? null;
   /** 第 16 步：当前智能体的会话状态（服务端为准）——状态行与保活按钮都读它 */
   const curState = curAgentId === null ? undefined : agentStates[curAgentId];
@@ -1609,12 +1850,77 @@ export default function App() {
         「＋ 添加」不弹独立设置窗、不开新 BrowserWindow：服务端建好智能体 + 空会话，直接切过去。
       */}
       <aside className="sidebar">
+        {/*
+          子阶段 2-B：**最简项目入口**（看得见全部项目 / 新建 / 点一下切换当前项目）。
+
+          刻意不做下拉动效、双击切换、全屏小圆圈那套正式交互 —— 那些留给后面独立的 UI 阶段；
+          这里只在功能上把「项目层」跑通，用既有的 .contact / .btn / .authInput 拼出来，不加新视觉。
+          切换只换「看不见的项目视角 + 名单 + 资料列表」，**浏览器一张页都不动**（见 enterProject）。
+        */}
+        <div className="projectBox">
+          <div className="small projectBox__cur">
+            当前项目：{projects.find((p) => p.id === curProjectId)?.name ?? '（还没读到）'}
+          </div>
+          <div className="buttons-row">
+            <button
+              type="button"
+              className="btn projectBox__toggle"
+              disabled={projectBusy}
+              onClick={() => setProjectsOpen((v) => !v)}
+            >
+              {projectsOpen ? '收起项目' : `切换项目（${projects.length}）`}
+            </button>
+          </div>
+          {projectsOpen && (
+            <div className="projectBox__list" role="list" aria-label="我的项目">
+              {projects.map((p) => (
+                <button
+                  type="button"
+                  role="listitem"
+                  key={p.id}
+                  data-project-id={p.id}
+                  disabled={projectBusy}
+                  className={p.id === curProjectId ? 'contact projectBox__row contact--on' : 'contact projectBox__row'}
+                  onClick={() => void switchProject(p.id)}
+                >
+                  <div className="contact__meta">
+                    <div className="contact__name">{p.name}</div>
+                    <div className="small">
+                      {p.id === curProjectId ? '使用中' : '点击切到这里'}
+                      {p.henAgentId ? ' · 有母鸡' : ' · 默认项目'}
+                    </div>
+                  </div>
+                </button>
+              ))}
+              <input
+                className="authInput projectBox__name"
+                placeholder="新项目名字（≤24 字）"
+                value={newProjectName}
+                maxLength={24}
+                onChange={(e) => setNewProjectName(e.target.value)}
+              />
+              <div className="buttons-row">
+                <button
+                  type="button"
+                  className="btn projectBox__create"
+                  disabled={projectBusy || !newProjectName.trim()}
+                  onClick={() => void createProject()}
+                >
+                  {projectBusy ? '处理中…' : '新建项目'}
+                </button>
+              </div>
+            </div>
+          )}
+          {projectNote && <div className="small projectBox__note">{projectNote}</div>}
+        </div>
+
         <div className="agentList" role="list" aria-label="我的智能体">
           {sidebarAgents.map((a) => (
             <button
               type="button"
               role="listitem"
               key={a.id}
+              data-agent-id={a.id}
               className={a.id === curAgentId ? 'contact contact--on' : 'contact'}
               onClick={() => selectAgent(a)}
             >
@@ -1762,13 +2068,20 @@ export default function App() {
           )}
           {/* 第 11 步：同一主窗口左栏入口；标准文件选择器后 POST 到本机服务端，不创建 Electron 窗口。 */}
           <div className="buttons-row">
-            <button type="button" className="btn" onClick={() => setKnowledgeOpen((v) => !v)}>
+            <button
+              type="button"
+              className="btn knowledgePanel__toggle"
+              onClick={() => setKnowledgeOpen((v) => !v)}
+            >
               知识库（{knowledgeDocs.length}）
             </button>
           </div>
           {knowledgeOpen && (
             <div className="knowledgePanel">
-              <div className="small">上传 .txt / .md / .pdf；资料原文片段会加密入库。</div>
+              <div className="small">
+                上传 .txt / .md / .pdf；资料原文片段会加密入库。
+                资料只属于<b>当前项目</b>（{projects.find((p) => p.id === curProjectId)?.name ?? '…'}）：切到别的项目看不到这里的资料。
+              </div>
               <input
                 ref={knowledgeFileRef}
                 className="knowledgePanel__file"
@@ -1779,8 +2092,10 @@ export default function App() {
               <div className="buttons-row">
                 <button
                   type="button"
-                  className="btn"
-                  disabled={knowledgeUploading}
+                  className="btn knowledgePanel__upload"
+                  // 子阶段 2-B：切项目过程中不许上传 —— 服务端的「当前项目」正在变，
+                  // 这一瞬间传上去会落到上一个项目（归属由服务端按当前项目写）。
+                  disabled={knowledgeUploading || projectBusy}
                   onClick={() => knowledgeFileRef.current?.click()}
                 >
                   {knowledgeUploading ? '上传中…' : '上传资料'}

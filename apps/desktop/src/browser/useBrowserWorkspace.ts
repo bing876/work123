@@ -8,16 +8,22 @@ import type { BrowserPageInfo, BrowserTabView } from './types';
  *
  * 硬约束（本步钉死，别推翻）：
  *   - 仍是 Electron 的 <webview>，**不套 Edge / Chrome / CEF，不用 Playwright**；
- *   - 每张页的分区是 `partitionFor(agentId)` —— **一个智能体一套 cookie / 登录态**，
- *     绝不再用全局的 `persist:workbench-browser`；
+ *   - 每张页的分区是 `partitionFor(projectId)` —— **一个项目一套 cookie / 登录态**，
+ *     同项目的多个智能体共用这一套（Phase 3 改的粒度），不同项目之间完全隔离；
+ *     绝不再用全局的 `persist:workbench-browser`，也绝不再按 agentId 分（那是第 20 步的旧口径）；
  *   - **活页上限由配置项 `maxBrowserInstances` 决定**（第 22 步起，默认 4，设置里可调）：
  *     到顶只**拒绝新开**并说一句人话，**绝不偷偷关页、也绝不顶掉最旧那张**
  *     （第 20 步取消的是写死的 `MAX_LIVE_PAGES = 10`，不是「有上限」这件事本身）；
  *   - 切 tab = 把对应那张 webview 放到最前面（z-index），**不为每个 tab 开 BrowserWindow**；
  *   - 收起不是把页面藏没：舞台仍留一块高度（webview 尺寸为 0 会让驾驶点不中任何元素）。
  *
+ * ⚠️ **Phase 3 的红线（别改过头）**：分区合并**只发生在登录态这一层**。
+ *    下面所有桶（`pages` / `active`）、`openUrl(agentId, …)`、`closeTabsOfAgent(agentId)`、
+ *    驾驶接口、`stopDriving` 全部**仍然按 agentId**：同项目的两个智能体
+ *    共用一套 cookie，但**各有各的标签页、各有各的任务**，不合并显示、不共享执行状态。
+ *
  * 状态是**窗口级 + 按智能体分桶**的：
- *   - 一个智能体 = 一套独立浏览器（自己的 tab、自己的当前页、自己的 cookie）；
+ *   - 一个智能体 = 一套独立的标签页（自己的 tab、自己的当前页）；登录态与同项目的兄弟共享；
  *   - 切智能体只换「哪一桶可见」，**所有页的 webview 一直挂着不卸载** ——
  *     这样切到别的智能体去聊别的时，原来那几路驾驶不会断，切回来页面和滚动都还在。
  *
@@ -39,6 +45,15 @@ interface BrowserWorkspaceOptions {
    * 也避免「改了配置 → 整个 hook 重建 → 页的引用全换一遍」。
    */
   getMaxInstances?: () => number;
+  /**
+   * Phase 3：**某个智能体属于哪个项目**。
+   *
+   * 只用来算这张页的**分区**（登录态那一层，同项目共享）；不用来分桶 ——
+   * 桶键永远是 agentId（标签页/任务按智能体隔离，这条没变）。
+   * 传函数而不是映射对象：智能体是活数据（新建/切换项目会变），用函数才读得到最新值。
+   * 返回 null = 认不出 → 落兜底分区（`-none`），**不跟任何真项目混**。
+   */
+  getProjectOfAgent?: (agentId: number) => number | null;
 }
 
 /**
@@ -53,7 +68,7 @@ const FALLBACK_MAX_INSTANCES = 4;
 export interface BrowserWorkspace {
   /** 此刻正在聊的那个智能体（舞台靠它决定「谁的页该露出来」） */
   currentAgentId: number | null;
-  /** **当前智能体自己**的活页（顶栏显示的就是这些） */
+  /** **当前智能体自己**的活页（顶栏显示的就是这些 —— 同项目兄弟智能体的页不在这儿） */
   tabs: BrowserTabView[];
   /** **所有智能体**的活页（舞台要把它们全挂着——切走的那些页也必须活着） */
   allTabs: BrowserTabView[];
@@ -74,6 +89,13 @@ export interface BrowserWorkspace {
   registerWebview: (tabId: number, el: HTMLElement | null) => void;
   /** 页面自己改了地址/标题（点链接、SPA 跳转）时回报，用来更新标签与 URL 栏 */
   notePageInfo: (tabId: number, info: BrowserPageInfo) => void;
+  /**
+   * Phase 3：把「这张页的 guest webContents id 属于哪个智能体」告诉主进程。
+   *
+   * 主进程从分区名里只能读到**项目**，读不到智能体；而下载记录要能标出
+   * 「这是哪个智能体触发的」，所以由这边在页就绪时登记一次。
+   */
+  noteOwner: (tabId: number) => void;
 
   /**
    * 给**某个智能体**开页（同站复用只在它自己那些页里找）。
@@ -120,6 +142,12 @@ export function useBrowserWorkspace(options: BrowserWorkspaceOptions): BrowserWo
   /** 第 22 步：多实例上限的取值函数（同样是每次调用时读最新配置） */
   const getMaxInstancesRef = useRef(options.getMaxInstances);
   getMaxInstancesRef.current = options.getMaxInstances;
+  /**
+   * Phase 3：agentId → projectId 的解析（**只喂分区**）。
+   * 同样每次调用时现读 —— 新建智能体 / 切项目后要立刻能认出来。
+   */
+  const getProjectOfAgentRef = useRef(options.getProjectOfAgent);
+  getProjectOfAgentRef.current = options.getProjectOfAgent;
   /** 当前可见的智能体：切它只换「哪一桶可见」，页本身一张都不卸载 */
   const visibleAgentId = options.currentAgentId;
   const visibleAgentRef = useRef<number | null>(visibleAgentId);
@@ -217,6 +245,17 @@ export function useBrowserWorkspace(options: BrowserWorkspaceOptions): BrowserWo
   };
 
   const ownerOf = (tabId: number): number | undefined => findTab(tabId)?.agentId;
+
+  /**
+   * Phase 3：把这张页的 guest id ↔ 智能体告诉主进程（下载记录要标「哪个智能体触发的」）。
+   * 拿不到 guest id（还没 dom-ready）时什么都不做——等下一次（did-navigate / 切换）再报。
+   */
+  const noteOwner = (tabId: number): void => {
+    const t = findTab(tabId);
+    const wcId = webContentsIdOf(tabId);
+    if (!t || typeof wcId !== 'number') return;
+    void window.workbench?.browserOwner?.(wcId, t.agentId);
+  };
 
   /** 主进程当前在驾驶哪几张页 → 映射成 tabId（标签圆点） */
   const refreshDriving = async (): Promise<void> => {
@@ -337,7 +376,19 @@ export function useBrowserWorkspace(options: BrowserWorkspaceOptions): BrowserWo
       );
       return null;
     }
-    setBucket(agentId, bucket.concat({ id, agentId, bootUrl: url, url, title: hostLabel(url) }));
+    setBucket(
+      agentId,
+      bucket.concat({
+        id,
+        // 标签页归属 = 智能体（这条没变）
+        agentId,
+        // 登录态归属 = 项目（Phase 3 新建的这条）；开页那一刻定下就不再变
+        projectId: getProjectOfAgentRef.current?.(agentId) ?? null,
+        bootUrl: url,
+        url,
+        title: hostLabel(url),
+      }),
+    );
     setActiveFor(agentId, id);
     setExpanded(true);
     if (bucket.length + 1 === SOFT_TAB_HINT) {
@@ -449,6 +500,7 @@ export function useBrowserWorkspace(options: BrowserWorkspaceOptions): BrowserWo
     toggleExpanded,
     registerWebview,
     notePageInfo,
+    noteOwner,
     openUrl,
     openHome,
     openNewTab,

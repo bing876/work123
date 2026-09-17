@@ -1,0 +1,78 @@
+{
+  "profile": "C:/Users/bing/AppData/Local/Temp/wb3/profile",
+  "takenAt": "2026-09-17T13:03:55.799Z",
+  "partitionsDirExists": true,
+  "partitions": [
+    {
+      "dirName": "workbench-browser-project-47",
+      "kind": "project",
+      "id": 47,
+      "legacy": false,
+      "mtime": "2026-09-17T13:03:26.642Z",
+      "bytes": 3423149,
+      "files": 47,
+      "dirs": 19
+    },
+    {
+      "dirName": "workbench-browser-project-48",
+      "kind": "project",
+      "id": 48,
+      "legacy": false,
+      "mtime": "2026-09-17T13:03:37.644Z",
+      "bytes": 3423042,
+      "files": 47,
+      "dirs": 19
+    }
+  ],
+  "browserAgentsDir": [],
+  "browserProjectsDir": [
+    {
+      "name": "_downloads.jsonl",
+      "isDir": false,
+      "mtime": "2026-09-17T13:01:47.286Z",
+      "size": 732
+    },
+    {
+      "name": "47",
+      "isDir": true,
+      "mtime": "2026-09-17T13:01:45.636Z",
+      "size": null,
+      "bytes": 152,
+      "files": 2,
+      "dirs": 1
+    }
+  ],
+  "downloadRecords": [
+    {
+      "at": "2026-09-17T13:01:45.636Z",
+      "projectId": 47,
+      "agentId": 107,
+      "agentSource": "renderer",
+      "filename": "wb3-A1.txt",
+      "savePath": "C:\\Users\\bing\\AppData\\Local\\Temp\\wb3\\profile\\browser-projects\\47\\downloads\\wb3-A1.txt",
+      "url": "http://127.0.0.1:8897/dl/A1",
+      "partition": "C:\\Users\\bing\\AppData\\Local\\Temp\\wb3\\profile\\Partitions\\workbench-browser-project-47"
+    },
+    {
+      "at": "2026-09-17T13:01:47.284Z",
+      "projectId": 47,
+      "agentId": 108,
+      "agentSource": "renderer",
+      "filename": "wb3-A2.txt",
+      "savePath": "C:\\Users\\bing\\AppData\\Local\\Temp\\wb3\\profile\\browser-projects\\47\\downloads\\wb3-A2.txt",
+      "url": "http://127.0.0.1:8897/dl/A2",
+      "partition": "C:\\Users\\bing\\AppData\\Local\\Temp\\wb3\\profile\\Partitions\\workbench-browser-project-47"
+    }
+  ],
+  "summary": {
+    "total": 2,
+    "byKind": {
+      "project": 2
+    },
+    "agentPartitionIds": [],
+    "projectPartitionIds": [
+      47,
+      48
+    ]
+  }
+}

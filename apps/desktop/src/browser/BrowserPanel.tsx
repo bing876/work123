@@ -15,7 +15,7 @@ import './styles.css';
  *   - 顶栏只显示**当前智能体**的 tab（别人的 tab 你看不见、也带不过来）；
  *   - 舞台里**所有智能体、所有 tab** 的 <webview> 都一直挂着（绝对定位铺满、靠 z-index 分层）：
  *     被切到后面的那张必须仍然活着、仍然有真实尺寸，否则驾驶在它上面点不中任何元素；
- *   - 每张页的 `partition` 按它自己的智能体算（一个智能体一套 cookie / 登录态）；
+ *   - 每张页的 `partition` 按**它所属的项目**算（Phase 3：同项目的智能体共用一套登录态）；
  *   - **没有活页上限**：开多少张都行，页数多了只在 URL 栏右侧提示「开太多会卡」，不关页。
  */
 
@@ -52,6 +52,12 @@ export function BrowserPanel({ ws, agentLabel }: { ws: BrowserWorkspace; agentLa
     const onNav = (e: Event): void => {
       const url = String((e as Event & { url?: string }).url ?? '');
       if (url) ws.notePageInfo(id, { url });
+      // Phase 3：页就绪/跳转时顺手把「这张页属于哪个智能体」报给主进程（下载记录要用）
+      ws.noteOwner(id);
+    };
+    /** Phase 3：guest 就绪 → 把「这张页是哪个智能体开的」报给主进程（下载记录要标 owner） */
+    const onDomReady = (): void => {
+      ws.noteOwner(id);
     };
     const onWillNavigate = (e: Event): void => {
       const url = String((e as Event & { url?: string }).url ?? '');
@@ -64,11 +70,14 @@ export function BrowserPanel({ ws, agentLabel }: { ws: BrowserWorkspace; agentLa
     el.addEventListener('did-navigate', onNav);
     el.addEventListener('did-navigate-in-page', onNav);
     el.addEventListener('will-navigate', onWillNavigate);
+    // Phase 3：guest 一就绪就把 owner 报给主进程（早报早好；拿不到 id 时 noteOwner 自己会跳过）
+    el.addEventListener('dom-ready', onDomReady);
     anyEl.__wbOff = () => {
       el.removeEventListener('page-title-updated', onTitle);
       el.removeEventListener('did-navigate', onNav);
       el.removeEventListener('did-navigate-in-page', onNav);
       el.removeEventListener('will-navigate', onWillNavigate);
+      el.removeEventListener('dom-ready', onDomReady);
     };
   };
 
@@ -76,7 +85,10 @@ export function BrowserPanel({ ws, agentLabel }: { ws: BrowserWorkspace; agentLa
     <div className={ws.expanded ? 'browserPanel browserPanel--expanded' : 'browserPanel'}>
       {/* 顶栏：当前智能体一张页一个 tab（没有上限）+ 「＋」+ 展开/收起 */}
       <div className="browserPanel__tabs" role="tablist" aria-label="打开的网页">
-        <span className="browserPanel__who" title="浏览器按智能体隔离：这是谁的页">
+        <span
+          className="browserPanel__who"
+          title="标签页按智能体隔离（这是谁的页）；登录态按项目共享（同项目的智能体共用一套 cookie）"
+        >
           {agentLabel ? `${agentLabel} 的浏览器` : '浏览器'}
         </span>
         {ws.tabs.map((t) => (
@@ -171,8 +183,12 @@ export function BrowserPanel({ ws, agentLabel }: { ws: BrowserWorkspace; agentLa
                     : 'browserPanel__view'
               }
               src={t.bootUrl}
-              // 第 20 步：分区按**这张页自己的智能体**算 —— 一个智能体一套 cookie / 登录态
-              partition={partitionFor(t.agentId)}
+              /*
+               * Phase 3：分区按**这张页所属的项目**算 —— 同项目的智能体共用一套 cookie / 登录态。
+               * 注意 `t.projectId` 是开页那一刻定下的（不是现在的项目），
+               * 所以切项目不会让已开的页换一套登录态。
+               */
+              partition={partitionFor(t.projectId)}
               // target=_blank 由主进程拦下并让同一个 guest 导航，不会创建 BrowserWindow
               allowpopups
             />

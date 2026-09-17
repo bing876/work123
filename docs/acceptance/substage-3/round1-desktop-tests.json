@@ -1,0 +1,1056 @@
+{
+  "startedAt": "2026-09-17T20:02:11+0800",
+  "ports": {
+    "api": 8797,
+    "fake": 8897,
+    "vite": 5272,
+    "cdp": 9332
+  },
+  "fakeModel": {
+    "delayMs": 2000,
+    "steps": 10
+  },
+  "site": "http://127.0.0.1:8897",
+  "results": [
+    {
+      "name": "验收要用的四个端口（8797/8897/5272/9332）都空着",
+      "ok": true,
+      "detail": "busy=[]"
+    },
+    {
+      "name": "构建产物齐全（desktop/dist-electron/main.js + server/dist/index.js）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "**主进程产物里已经是新规则（认 project 分区、不再认 agent 分区）**",
+      "ok": true,
+      "detail": "project=True agent=False"
+    },
+    {
+      "name": "改造前的分区目录快照已备好（partitions-before.json）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "改造前：目录名里确实是**按智能体**的老规则（否则对照没意义）",
+      "ok": true,
+      "detail": "{\"total\": 2, \"byKind\": {\"global-legacy\": 1, \"agent\": 1}, \"agentPartitionIds\": [9], \"projectPartitionIds\": []}"
+    },
+    {
+      "name": "假模型 + 登录态测试站已起来",
+      "ok": true,
+      "detail": "{\"ok\": true, \"fake\": true, \"delayMs\": 2000, \"steps\": 10}"
+    },
+    {
+      "name": "测试站 /whoami 可用（真站点，不是假的判定）",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "验收后端起来了，库在线",
+      "ok": true,
+      "detail": "{\"ok\": true, \"service\": \"ai-workbench-server\", \"db\": \"up\", \"sms\": \"mock\", \"llm\": \"configured\", \"llmCalls\": 0, \"liveLoops\": 0, \"loopMaxSteps\": 10, \"pageStates\": 0, \"time\": \"2026-09-17T12:02:15.722Z\"}"
+    },
+    {
+      "name": "模型已配置（指向假模型，不烧 token、不依赖外网）",
+      "ok": true,
+      "detail": "configured"
+    },
+    {
+      "name": "验证码已下发（mock：只进服务端日志）",
+      "ok": true,
+      "detail": "status=200 {'sent': True, 'expires_in': 300}"
+    },
+    {
+      "name": "测试账号登录成功（拿到 JWT + 默认项目）",
+      "ok": true,
+      "detail": "user=20 project={\"id\": 36, \"name\": \"默认项目\", \"isCurrent\": true, \"isDefault\": true, \"henAgentId\": null, \"createdAt\": \"2026-09-17T12:02:15.798Z\"}"
+    },
+    {
+      "name": "测试账号是干净的（只有 1 个默认项目 —— 没有上轮残留）",
+      "ok": true,
+      "detail": "projects=1"
+    },
+    {
+      "name": "vite dev server 起来了（5272）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "真 Electron 窗口起来了，渲染进程可调试",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "**应用窗口只有一个**（没有多开 BrowserWindow）",
+      "ok": true,
+      "detail": "[\"devtools://devtools/bundled/devtools_app.html?remoteBase=https://chrome-devtools-frontend.appspot.com/serve_file/@489e8d697bf90ea3b7a7d5268ca2f253b19ed60c/&can_dock=&toolbarColor=rgba(223,223,223,1)&textColor=rgba(0,0,0,1)&experiments=true\", \"http://localhost:5272/\"]"
+    },
+    {
+      "name": "刷新后自动进工作台，左栏名单已拉回",
+      "ok": true,
+      "detail": "ids=[86] waited=55ms"
+    },
+    {
+      "name": "安装渲染层 fetch 记录器",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "界面上「新建项目」建出了项目 A",
+      "ok": true,
+      "detail": "[{\"id\": 36, \"name\": \"默认项目\", \"on\": false}, {\"id\": 37, \"name\": \"P3-项目A\", \"on\": true}]"
+    },
+    {
+      "name": "建完自动切到项目 A",
+      "ok": true,
+      "detail": "projCur=当前项目：P3-项目A"
+    },
+    {
+      "name": "项目 A 里「＋ 添加」点得到（A1）",
+      "ok": true,
+      "detail": "{\"found\": true, \"text\": \"＋ 添加\", \"x\": 101, \"y\": 343, \"w\": 178, \"h\": 32, \"inViewport\": true, \"topTag\": \"BUTTON\", \"topCls\": \"btn agentList__add\", \"isSelf\": true}"
+    },
+    {
+      "name": "项目 A 里「＋ 添加」点得到（A2）",
+      "ok": true,
+      "detail": "{\"found\": true, \"text\": \"＋ 添加\", \"x\": 101, \"y\": 360, \"w\": 178, \"h\": 32, \"inViewport\": true, \"topTag\": \"BUTTON\", \"topCls\": \"btn agentList__add\", \"isSelf\": true}"
+    },
+    {
+      "name": "项目 A 里建出了 2 个智能体",
+      "ok": true,
+      "detail": "[{\"id\": 87, \"name\": \"项目管家\", \"kind\": \"hen\", \"deletable\": false, \"projectId\": 37, \"canCreateAgents\": true, \"personaStatus\": \"ready\", \"persona\": null, \"conversationId\": 122, \"listening\": false}, {\"id\": 88, \"name\": \"新智能体\", \"kind\": \"custom\", \"deletable\": true, \"projectId\": 37, \"canCreateAgents\": false, \"personaStatus\": \"pending\", \"persona\": null, \"conversationId\": 123, \"listening\": false}, {\"id\": 89, \"name\": \"新智能体\", \"kind\": \"custom\", \"deletable\": true, \"projectId\": 37, \"canCreateAgents\": false, \"personaStatus\": \"pending\", \"persona\": null, \"conversationId\": 124, \"listening\": false}]"
+    },
+    {
+      "name": "界面上建出了项目 B",
+      "ok": true,
+      "detail": "[{\"id\": 36, \"name\": \"默认项目\", \"on\": false}, {\"id\": 37, \"name\": \"P3-项目A\", \"on\": false}, {\"id\": 38, \"name\": \"P3-项目B\", \"on\": true}]"
+    },
+    {
+      "name": "建完自动切到项目 B",
+      "ok": true,
+      "detail": "projCur=当前项目：P3-项目B"
+    },
+    {
+      "name": "项目 B 里「＋ 添加」点得到",
+      "ok": true,
+      "detail": "{\"found\": true, \"text\": \"＋ 添加\", \"x\": 101, \"y\": 360, \"w\": 178, \"h\": 32, \"inViewport\": true, \"topTag\": \"BUTTON\", \"topCls\": \"btn agentList__add\", \"isSelf\": true}"
+    },
+    {
+      "name": "项目 B 里建出了 1 个智能体",
+      "ok": true,
+      "detail": "[{\"id\": 90, \"name\": \"项目管家\", \"kind\": \"hen\", \"deletable\": false, \"projectId\": 38, \"canCreateAgents\": true, \"personaStatus\": \"ready\", \"persona\": null, \"conversationId\": 125, \"listening\": false}, {\"id\": 91, \"name\": \"新智能体\", \"kind\": \"custom\", \"deletable\": true, \"projectId\": 38, \"canCreateAgents\": false, \"personaStatus\": \"pending\", \"persona\": null, \"conversationId\": 126, \"listening\": false}]"
+    },
+    {
+      "name": "归属正确（直连库）：A1/A2 在项目 A，B1 在项目 B",
+      "ok": true,
+      "detail": "db={88: 37, 89: 37, 91: 38} A=37 B=38"
+    },
+    {
+      "name": "回到项目 A",
+      "ok": true,
+      "detail": "[\"项目管家\", \"新智能体\", \"新智能体\"]"
+    },
+    {
+      "name": "选中 A1",
+      "ok": true,
+      "detail": "A1=88"
+    },
+    {
+      "name": "A1 里那句「打开…」真的打进输入框并发出去了",
+      "ok": true,
+      "detail": "{\"ready\": true, \"readyMs\": 50, \"typed\": \"打开 http://127.0.0.1:8897/whoami/A1\", \"typedOk\": true, \"sendHit\": true, \"geom\": {\"found\": true, \"text\": \"发送\", \"x\": 1077, \"y\": 693, \"w\": 54, \"h\": 36, \"inViewport\": true, \"topTag\": \"BUTTON\", \"topCls\": \"\", \"isSelf\": true}}"
+    },
+    {
+      "name": "A1 把登录态测试站开出来了",
+      "ok": true,
+      "detail": "[\"persist:workbench-browser-project-37\"]"
+    },
+    {
+      "name": "**A1 这张页的分区 = 按项目算（persist:workbench-browser-project-<A>）**",
+      "ok": true,
+      "detail": "partition=persist:workbench-browser-project-37 期望=persist:workbench-browser-project-37"
+    },
+    {
+      "name": "刚打开时 A1 是游客（没登录过，站点不给 cookie）",
+      "ok": true,
+      "detail": "{\"site\": {\"name\": \"A1\", \"cookie\": \"\", \"local\": \"\", \"sid\": \"\", \"href\": \"http://127.0.0.1:8897/whoami/A1\", \"at\": 1789646572255}, \"cookie\": \"\", \"local\": \"\", \"href\": \"http://127.0.0.1:8897/whoami/A1\", \"t0\": 1789646572076}"
+    },
+    {
+      "name": "**A1 在站点上真的登录成功了（页面自己读到 cookie + localStorage）**",
+      "ok": false,
+      "detail": "sid=None local=A1 waited=15050ms"
+    },
+    {
+      "name": "A1 的 localStorage 也写进去了（顺带证明站点数据也在这个分区里）",
+      "ok": true,
+      "detail": "{\"site\": {\"name\": \"A1\", \"cookie\": \"wbsid=A1\", \"local\": \"A1\", \"sid\": \"A1\", \"href\": \"http://127.0.0.1:8897/whoami/A1\", \"at\": 1789646573934}, \"cookie\": \"wbsid=A1\", \"local\": \"A1\", \"href\": \"http://127.0.0.1:8897/whoami/A1\", \"t0\": 1789646572076}"
+    },
+    {
+      "name": "**站点服务端确实收到了这次登录（原始请求日志：/sid/A1）**",
+      "ok": true,
+      "detail": "[{\"at\": 1789646573931, \"iso\": \"2026-09-17T12:02:53.931Z\", \"path\": \"/sid\", \"routePath\": \"/sid/A1\", \"name\": \"A1\", \"cookie\": \"\", \"sid\": \"\", \"ua\": \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\"}]"
+    },
+    {
+      "name": "选中 A2",
+      "ok": true,
+      "detail": "A2=89"
+    },
+    {
+      "name": "A2 里那句「打开…」真的打进输入框并发出去了",
+      "ok": true,
+      "detail": "{\"ready\": true, \"readyMs\": 19, \"typed\": \"打开 http://127.0.0.1:8897/whoami/A2\", \"typedOk\": true, \"sendHit\": true, \"geom\": {\"found\": true, \"text\": \"发送\", \"x\": 1077, \"y\": 693, \"w\": 54, \"h\": 36, \"inViewport\": true, \"topTag\": \"BUTTON\", \"topCls\": \"\", \"isSelf\": true}}"
+    },
+    {
+      "name": "A2 把同一个站开出来了",
+      "ok": true,
+      "detail": "[\"http://127.0.0.1:8897/whoami/A1\", \"http://127.0.0.1:8897/whoami/A2\"]"
+    },
+    {
+      "name": "**A2 这张页的分区跟 A1 完全一样（同项目 = 同一套登录态）**",
+      "ok": true,
+      "detail": "A1=persist:workbench-browser-project-37 A2=persist:workbench-browser-project-37 期望=persist:workbench-browser-project-37"
+    },
+    {
+      "name": "**★验收标准 1★ A2 从没登录过，打开同站却是登录状态（页面侧 cookie = A1 的会话）**",
+      "ok": false,
+      "detail": "{\"site\": {\"name\": \"A2\", \"cookie\": \"wbsid=A1\", \"local\": \"A1\", \"sid\": \"A1\", \"href\": \"http://127.0.0.1:8897/whoami/A2\", \"at\": 1789646592841}, \"cookie\": \"wbsid=A1\", \"local\": \"A1\", \"href\": \"http://127.0.0.1:8897/whoami/A2\", \"t0\": 1789646592631.7}"
+    },
+    {
+      "name": "**★验收标准 1（服务端视角）★ A2 那次请求带到站点的 Cookie 就是 A1 的 wbsid**",
+      "ok": true,
+      "detail": "[{\"at\": 1789646592634, \"iso\": \"2026-09-17T12:03:12.634Z\", \"path\": \"/whoami\", \"routePath\": \"/whoami/A2\", \"name\": \"A2\", \"cookie\": \"wbsid=A1\", \"sid\": \"A1\", \"ua\": \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\"}]"
+    },
+    {
+      "name": "切到项目 B",
+      "ok": true,
+      "detail": "[\"项目管家\", \"新智能体\"]"
+    },
+    {
+      "name": "选中 B1",
+      "ok": true,
+      "detail": "B1=91"
+    },
+    {
+      "name": "B1 里那句「打开…」真的打进输入框并发出去了",
+      "ok": true,
+      "detail": "{\"ready\": true, \"readyMs\": 52, \"typed\": \"打开 http://127.0.0.1:8897/whoami/B1\", \"typedOk\": true, \"sendHit\": true, \"geom\": {\"found\": true, \"text\": \"发送\", \"x\": 1077, \"y\": 693, \"w\": 54, \"h\": 36, \"inViewport\": true, \"topTag\": \"BUTTON\", \"topCls\": \"\", \"isSelf\": true}}"
+    },
+    {
+      "name": "B1 把同一个站开出来了",
+      "ok": true,
+      "detail": "[\"http://127.0.0.1:8897/whoami/A1\", \"http://127.0.0.1:8897/whoami/A2\", \"http://127.0.0.1:8897/whoami/B1\"]"
+    },
+    {
+      "name": "**B1 这张页的分区 = 按项目 B 算，跟 A 的不一样**",
+      "ok": true,
+      "detail": "B1=persist:workbench-browser-project-38 A=persist:workbench-browser-project-37 B=persist:workbench-browser-project-38"
+    },
+    {
+      "name": "**★验收标准 2★ B1 打开同一个站是游客（A 的登录态没有串过来）**",
+      "ok": true,
+      "detail": "{\"site\": {\"name\": \"B1\", \"cookie\": \"\", \"local\": \"\", \"sid\": \"\", \"href\": \"http://127.0.0.1:8897/whoami/B1\", \"at\": 1789646597495}, \"cookie\": \"\", \"local\": \"\", \"href\": \"http://127.0.0.1:8897/whoami/B1\", \"t0\": 1789646597277.5}"
+    },
+    {
+      "name": "**★验收标准 2（服务端视角）★ B1 那次请求到站点的 Cookie 是空的**",
+      "ok": true,
+      "detail": "[{\"at\": 1789646597325, \"iso\": \"2026-09-17T12:03:17.325Z\", \"path\": \"/whoami\", \"routePath\": \"/whoami/B1\", \"name\": \"B1\", \"cookie\": \"\", \"sid\": \"\", \"ua\": \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\"}]"
+    },
+    {
+      "name": "B1 在项目 B 里也登录成功（sid=B1）",
+      "ok": false,
+      "detail": "{\"site\": {\"name\": \"B1\", \"cookie\": \"wbsid=B1\", \"local\": \"B1\", \"sid\": \"B1\", \"href\": \"http://127.0.0.1:8897/whoami/B1\", \"at\": 1789646599064}, \"cookie\": \"wbsid=B1\", \"local\": \"B1\", \"href\": \"http://127.0.0.1:8897/whoami/B1\", \"t0\": 1789646597277.5}"
+    },
+    {
+      "name": "切回项目 A",
+      "ok": true,
+      "detail": "[\"项目管家\", \"新智能体\", \"新智能体\"]"
+    },
+    {
+      "name": "选中 A2",
+      "ok": true,
+      "detail": "A2=89"
+    },
+    {
+      "name": "URL 栏输入新地址回车后真的导航了（地址 = http://127.0.0.1:8897/whoami/A2-afterB）",
+      "ok": true,
+      "detail": "{\"site\": {\"name\": \"A2-afterB\", \"cookie\": \"wbsid=A1\", \"local\": \"A1\", \"sid\": \"A1\", \"href\": \"http://127.0.0.1:8897/whoami/A2-afterB\", \"at\": 1789646616828}, \"cookie\": \"wbsid=A1\", \"local\": \"A1\", \"href\": \"http://127.0.0.1:8897/whoami/A2-afterB\", \"t0\": 1789646616819.3}"
+    },
+    {
+      "name": "**★验收标准 2（反向）★ 在 B 里登录过之后，A2 的会话仍是 A 的（sid=A1，没被 B1 冲掉）**",
+      "ok": false,
+      "detail": "{\"site\": {\"name\": \"A2-afterB\", \"cookie\": \"wbsid=A1\", \"local\": \"A1\", \"sid\": \"A1\", \"href\": \"http://127.0.0.1:8897/whoami/A2-afterB\", \"at\": 1789646616828}, \"cookie\": \"wbsid=A1\", \"local\": \"A1\", \"href\": \"http://127.0.0.1:8897/whoami/A2-afterB\", \"t0\": 1789646616819.3}"
+    },
+    {
+      "name": "**★验收标准 2（反向，服务端视角）★ 这次请求带到站点的是 wbsid=A1**",
+      "ok": true,
+      "detail": "[{\"at\": 1789646616821, \"iso\": \"2026-09-17T12:03:36.821Z\", \"path\": \"/whoami\", \"routePath\": \"/whoami/A2-afterB\", \"name\": \"A2-afterB\", \"cookie\": \"wbsid=A1\", \"sid\": \"A1\", \"ua\": \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\"}]"
+    },
+    {
+      "name": "站点侧全程记录：A 始终 wbsid=A1、B 始终 wbsid=B1（两条线没有交叉过）",
+      "ok": false,
+      "detail": "A1= / A2=A1 / A2-afterB=A1 / B1="
+    },
+    {
+      "name": "再导航回 A2 那张「我是谁」页（准备点它的下载链接）",
+      "ok": true,
+      "detail": "http://127.0.0.1:8897/whoami/A2"
+    },
+    {
+      "name": "**A1 点下载 → 文件真的落盘了（项目 A 的目录下）**",
+      "ok": true,
+      "detail": "click=clicked #dl at (88,181) waited=350ms"
+    },
+    {
+      "name": "**A2 点下载 → 也落盘了**",
+      "ok": true,
+      "detail": "click=clicked #dl at (88,181) waited=350ms"
+    },
+    {
+      "name": "**两个智能体的文件在同一个物理目录（按项目存放，这是本次改造的目的）**",
+      "ok": true,
+      "detail": "[\"wb3-A1.txt\", \"wb3-A2.txt\"]"
+    },
+    {
+      "name": "下载记录里有两条（一次智能体一次）",
+      "ok": true,
+      "detail": "[{\"at\": \"2026-09-17T12:03:39.524Z\", \"projectId\": 37, \"agentId\": 88, \"agentSource\": \"renderer\", \"filename\": \"wb3-A1.txt\", \"savePath\": \"C:\\\\Users\\\\bing\\\\AppData\\\\Local\\\\Temp\\\\wb3\\\\profile\\\\browser-projects\\\\37\\\\downloads\\\\wb3-A1.txt\", \"url\": \"http://127.0.0.1:8897/dl/A1\", \"partition\": \"C:\\\\Users\\\\bing\\\\AppData\\\\Local\\\\Temp\\\\wb3\\\\profile\\\\Partitions\\\\workbench-browser-project-37\"}, {\"at\": \"2026-09-17T12:03:41.158Z\", \"projectId\": 37, \"agentId\": 88, \"agentSource\": \"renderer\", \"filename\": \"wb3-A2.txt\", \"savePath\": \"C:\\\\Users\\\\bing\\\\AppData\\\\Local\\\\Temp\\\\wb3\\\\profile\\\\browser-projects\\\\37\\\\downloads\\\\wb3-A2.txt\", \"url\": \"http://127.0.0.1:8897/dl/A2\", \"partition\": \"C:\\\\Users\\\\bing\\\\AppData\\\\Local\\\\T"
+    },
+    {
+      "name": "**★验收标准 3★ 记录里认得出「wb3-A1.txt 是 A1 下载的」**",
+      "ok": true,
+      "detail": "[{\"at\": \"2026-09-17T12:03:39.524Z\", \"projectId\": 37, \"agentId\": 88, \"agentSource\": \"renderer\", \"filename\": \"wb3-A1.txt\", \"savePath\": \"C:\\\\Users\\\\bing\\\\AppData\\\\Local\\\\Temp\\\\wb3\\\\profile\\\\browser-projects\\\\37\\\\downloads\\\\wb3-A1.txt\", \"url\": \"http://127.0.0.1:8897/dl/A1\", \"partition\": \"C:\\\\Users\\\\bing\\\\AppData\\\\Local\\\\Temp\\\\wb3\\\\profile\\\\Partitions\\\\workbench-browser-project-37\"}]"
+    },
+    {
+      "name": "**★验收标准 3★ 记录里认得出「wb3-A2.txt 是 A2 下载的」（同一个目录、不同智能体分得清）**",
+      "ok": false,
+      "detail": "[{\"at\": \"2026-09-17T12:03:41.158Z\", \"projectId\": 37, \"agentId\": 88, \"agentSource\": \"renderer\", \"filename\": \"wb3-A2.txt\", \"savePath\": \"C:\\\\Users\\\\bing\\\\AppData\\\\Local\\\\Temp\\\\wb3\\\\profile\\\\browser-projects\\\\37\\\\downloads\\\\wb3-A2.txt\", \"url\": \"http://127.0.0.1:8897/dl/A2\", \"partition\": \"C:\\\\Users\\\\bing\\\\AppData\\\\Local\\\\Temp\\\\wb3\\\\profile\\\\Partitions\\\\workbench-browser-project-37\"}]"
+    },
+    {
+      "name": "记录里也带了项目号与归属来源（可复核，不是靠文件名猜）",
+      "ok": true,
+      "detail": "[{\"projectId\": 37, \"agentId\": 88, \"agentSource\": \"renderer\"}, {\"projectId\": 37, \"agentId\": 88, \"agentSource\": \"renderer\"}]"
+    },
+    {
+      "name": "旧命名（按智能体）的下载目录没有被新建出来",
+      "ok": true,
+      "detail": "browser-agents exists=False"
+    },
+    {
+      "name": "**A1 顶栏只显示 A1 自己的页（看不到 A2 那张）**",
+      "ok": true,
+      "detail": "{\"who\": \"新智能体 的浏览器\", \"tabCount\": 1, \"tabs\": [{\"on\": true, \"label\": \"登录态测试站\", \"run\": false, \"title\": \"http://127.0.0.1:8897/whoami/A1\"}], \"countLabel\": \"1 张活页\", \"warn\": null, \"url\": \"http://127.0.0.1:8897/whoami/A1\", \"panelRect\": {\"x\": 220, \"y\": 0, \"h\": 475}}"
+    },
+    {
+      "name": "**A2 顶栏只显示 A2 自己的页（看不到 A1 那张）**",
+      "ok": true,
+      "detail": "{\"who\": \"新智能体 的浏览器\", \"tabCount\": 1, \"tabs\": [{\"on\": true, \"label\": \"登录态测试站\", \"run\": false, \"title\": \"http://127.0.0.1:8897/whoami/A2\"}], \"countLabel\": \"1 张活页\", \"warn\": null, \"url\": \"http://127.0.0.1:8897/whoami/A2\", \"panelRect\": {\"x\": 220, \"y\": 0, \"h\": 475}}"
+    },
+    {
+      "name": "切智能体换的只是「哪一桶可见」：两张页都还挂在 DOM 里、尺寸没塌",
+      "ok": true,
+      "detail": "[{\"wcId\": 3, \"partition\": \"persist:workbench-browser-project-37\", \"w\": 944, \"h\": 404}, {\"wcId\": 4, \"partition\": \"persist:workbench-browser-project-37\", \"w\": 944, \"h\": 404}, {\"wcId\": 5, \"partition\": \"persist:workbench-browser-project-38\", \"w\": 944, \"h\": 404}]"
+    },
+    {
+      "name": "两张要驾驶的内嵌页都还挂着、有真实尺寸（尺寸塌了驾驶点不中任何元素）",
+      "ok": true,
+      "detail": "[{\"wcId\": 3, \"w\": 944, \"h\": 404, \"partition\": \"persist:workbench-browser-project-37\"}, {\"wcId\": 4, \"w\": 944, \"h\": 404, \"partition\": \"persist:workbench-browser-project-37\"}]"
+    },
+    {
+      "name": "A1 那条任务指令真的发出去了",
+      "ok": true,
+      "detail": "{\"ready\": true, \"readyMs\": 34, \"typed\": \"打开 http://127.0.0.1:8897/page-a 把整页读完，最后给我一份 P3-LANE-A 结论\", \"typedOk\": true, \"sendHit\": true, \"geom\": {\"found\": true, \"text\": \"发送\", \"x\": 1077, \"y\": 693, \"w\": 54, \"h\": 36, \"inViewport\": true, \"topTag\": \"BUTTON\", \"topCls\": \"\", \"isSelf\": true}}"
+    },
+    {
+      "name": "A1 那一路真的跑起来了（主进程司机 running）",
+      "ok": true,
+      "detail": "{\"phase\":\"running\",\"detail\":\"AI 驾驶中 · 任务：打开 http://127.0.0.1:8897/page-a 把整页读\",\"step\":0,\"blocked\":false,\"wcId\":3}"
+    },
+    {
+      "name": "A2 那条任务指令真的发出去了（同一项目、另一个智能体）",
+      "ok": true,
+      "detail": "{\"ready\": true, \"readyMs\": 34, \"typed\": \"打开 http://127.0.0.1:8897/page-b 把整页读完，最后给我一份 P3-LANE-B 结论\", \"typedOk\": true, \"sendHit\": true, \"geom\": {\"found\": true, \"text\": \"发送\", \"x\": 1077, \"y\": 693, \"w\": 54, \"h\": 36, \"inViewport\": true, \"topTag\": \"BUTTON\", \"topCls\": \"\", \"isSelf\": true}}"
+    },
+    {
+      "name": "A2 那一路也跑起来了（两路并发，不是排队）",
+      "ok": true,
+      "detail": "{\"phase\":\"running\",\"detail\":\"2 路驾驶中 · 本路任务：打开 http://127.0.0.1:8897/page-\",\"step\":0,\"blocked\":false,\"wcId\":4}"
+    },
+    {
+      "name": "**两路任务的时间线真的重叠（并发，不是一前一后）**",
+      "ok": true,
+      "detail": "{\"A\": [1789646627580, 1789646629611, 1789646631640], \"B\": [1789646631088]}"
+    },
+    {
+      "name": "暂停 A1 那一路的调用返回了",
+      "ok": true,
+      "detail": "{\"phase\":\"paused\",\"detail\":\"已暂停 — 自动 click/type 已停止，内嵌页可手点（点「继续」先读你停留的页面）\",\"step\":0,\"blocked\":true,\"wcId\":3}"
+    },
+    {
+      "name": "**★验收标准 4★ 被暂停的那一路停住了（A1 的步数不再涨）**",
+      "ok": false,
+      "detail": "stepA 1 -> 2"
+    },
+    {
+      "name": "**★验收标准 4★ A1 停住的同时 A2 照跑（两路的暂停/继续互不影响）**",
+      "ok": true,
+      "detail": "stepB 0 -> 5"
+    },
+    {
+      "name": "主进程侧两路状态也是分开的（A 暂停、B 运行）",
+      "ok": true,
+      "detail": "drvA=paused drvB=running"
+    },
+    {
+      "name": "**★验收标准 4★ 恢复 A1 之后它继续推进（继续也是按智能体分开的）**",
+      "ok": true,
+      "detail": "stepA 2 -> 3"
+    },
+    {
+      "name": "**★验收标准 4★ 切到项目 B（还换了智能体）期间，项目 A 那一路的步数仍在涨**",
+      "ok": true,
+      "detail": "step 3 -> 在B 6 -> 回A 6"
+    },
+    {
+      "name": "**★验收标准 4★ 切回来还是同一张页（没被重载：timeOrigin 不变）**",
+      "ok": true,
+      "detail": "t0 before=1789646627471.9 after=1789646627471.9"
+    },
+    {
+      "name": "**改造后：Partitions 下出现的都是「按项目」的分区（project）**",
+      "ok": true,
+      "detail": "{\"total\": 2, \"byKind\": {\"project\": 2}, \"agentPartitionIds\": [], \"projectPartitionIds\": [37, 38]}"
+    },
+    {
+      "name": "改造后：项目 A、项目 B 的分区都在（两个项目各一套登录态）",
+      "ok": true,
+      "detail": "[37, 38]"
+    },
+    {
+      "name": "改造后：没有产生任何「按智能体」的新分区目录（老规则不再写）",
+      "ok": true,
+      "detail": "{\"project\": 2}"
+    },
+    {
+      "name": "对照：改造前目录里是 agent 命名、改造后是 project 命名",
+      "ok": true,
+      "detail": "before={\"total\": 2, \"byKind\": {\"global-legacy\": 1, \"agent\": 1}, \"agentPartitionIds\": [9], \"projectPartitionIds\": []} after={\"total\": 2, \"byKind\": {\"project\": 2}, \"agentPartitionIds\": [], \"projectPartitionIds\": [37, 38]}"
+    },
+    {
+      "name": "下载目录按项目落（browser-projects/<项目>/downloads）",
+      "ok": true,
+      "detail": "[\"_downloads.jsonl\", \"37\"]"
+    },
+    {
+      "name": "验收临时 profile 已删（不会污染你的真实 userData）",
+      "ok": false,
+      "detail": ""
+    },
+    {
+      "name": "测试账号已整体删除（级联）",
+      "ok": true,
+      "detail": "{\n \"userId\": 20,\n \"found\": true,\n \"phoneHashTail\": \"2d855617\",\n \"deleted\": {\n  \"smsCodes\": 1,\n  \"users\": 1\n },\n \"before\": {\n  \"counts\": {\n   \"users\": 4,\n   \"projects\": 7,\n   \"agents\": 13,\n   \"conversations\": 13,\n   \"messages\": 529,\n   \"tasks\": 215,\n   \"memories\": 39,\n   \"user_memories\": 3,\n   \"agent_memories\": 1,\n   \"knowledge_documents\": 2,\n   \"knowledge_chunks\": 2\n  },\n  \"ids\": {\n   \"users\": \"1,"
+    },
+    {
+      "name": "库里已经查不到这个账号了",
+      "ok": true,
+      "detail": "{\"smsCodes\": 1, \"users\": 1}"
+    },
+    {
+      "name": "**活库零污染：11 张表的 id 集合跟跑之前一模一样**",
+      "ok": true,
+      "detail": "{}"
+    },
+    {
+      "name": "验收自己的四个端口全部释放",
+      "ok": true,
+      "detail": "busy=[]"
+    }
+  ],
+  "partitionsBefore": {
+    "profile": "C:/Users/bing/AppData/Roaming/@ai-workbench/desktop",
+    "takenAt": "2026-09-17T11:23:00.290Z",
+    "summary": {
+      "total": 2,
+      "byKind": {
+        "global-legacy": 1,
+        "agent": 1
+      },
+      "agentPartitionIds": [
+        9
+      ],
+      "projectPartitionIds": []
+    },
+    "dirs": [
+      {
+        "dir": "workbench-browser",
+        "kind": "global-legacy",
+        "id": null,
+        "files": 2382
+      },
+      {
+        "dir": "workbench-browser-agent-9",
+        "kind": "agent",
+        "id": 9,
+        "files": 681
+      }
+    ]
+  },
+  "liveBefore": {
+    "users": 3,
+    "projects": 4,
+    "agents": 7,
+    "conversations": 7,
+    "messages": 519,
+    "tasks": 212,
+    "memories": 39,
+    "user_memories": 3,
+    "agent_memories": 1,
+    "knowledge_documents": 2,
+    "knowledge_chunks": 2
+  },
+  "health0": {
+    "ok": true,
+    "service": "ai-workbench-server",
+    "db": "up",
+    "sms": "mock",
+    "llm": "configured",
+    "llmCalls": 0,
+    "liveLoops": 0,
+    "loopMaxSteps": 10,
+    "pageStates": 0,
+    "time": "2026-09-17T12:02:15.722Z"
+  },
+  "testUser": {
+    "id": 20,
+    "xyz": "XYZ79008",
+    "phone": "186****2301"
+  },
+  "projects": {
+    "A": {
+      "id": 37,
+      "name": "P3-项目A",
+      "agents": [
+        {
+          "id": 88,
+          "name": "新智能体",
+          "kind": "custom",
+          "deletable": true,
+          "projectId": 37,
+          "canCreateAgents": false,
+          "personaStatus": "pending",
+          "persona": null,
+          "conversationId": 123,
+          "listening": false
+        },
+        {
+          "id": 89,
+          "name": "新智能体",
+          "kind": "custom",
+          "deletable": true,
+          "projectId": 37,
+          "canCreateAgents": false,
+          "personaStatus": "pending",
+          "persona": null,
+          "conversationId": 124,
+          "listening": false
+        }
+      ]
+    },
+    "B": {
+      "id": 38,
+      "name": "P3-项目B",
+      "agents": [
+        {
+          "id": 91,
+          "name": "新智能体",
+          "kind": "custom",
+          "deletable": true,
+          "projectId": 38,
+          "canCreateAgents": false,
+          "personaStatus": "pending",
+          "persona": null,
+          "conversationId": 126,
+          "listening": false
+        }
+      ]
+    },
+    "default": {
+      "id": 36
+    }
+  },
+  "expectedPartitions": {
+    "A": "persist:workbench-browser-project-37",
+    "B": "persist:workbench-browser-project-38",
+    "rule": "persist:workbench-browser-project-<projectId>"
+  },
+  "sendOpenA1": {
+    "ready": true,
+    "readyMs": 50,
+    "typed": "打开 http://127.0.0.1:8897/whoami/A1",
+    "typedOk": true,
+    "sendHit": true,
+    "geom": {
+      "found": true,
+      "text": "发送",
+      "x": 1077,
+      "y": 693,
+      "w": 54,
+      "h": 36,
+      "inViewport": true,
+      "topTag": "BUTTON",
+      "topCls": "",
+      "isSelf": true
+    }
+  },
+  "a1Webview": {
+    "partition": "persist:workbench-browser-project-37",
+    "src": "http://127.0.0.1:8897/whoami/A1",
+    "wcId": 3,
+    "url": "http://127.0.0.1:8897/whoami/A1"
+  },
+  "a1Login": {
+    "click": "clicked #relogin at (157,222)",
+    "after": {
+      "site": {
+        "name": "A1",
+        "cookie": "wbsid=A1",
+        "local": "A1",
+        "sid": "A1",
+        "href": "http://127.0.0.1:8897/whoami/A1",
+        "at": 1789646573934
+      },
+      "cookie": "wbsid=A1",
+      "local": "A1",
+      "href": "http://127.0.0.1:8897/whoami/A1",
+      "t0": 1789646572076
+    }
+  },
+  "sendOpenA2": {
+    "ready": true,
+    "readyMs": 19,
+    "typed": "打开 http://127.0.0.1:8897/whoami/A2",
+    "typedOk": true,
+    "sendHit": true,
+    "geom": {
+      "found": true,
+      "text": "发送",
+      "x": 1077,
+      "y": 693,
+      "w": 54,
+      "h": 36,
+      "inViewport": true,
+      "topTag": "BUTTON",
+      "topCls": "",
+      "isSelf": true
+    }
+  },
+  "a2Webview": {
+    "partition": "persist:workbench-browser-project-37",
+    "src": "http://127.0.0.1:8897/whoami/A2",
+    "wcId": 4,
+    "url": "http://127.0.0.1:8897/whoami/A2"
+  },
+  "a2Guest": {
+    "site": {
+      "name": "A2",
+      "cookie": "wbsid=A1",
+      "local": "A1",
+      "sid": "A1",
+      "href": "http://127.0.0.1:8897/whoami/A2",
+      "at": 1789646592841
+    },
+    "cookie": "wbsid=A1",
+    "local": "A1",
+    "href": "http://127.0.0.1:8897/whoami/A2",
+    "t0": 1789646592631.7
+  },
+  "sendOpenB1": {
+    "ready": true,
+    "readyMs": 52,
+    "typed": "打开 http://127.0.0.1:8897/whoami/B1",
+    "typedOk": true,
+    "sendHit": true,
+    "geom": {
+      "found": true,
+      "text": "发送",
+      "x": 1077,
+      "y": 693,
+      "w": 54,
+      "h": 36,
+      "inViewport": true,
+      "topTag": "BUTTON",
+      "topCls": "",
+      "isSelf": true
+    }
+  },
+  "b1Webview": {
+    "partition": "persist:workbench-browser-project-38",
+    "src": "http://127.0.0.1:8897/whoami/B1",
+    "wcId": 5,
+    "url": "http://127.0.0.1:8897/whoami/B1"
+  },
+  "b1Guest": {
+    "site": {
+      "name": "B1",
+      "cookie": "",
+      "local": "",
+      "sid": "",
+      "href": "http://127.0.0.1:8897/whoami/B1",
+      "at": 1789646597495
+    },
+    "cookie": "",
+    "local": "",
+    "href": "http://127.0.0.1:8897/whoami/B1",
+    "t0": 1789646597277.5
+  },
+  "a2AfterBLogin": {
+    "navigated": true,
+    "ms": 59,
+    "state": {
+      "site": {
+        "name": "A2-afterB",
+        "cookie": "wbsid=A1",
+        "local": "A1",
+        "sid": "A1",
+        "href": "http://127.0.0.1:8897/whoami/A2-afterB",
+        "at": 1789646616828
+      },
+      "cookie": "wbsid=A1",
+      "local": "A1",
+      "href": "http://127.0.0.1:8897/whoami/A2-afterB",
+      "t0": 1789646616819.3
+    }
+  },
+  "downloadRecords": [
+    {
+      "at": "2026-09-17T12:03:39.524Z",
+      "projectId": 37,
+      "agentId": 88,
+      "agentSource": "renderer",
+      "filename": "wb3-A1.txt",
+      "savePath": "C:\\Users\\bing\\AppData\\Local\\Temp\\wb3\\profile\\browser-projects\\37\\downloads\\wb3-A1.txt",
+      "url": "http://127.0.0.1:8897/dl/A1",
+      "partition": "C:\\Users\\bing\\AppData\\Local\\Temp\\wb3\\profile\\Partitions\\workbench-browser-project-37"
+    },
+    {
+      "at": "2026-09-17T12:03:41.158Z",
+      "projectId": 37,
+      "agentId": 88,
+      "agentSource": "renderer",
+      "filename": "wb3-A2.txt",
+      "savePath": "C:\\Users\\bing\\AppData\\Local\\Temp\\wb3\\profile\\browser-projects\\37\\downloads\\wb3-A2.txt",
+      "url": "http://127.0.0.1:8897/dl/A2",
+      "partition": "C:\\Users\\bing\\AppData\\Local\\Temp\\wb3\\profile\\Partitions\\workbench-browser-project-37"
+    }
+  ],
+  "downloadDir": {
+    "path": "C:\\Users\\bing\\AppData\\Local\\Temp\\wb3\\profile\\browser-projects\\37\\downloads",
+    "files": [
+      "wb3-A1.txt",
+      "wb3-A2.txt"
+    ]
+  },
+  "tabsA1": {
+    "who": "新智能体 的浏览器",
+    "tabCount": 1,
+    "tabs": [
+      {
+        "on": true,
+        "label": "登录态测试站",
+        "run": false,
+        "title": "http://127.0.0.1:8897/whoami/A1"
+      }
+    ],
+    "countLabel": "1 张活页",
+    "warn": null,
+    "url": "http://127.0.0.1:8897/whoami/A1",
+    "panelRect": {
+      "x": 220,
+      "y": 0,
+      "h": 475
+    }
+  },
+  "tabsA2": {
+    "who": "新智能体 的浏览器",
+    "tabCount": 1,
+    "tabs": [
+      {
+        "on": true,
+        "label": "登录态测试站",
+        "run": false,
+        "title": "http://127.0.0.1:8897/whoami/A2"
+      }
+    ],
+    "countLabel": "1 张活页",
+    "warn": null,
+    "url": "http://127.0.0.1:8897/whoami/A2",
+    "panelRect": {
+      "x": 220,
+      "y": 0,
+      "h": 475
+    }
+  },
+  "sendGoalA": {
+    "ready": true,
+    "readyMs": 34,
+    "typed": "打开 http://127.0.0.1:8897/page-a 把整页读完，最后给我一份 P3-LANE-A 结论",
+    "typedOk": true,
+    "sendHit": true,
+    "geom": {
+      "found": true,
+      "text": "发送",
+      "x": 1077,
+      "y": 693,
+      "w": 54,
+      "h": 36,
+      "inViewport": true,
+      "topTag": "BUTTON",
+      "topCls": "",
+      "isSelf": true
+    }
+  },
+  "sendGoalB": {
+    "ready": true,
+    "readyMs": 34,
+    "typed": "打开 http://127.0.0.1:8897/page-b 把整页读完，最后给我一份 P3-LANE-B 结论",
+    "typedOk": true,
+    "sendHit": true,
+    "geom": {
+      "found": true,
+      "text": "发送",
+      "x": 1077,
+      "y": 693,
+      "w": 54,
+      "h": 36,
+      "inViewport": true,
+      "topTag": "BUTTON",
+      "topCls": "",
+      "isSelf": true
+    }
+  },
+  "lanes": {
+    "wcA": 3,
+    "wcB": 4,
+    "llmCountA": 3,
+    "llmCountB": 1,
+    "sentAtA": 1789646626535,
+    "sentAtB": 1789646630169
+  },
+  "pause": {
+    "at": 1789646632572,
+    "ret": "{\"phase\":\"paused\",\"detail\":\"已暂停 — 自动 click/type 已停止，内嵌页可手点（点「继续」先读你停留的页面）\",\"step\":0,\"blocked\":true,\"wcId\":3}",
+    "stepBefore": {
+      "A": 1,
+      "B": 0
+    },
+    "samples": [
+      {
+        "at": 1789646636617,
+        "stepA": 2,
+        "stepB": 1,
+        "drvA": "paused",
+        "drvB": "running"
+      },
+      {
+        "at": 1789646640729,
+        "stepA": 2,
+        "stepB": 3,
+        "drvA": "paused",
+        "drvB": "running"
+      },
+      {
+        "at": 1789646644835,
+        "stepA": 2,
+        "stepB": 5,
+        "drvA": "paused",
+        "drvB": "running"
+      }
+    ],
+    "resumeRet": "{\"phase\":\"running\",\"detail\":\"2 路驾驶中 · 本路任务：打开 http://127.0.0.1:8897/page-\",\"step\":0,\"blocked\":false,\"wcId\":3}",
+    "stepAfterResume": 3
+  },
+  "switchRegression": {
+    "at": 1789646653289,
+    "stepBefore": 3,
+    "stepInB": 6,
+    "stepAfter": 6,
+    "guestBefore": {
+      "site": null,
+      "cookie": "wbsid=A1",
+      "local": "A1",
+      "href": "http://127.0.0.1:8897/page-a",
+      "t0": 1789646627471.9
+    },
+    "guestAfter": {
+      "site": null,
+      "cookie": "wbsid=A1",
+      "local": "A1",
+      "href": "http://127.0.0.1:8897/page-a",
+      "t0": 1789646627471.9
+    }
+  },
+  "partitionsAfter": {
+    "profile": "C:/Users/bing/AppData/Local/Temp/wb3/profile",
+    "takenAt": "2026-09-17T12:04:20.432Z",
+    "summary": {
+      "total": 2,
+      "byKind": {
+        "project": 2
+      },
+      "agentPartitionIds": [],
+      "projectPartitionIds": [
+        37,
+        38
+      ]
+    },
+    "dirs": [
+      {
+        "dir": "workbench-browser-project-37",
+        "kind": "project",
+        "id": 37,
+        "files": 45
+      },
+      {
+        "dir": "workbench-browser-project-38",
+        "kind": "project",
+        "id": 38,
+        "files": 45
+      }
+    ],
+    "projectsDownloads": [
+      {
+        "name": "_downloads.jsonl",
+        "isDir": false,
+        "mtime": "2026-09-17T12:03:41.160Z",
+        "size": 730
+      },
+      {
+        "name": "37",
+        "isDir": true,
+        "mtime": "2026-09-17T12:03:39.525Z",
+        "size": null,
+        "bytes": 152,
+        "files": 2,
+        "dirs": 1
+      }
+    ],
+    "records": [
+      {
+        "at": "2026-09-17T12:03:39.524Z",
+        "projectId": 37,
+        "agentId": 88,
+        "agentSource": "renderer",
+        "filename": "wb3-A1.txt",
+        "savePath": "C:\\Users\\bing\\AppData\\Local\\Temp\\wb3\\profile\\browser-projects\\37\\downloads\\wb3-A1.txt",
+        "url": "http://127.0.0.1:8897/dl/A1",
+        "partition": "C:\\Users\\bing\\AppData\\Local\\Temp\\wb3\\profile\\Partitions\\workbench-browser-project-37"
+      },
+      {
+        "at": "2026-09-17T12:03:41.158Z",
+        "projectId": 37,
+        "agentId": 88,
+        "agentSource": "renderer",
+        "filename": "wb3-A2.txt",
+        "savePath": "C:\\Users\\bing\\AppData\\Local\\Temp\\wb3\\profile\\browser-projects\\37\\downloads\\wb3-A2.txt",
+        "url": "http://127.0.0.1:8897/dl/A2",
+        "partition": "C:\\Users\\bing\\AppData\\Local\\Temp\\wb3\\profile\\Partitions\\workbench-browser-project-37"
+      }
+    ]
+  },
+  "cleanup": {
+    "userId": 20,
+    "found": true,
+    "phoneHashTail": "2d855617",
+    "deleted": {
+      "smsCodes": 1,
+      "users": 1
+    },
+    "before": {
+      "counts": {
+        "users": 4,
+        "projects": 7,
+        "agents": 13,
+        "conversations": 13,
+        "messages": 529,
+        "tasks": 215,
+        "memories": 39,
+        "user_memories": 3,
+        "agent_memories": 1,
+        "knowledge_documents": 2,
+        "knowledge_chunks": 2
+      },
+      "ids": {
+        "users": "1,2,3,20",
+        "projects": "1,2,3,10,36,37,38",
+        "agents": "1,2,3,8,9,30,32,86,87,88,89,90,91",
+        "conversations": "1,2,3,8,9,71,73,121,122,123,124,125,126",
+        "messages": "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,256,257,258,259,260,261,262,263,264,265,266,267,268,269,270,271,272,273,274,275,276,277,278,279,280,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296,297,298,299,300,301,302,303,304,305,306,307,308,309,310,311,312,313,314,315,316,317,318,319,320,321,322,323,324,325,326,327,328,329,330,331,332,333,334,335,336,337,338,339,340,341,342,343,344,345,346,347,348,349,350,351,352,353,354,355,356,357,358,359,360,361,362,363,364,365,366,367,368,369,370,371,372,373,374,375,376,377,378,379,380,381,382,383,384,385,386,387,388,389,390,391,392,393,394,395,396,397,398,399,400,401,402,403,404,405,406,407,408,409,410,411,412,413,414,415,416,417,418,419,420,421,422,423,424,425,426,427,428,429,430,431,432,433,434,435,436,437,438,439,440,441,442,443,444,445,446,447,448,449,450,451,452,453,454,455,456,457,458,459,460,461,462,463,464,465,466,467,468,469,470,471,472,473,474,475,476,477,478,479,480,481,482,483,484,485,486,487,488,489,490,491,492,493,494,495,496,497,498,499,500,501,502,503,504,505,506,507,508,509,510,511,512,513,514,515,516,517,518,519,520,521,522,523,524,525,526,527,528,529,530,531,532,533,534,535,536,537,538,539,540,541,542,543,544,545,546,547,548,549,550,551,552,553,554,555,556,557,558,559,560,561,562,563,564,565,566,567,568,569,580,581,588,589,590,591,592,593,594,595,596,597",
+        "tasks": "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,215,216,217",
+        "memories": "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40",
+        "user_memories": "3,4,5",
+        "agent_memories": "8",
+        "knowledge_documents": "7,9",
+        "knowledge_chunks": "7,9"
+      }
+    },
+    "after": {
+      "counts": {
+        "users": 3,
+        "projects": 4,
+        "agents": 7,
+        "conversations": 7,
+        "messages": 519,
+        "tasks": 212,
+        "memories": 39,
+        "user_memories": 3,
+        "agent_memories": 1,
+        "knowledge_documents": 2,
+        "knowledge_chunks": 2
+      },
+      "ids": {
+        "users": "1,2,3",
+        "projects": "1,2,3,10",
+        "agents": "1,2,3,8,9,30,32",
+        "conversations": "1,2,3,8,9,71,73",
+        "messages": "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,256,257,258,259,260,261,262,263,264,265,266,267,268,269,270,271,272,273,274,275,276,277,278,279,280,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296,297,298,299,300,301,302,303,304,305,306,307,308,309,310,311,312,313,314,315,316,317,318,319,320,321,322,323,324,325,326,327,328,329,330,331,332,333,334,335,336,337,338,339,340,341,342,343,344,345,346,347,348,349,350,351,352,353,354,355,356,357,358,359,360,361,362,363,364,365,366,367,368,369,370,371,372,373,374,375,376,377,378,379,380,381,382,383,384,385,386,387,388,389,390,391,392,393,394,395,396,397,398,399,400,401,402,403,404,405,406,407,408,409,410,411,412,413,414,415,416,417,418,419,420,421,422,423,424,425,426,427,428,429,430,431,432,433,434,435,436,437,438,439,440,441,442,443,444,445,446,447,448,449,450,451,452,453,454,455,456,457,458,459,460,461,462,463,464,465,466,467,468,469,470,471,472,473,474,475,476,477,478,479,480,481,482,483,484,485,486,487,488,489,490,491,492,493,494,495,496,497,498,499,500,501,502,503,504,505,506,507,508,509,510,511,512,513,514,515,516,517,518,519,520,521,522,523,524,525,526,527,528,529,530,531,532,533,534,535,536,537,538,539,540,541,542,543,544,545,546,547,548,549,550,551,552,553,554,555,556,557,558,559,560,561,562,563,564,565,566,567,568,569,580,581",
+        "tasks": "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212",
+        "memories": "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40",
+        "user_memories": "3,4,5",
+        "agent_memories": "8",
+        "knowledge_documents": "7,9",
+        "knowledge_chunks": "7,9"
+      }
+    }
+  },
+  "liveAfter": {
+    "users": 3,
+    "projects": 4,
+    "agents": 7,
+    "conversations": 7,
+    "messages": 519,
+    "tasks": 212,
+    "memories": 39,
+    "user_memories": 3,
+    "agent_memories": 1,
+    "knowledge_documents": 2,
+    "knowledge_chunks": 2
+  },
+  "endedAt": "2026-09-17T20:04:24+0800",
+  "summary": {
+    "total": 91,
+    "passed": 83,
+    "failed": 8,
+    "failedNames": [
+      "**A1 在站点上真的登录成功了（页面自己读到 cookie + localStorage）**",
+      "**★验收标准 1★ A2 从没登录过，打开同站却是登录状态（页面侧 cookie = A1 的会话）**",
+      "B1 在项目 B 里也登录成功（sid=B1）",
+      "**★验收标准 2（反向）★ 在 B 里登录过之后，A2 的会话仍是 A 的（sid=A1，没被 B1 冲掉）**",
+      "站点侧全程记录：A 始终 wbsid=A1、B 始终 wbsid=B1（两条线没有交叉过）",
+      "**★验收标准 3★ 记录里认得出「wb3-A2.txt 是 A2 下载的」（同一个目录、不同智能体分得清）**",
+      "**★验收标准 4★ 被暂停的那一路停住了（A1 的步数不再涨）**",
+      "验收临时 profile 已删（不会污染你的真实 userData）"
+    ]
+  }
+}

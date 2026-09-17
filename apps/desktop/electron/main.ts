@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, shell, type WebContents } from 'electron';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, appendFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -44,24 +44,55 @@ let mainWindow: BrowserWindow | null = null;
 const isHttpUrl = (url: string): boolean => /^https?:\/\//i.test(url);
 
 /**
- * 第 20 步：一个智能体 = 一套独立浏览器环境。
+ * Phase 3：**登录态隔离粒度 = 项目**（同项目的多个智能体共用一套 cookie / localStorage）。
  *
- * 渲染层的 <webview> 用 `partition="persist:workbench-browser-agent-<agentId>"`，
+ * 渲染层的 <webview> 用 `partition="persist:workbench-browser-project-<projectId>"`，
  * Electron 会把这个分区落到 `<userData>/Partitions/<分区名>/` —— 这天然就是
- * 「每个 bot 在 userData 下有自己的子目录」（cookie / localStorage / 站点数据全在里面）。
+ * 「每个项目在 userData 下有自己的子目录」（cookie / localStorage / 站点数据全在里面）。
  *
- * 这里额外做一件渲染层做不到的事：**把下载也按智能体分开**。
+ * ⚠️ 与标签页粒度别混：标签页 / 任务 / 暂停继续仍然**按 agentId** 隔离（那是渲染层的事）；
+ *    主进程这边只关心分区（= 项目），外加「下载记录要能标出是哪个智能体触发的」。
+ *
  * ⚠️ 主进程 import 不到渲染层代码，所以分区命名规则在这里是**同规则的第二份**
- * （渲染层见 apps/desktop/src/browser/url.ts 的 partitionFor），**改一处要同时改两处**。
+ *    （渲染层见 apps/desktop/src/browser/url.ts 的 partitionFor），**改一处要同时改两处**。
  */
-const AGENT_PARTITION_RE = /workbench-browser-agent-(\d+)/;
+const PROJECT_PARTITION_RE = /workbench-browser-project-(\d+)/;
 
 /** 已经挂过 will-download 的分区（同一个分区可能被多次 attach，别重复挂） */
 const downloadHooked = new Set<string>();
 
-/** 某个智能体自己的下载目录（不存在就建出来） */
-function agentDownloadDir(agentId: number): string {
-  const dir = path.join(app.getPath('userData'), 'browser-agents', String(agentId), 'downloads');
+/**
+ * Phase 3：guest webContents id → 开这张页的智能体。
+ *
+ * 分区名里现在只放得下 projectId，agentId 放不下了 —— 主进程要知道「这次下载是哪个智能体触发的」，
+ * 只能由渲染层在页就绪时报一次（IPC `workbench:browser:owner`，见 preload 的 browserOwner()）。
+ * 另外驾驶中的那几路还有 `lastAgentByWc` 兜底。
+ */
+const webviewOwner = new Map<number, number>();
+
+/** 这次下载是哪个智能体触发的（拿不到就说拿不到，**绝不瞎猜成某一个**） */
+function ownerAgentOf(wcId: number): { agentId: number | null; source: string } {
+  const fromRenderer = webviewOwner.get(wcId);
+  if (typeof fromRenderer === 'number') return { agentId: fromRenderer, source: 'renderer' };
+  const fromLane = lastAgentByWc.get(wcId);
+  if (typeof fromLane === 'number') return { agentId: fromLane, source: 'lane' };
+  return { agentId: null, source: 'unknown' };
+}
+
+/** 按项目存下载的根目录（不存在就建出来） */
+function projectRootDir(): string {
+  const dir = path.join(app.getPath('userData'), 'browser-projects');
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch (error) {
+    console.warn('[download] 建目录失败：', (error as Error).message);
+  }
+  return dir;
+}
+
+/** 某个项目自己的下载目录（不存在就建出来） */
+function projectDownloadDir(projectId: number): string {
+  const dir = path.join(projectRootDir(), String(projectId), 'downloads');
   try {
     mkdirSync(dir, { recursive: true });
   } catch (error) {
@@ -71,22 +102,59 @@ function agentDownloadDir(agentId: number): string {
 }
 
 /**
- * 给「某个智能体的浏览器分区」挂下载落盘规则：文件直接进它自己的 downloads 目录，
- * 不弹系统「另存为」，也不会串到别的智能体那儿。
+ * 下载记录（append-only JSONL，落在 `<userData>/browser-projects/_downloads.jsonl`）。
+ *
+ * 这是「呈现给用户/排查用」的那份记录：**物理目录按项目合并了，但每条记录都带 agentId**，
+ * 所以「这个文件是哪个智能体下载的」永远查得到，不会因为合并目录而丢失。
+ */
+function appendDownloadRecord(record: Record<string, unknown>): void {
+  try {
+    appendFileSync(path.join(projectRootDir(), '_downloads.jsonl'), `${JSON.stringify(record)}\n`, 'utf8');
+  } catch (error) {
+    console.warn('[download] 写下载记录失败：', (error as Error).message);
+  }
+}
+
+/**
+ * 给「某个项目的浏览器分区」挂下载落盘规则：文件进这个项目自己的 downloads 目录，
+ * 不弹系统「另存为」。
+ *
+ * Phase 3 的两件事一起做：
+ *   1. 物理目录按**项目**（同一项目的多个智能体下的文件落在同一处）；
+ *   2. **记录里仍标 agentId** —— 目录合并了，归属信息不合并。
+ *
  * 认不出分区的（例如主窗口自己那个默认 session）一律不管。
  */
-function hookAgentDownloads(contents: WebContents): void {
+function hookProjectDownloads(contents: WebContents): void {
   const ses = contents.session;
   const storage = ses.getStoragePath() ?? '';
-  const m = AGENT_PARTITION_RE.exec(storage);
+  const m = PROJECT_PARTITION_RE.exec(storage);
   if (!m) return;
   if (downloadHooked.has(storage)) return;
   downloadHooked.add(storage);
-  const agentId = Number(m[1]);
-  ses.on('will-download', (_event, item) => {
-    const savePath = path.join(agentDownloadDir(agentId), item.getFilename());
+  const projectId = Number(m[1]);
+  // ⚠️ 归属必须取**第三个参数**（真正发起这次下载的那个 guest），不能闭包里的 `contents`：
+  // Phase 3 起一个项目一个分区，**同一 session 被该项目的多个智能体共用**，
+  // `contents` 只是第一个创建这个 session 的页 —— 拿它当「谁下载的」会把同项目其他智能体
+  // 的下载全记到那第一只头上（真机取证时确实踩到了：A2 的下载被记成 A1）。
+  ses.on('will-download', (_event, item, fromWc) => {
+    const filename = item.getFilename();
+    const savePath = path.join(projectDownloadDir(projectId), filename);
     item.setSavePath(savePath);
-    console.log(`[download] 智能体 ${agentId} 的下载落到：${savePath}`);
+    const owner = ownerAgentOf((fromWc ?? contents).id);
+    appendDownloadRecord({
+      at: new Date().toISOString(),
+      projectId,
+      agentId: owner.agentId,
+      agentSource: owner.source,
+      filename,
+      savePath,
+      url: item.getURL(),
+      partition: storage,
+    });
+    console.log(
+      `[download] 项目 ${projectId} / 智能体 ${owner.agentId ?? '未知'}（${owner.source}）的下载落到：${savePath}`,
+    );
   });
 }
 
@@ -105,8 +173,13 @@ function hookAgentDownloads(contents: WebContents): void {
 app.on('web-contents-created', (_event, contents) => {
   if (contents.getType() !== 'webview') return;
 
-  // 第 20 步：这个内嵌页属于哪个智能体，它的下载就落到那个智能体自己的目录
-  hookAgentDownloads(contents);
+  // Phase 3：这个内嵌页属于哪个项目，它的下载就落到那个项目自己的目录（记录里仍标 agentId）
+  hookProjectDownloads(contents);
+
+  // 页没了就把 owner 登记清掉，别让 wcId 被复用后认错人
+  contents.once('destroyed', () => {
+    webviewOwner.delete(contents.id);
+  });
 
   contents.setWindowOpenHandler(({ url }) => {
     if (isHttpUrl(url)) {
@@ -233,8 +306,8 @@ function createMainWindow(): void {
 // 内嵌浏览器区域（工作台浏览器）
 //
 // 注意：这里**不再创建任何 BrowserWindow**。
-// 网页由渲染层的 <webview partition="persist:workbench-browser-agent-<agentId>"> 承载
-// （第 20 步：按智能体分区，一个智能体一套 cookie / 登录态），
+// 网页由渲染层的 <webview partition="persist:workbench-browser-project-<projectId>"> 承载
+// （Phase 3：按项目分区 —— 同项目的智能体共用一套 cookie / 登录态，跨项目完全隔离），
 // 主进程只做一件事：把渲染进程发来的指令原样转发回去，由渲染层决定显示 / 隐藏 / 聚焦。
 //
 // 这样做的原因：浏览器区域是主窗口界面的一部分（右侧那一栏），
@@ -787,6 +860,20 @@ ipcMain.handle(
 
 /** 第 17 步：当前正在驾驶的 webview guest id 列表（渲染层开第 3 张页时用来挑「没在跑的那张」） */
 ipcMain.handle('workbench:agent:lanes', () => [...lanes.keys()]);
+
+/**
+ * Phase 3：渲染层登记「这张内嵌页是哪个智能体开的」。
+ *
+ * 分区名里现在只放得下 projectId，而下载记录必须能标出「哪个智能体触发的」——
+ * 所以由渲染层在页就绪时报一次（见 preload 的 browserOwner / BrowserPanel 的 dom-ready）。
+ */
+ipcMain.handle('workbench:browser:owner', (_event, wcIdRaw: unknown, agentIdRaw: unknown) => {
+  const wcId = Number(wcIdRaw);
+  const agentId = Number(agentIdRaw);
+  if (!Number.isInteger(wcId) || wcId < 0) return;
+  if (!Number.isInteger(agentId) || agentId <= 0) return;
+  webviewOwner.set(wcId, agentId);
+});
 
 // 第 8 步：结果文档下载。渲染层把 apiBase+token 传进来（刷新后主进程可能没会话）；
 // 拿到 Markdown 后：先本地脱敏兜底，再弹系统“保存为”对话框（只有 1 个窗口，不新增窗）。

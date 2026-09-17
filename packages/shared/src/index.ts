@@ -247,6 +247,15 @@ export interface WorkbenchBridge {
   agentLanes: () => Promise<number[]>;
 
   /**
+   * Phase 3：把「这张内嵌页（guest webContents id）是哪个智能体开的」告诉主进程。
+   *
+   * 为什么需要：分区粒度改成按项目之后，主进程从分区名里只读得到**项目**，
+   * 读不到智能体；而下载记录必须能标出「这是哪个智能体触发的」。
+   * 渲染层在页就绪时登记一次，主进程据此给下载记录打 owner 标记。
+   */
+  browserOwner: (webContentsId: number, agentId: number) => Promise<void>;
+
+  /**
    * 第 9 步：把用户对「补资料」提问的回答交给主进程（仅普通资料；敏感值别走这里）。
    * 第 17 步：带 targetWebContentsId 时只喂给**那一路**（那张页），别路不串。
    */

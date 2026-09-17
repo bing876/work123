@@ -12,8 +12,11 @@
  *   1. **取消活页硬顶**（原来的 `MAX_LIVE_PAGES = 10` 已删）：开多少张都行，也不再
  *      「第 11 张顶掉最旧」。页数偏多只在 UI 上提示一句「开太多会卡」——**绝不偷偷关页**，
  *      卡顿是本步明确接受的已知代价。
- *   2. **分区按智能体隔离**：一个智能体一套 cookie / 登录态 / 站点数据，
- *      分区名由 `partitionFor(agentId)` 生成。
+ *   2. 分区按智能体隔离（第 20 步当时的口径）。
+ *
+ * **Phase 3 改的是「隔离粒度」这一层**：分区从「按智能体」改成**「按项目」** ——
+ * 同项目的多个智能体共用一套登录态，不同项目之间照旧完全隔离。
+ * 标签页归属 / 任务执行状态 / 暂停继续**不跟着改**，仍然按智能体隔离（见 useBrowserWorkspace）。
  */
 
 /**
@@ -24,26 +27,42 @@
  */
 export const SOFT_TAB_HINT = 10;
 
+/** 分区名前缀。落盘目录名不带 `persist:`（Electron 会剥掉），主进程侧按同一套规则反解。 */
+export const PROJECT_PARTITION_PREFIX = 'persist:workbench-browser-project-';
+
+/** 认不出项目时用的兜底分区：**单独一桶，绝不跟任何一个真项目混**（宁可登出，不可串号）。 */
+export const ORPHAN_PARTITION = `${PROJECT_PARTITION_PREFIX}none`;
+
 /**
- * 一个智能体 = 一套独立浏览器环境（cookie / localStorage / 登录态 / 站点数据全分开）。
+ * **Phase 3：一个项目 = 一套浏览器登录态**（cookie / localStorage / session）。
+ *
+ * 同一项目下的多个智能体共用这一个分区 —— 所以在项目里让 A 登录某网站，
+ * 切到同项目的 B 打开同一个网站就是登录状态，不用再登一次。
+ * **不同项目之间仍然完全隔离**（分区名不同 = session 不同 = 数据不同）。
+ *
+ * ⚠️ 这一层**只管登录态**。标签页归属、任务执行状态、暂停/继续，
+ *    全部照旧**按 agentId 隔离**（见 useBrowserWorkspace 的桶键、BrowserTabView.agentId），
+ *    绝不因为分区合并了就把标签页也合并 —— 那两件事在代码里是分开的。
  *
  * Electron 会把 `persist:` 分区落到 `<userData>/Partitions/<分区名>/`，
- * 这天然就是「每个 bot 在 userData 下有自己的子目录」，不需要额外搬家。
+ * 不需要额外搬家。
  *
- * ⚠️ 名字一旦定下就**不要再改**：改了等于把每个智能体已登录的站点全部登出。
- * ⚠️ 主进程 electron/main.ts 里用同一套命名规则反解（见那边的 `AGENT_PARTITION_RE`），
+ * ⚠️ 名字一旦定下就**不要再改**：改了等于把每个项目下已登录的站点全部登出。
+ * ⚠️ 主进程 electron/main.ts 里用同一套命名规则反解（见那边的 `PROJECT_PARTITION_RE`），
  *    主进程 import 不到渲染层代码，所以那边是同规则的第二份，**改这里要同时改那里**。
  */
-export function partitionFor(agentId: number): string {
-  return `persist:workbench-browser-agent-${agentId}`;
+export function partitionFor(projectId: number | null | undefined): string {
+  const id = Number(projectId);
+  if (!Number.isInteger(id) || id <= 0) return ORPHAN_PARTITION;
+  return `${PROJECT_PARTITION_PREFIX}${id}`;
 }
 
-/** 反解分区名里的智能体 id；不是「某智能体的浏览器分区」就返回 null */
-export function agentIdFromPartition(partition: string): number | null {
-  const m = /^persist:workbench-browser-agent-(\d+)$/.exec(partition ?? '');
+/** 反解分区名里的项目 id；不是「某项目的浏览器分区」就返回 null（含兜底分区 `-none`） */
+export function projectIdFromPartition(partition: string): number | null {
+  const m = /^persist:workbench-browser-project-(\d+)$/.exec(partition ?? '');
   if (!m) return null;
   const id = Number(m[1]);
-  return Number.isInteger(id) ? id : null;
+  return Number.isInteger(id) && id > 0 ? id : null;
 }
 
 /** 只允许 http(s)：其它协议不进导航，也不弹系统框 */

@@ -27,8 +27,30 @@ const DELAY_MS = Number(process.env.FAKE_DELAY_MS || 1200);
 /** 每条循环在 stop(done) 之前先走几步 read_page */
 const STEPS = Number(process.env.FAKE_STEPS || 4);
 const LOG = process.env.FAKE_LOG || '';
+/** Phase 3：登录态测试站的**服务端原始请求日志**（JSONL，带每个请求实际带的 Cookie） */
+const SITE_LOG = process.env.SITE_LOG || '';
 
 if (LOG) writeFileSync(LOG, '');
+if (SITE_LOG) writeFileSync(SITE_LOG, '');
+
+/** Phase 3：站点侧逐请求记录 —— 「哪个分区（= 哪个项目）带着谁的 cookie 来」以这里为准 */
+function logSite(rec) {
+  const line = JSON.stringify({ at: Date.now(), iso: new Date().toISOString(), ...rec });
+  if (SITE_LOG) {
+    try {
+      appendFileSync(SITE_LOG, `${line}\n`);
+    } catch {
+      /* 记不上不影响验收本身 */
+    }
+  }
+  console.log(line);
+}
+
+/** 从 Cookie 头里抠出验证站点用的那个 sid */
+function sidOf(cookieHeader) {
+  const m = /(?:^|;\s*)wbsid=([^;]+)/.exec(cookieHeader || '');
+  return m ? m[1] : '';
+}
 
 function log(obj) {
   const line = JSON.stringify({ at: Date.now(), iso: new Date().toISOString(), ...obj });
@@ -124,8 +146,107 @@ function readBody(req) {
   });
 }
 
+/* ===========================================================================
+ * Phase 3 · 登录态测试站（**纯增量**：下面这些都是新路由，上面 2a/2b/desk 用到的
+ *   /page-* / /form / /health / chat-completions 一律没动）
+ *
+ * 它存在的理由：验证「登录态隔离粒度」不能靠猜，得有一个**真站点**：
+ *   - /sid?name=X   —— 真的下发一个 `Set-Cookie: wbsid=X`，并在页面里写 localStorage
+ *   - /whoami?name=X —— 一个**只读**页面：把「服务端看到的 cookie」和「页面读到的
+ *     cookie / localStorage」都渲染出来，还会挂一个真下载链接
+ *   - /dl?name=X    —— 真的回一个 Content-Disposition: attachment，触发 Electron 的下载落盘
+ *
+ * 每个请求都写进 SITE_LOG：**服务端收到的那份 cookie 是原始证据**
+ * —— 「同项目的 B 打开就是登录态」「跨项目的 B 打开是游客」都不用听界面说，看这里。
+ * ========================================================================= */
+
+/** 测试站点页：把当前会话状态渲染出来 + 一个真下载链接 */
+function sitePage(name) {
+  return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>登录态测试站</title></head>
+<body>
+  <h1 id="h1">登录态测试站</h1>
+  <p id="state">…</p>
+  <p>本页身份标记：<b id="who">${name}</b></p>
+  <p><a id="dl" href="/dl/${name}">下载一个归属测试文件</a></p>
+  <button id="relogin" type="button">以「${name}」身份登录（写 cookie + localStorage）</button>
+  <script>
+    var NAME = ${JSON.stringify(name)};
+    function render() {
+      var cookie = document.cookie || '';
+      var local = localStorage.getItem('wbwho') || '';
+      var sid = (cookie.match(/(?:^|;\\s*)wbsid=([^;]+)/) || [])[1] || '';
+      document.getElementById('state').textContent =
+        (sid ? 'LOGGED-IN sid=' + sid : 'GUEST sid=') + ' | local=' + (local || '(空)');
+      window.__site = { name: NAME, cookie: cookie, local: local, sid: sid,
+                        href: location.href, at: Date.now() };
+    }
+    document.getElementById('relogin').addEventListener('click', function () {
+      localStorage.setItem('wbwho', NAME);
+      fetch('/sid/' + encodeURIComponent(NAME), { credentials: 'include' })
+        .then(function () {
+          // 登录后**重新走一次这个地址**（而不是只 render）：这样站点侧会再收到一条
+          // 带新 cookie 的 /whoami 请求，「服务端看到的是谁」与页面侧才是同一次事实。
+          location.reload();
+        });
+    });
+    render();
+  </script>
+</body></html>`;
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url || '/', `http://127.0.0.1:${PORT}`);
+  const cookieHeader = req.headers.cookie || '';
+  /**
+   * Phase 3：站点的身份标记走**路径**（/whoami/<name>）而不是 query ——
+   * 渲染层「打开 <地址>」的识别正则不含 `?`，带 query 的地址会被截断。
+   * 两种写法都认，路径优先。
+   */
+  const argName = url.pathname.split('/').filter(Boolean)[1] || url.searchParams.get('name') || 'anon';
+  const route = url.pathname.startsWith('/sid') ? '/sid'
+    : url.pathname.startsWith('/whoami') ? '/whoami'
+      : url.pathname.startsWith('/dl') ? '/dl' : '';
+
+  // ---- Phase 3 登录站：所有请求先落一条原始日志（带服务端实际收到的 cookie）----
+  if (route) {
+    logSite({
+      path: route,
+      routePath: url.pathname,
+      name: argName,
+      cookie: cookieHeader,
+      sid: sidOf(cookieHeader),
+      ua: String(req.headers['user-agent'] || '').slice(0, 60),
+    });
+  }
+
+  /** 登录：真的下发 cookie（非 HttpOnly，页面自己也读得到，两条证据能对上） */
+  if (req.method === 'GET' && route === '/sid') {
+    res.writeHead(200, {
+      'content-type': 'text/plain; charset=utf-8',
+      'set-cookie': `wbsid=${encodeURIComponent(argName)}; Path=/; Max-Age=3600`,
+    });
+    res.end(`sid=${argName}`);
+    return;
+  }
+
+  /** 只读的「我是谁」页：cookie / localStorage / 服务端视角三样都摆出来 */
+  if (req.method === 'GET' && route === '/whoami') {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(sitePage(argName));
+    return;
+  }
+
+  /** 下载：回 attachment，触发 Electron 的 will-download（落盘归属在那边算） */
+  if (req.method === 'GET' && route === '/dl') {
+    const body = `Phase 3 归属测试文件\n触发者标记：${argName}\n服务端看到的 sid：${sidOf(cookieHeader) || '(无)'}\n`;
+    res.writeHead(200, {
+      'content-type': 'text/plain; charset=utf-8',
+      'content-disposition': `attachment; filename="wb3-${argName}.txt"`,
+    });
+    res.end(body);
+    return;
+  }
 
   // ---- 测试页 ----
   if (req.method === 'GET' && url.pathname.startsWith('/page-')) {

@@ -45,6 +45,13 @@ body {
   padding: 12px;
   border-right: 1px solid var(--border);
   background: var(--sidebar);
+  /*
+   * 子阶段 2-B：左栏多了一个项目入口，760px 高的窗口下内容会更高。
+   * flex 子项默认 min-height:auto（不肯缩到内容以下），超出部分会被 body 的 overflow:hidden
+   * 直接切掉 —— 表现就是「按钮在 DOM 里、但点不到」（验收里真踩到了）。
+   * 这里让左栏自己能滚：内容装得下时完全没区别，装不下时至少每一个入口都够得着。
+   */
+  overflow-y: auto;
 }
 
 .contact {
@@ -82,6 +89,13 @@ body {
   gap: 4px;
   max-height: 44vh;
   overflow-y: auto;
+  /*
+   * 子阶段 2-B：`overflow-y:auto` 让这个 flex 子项的 min-height:auto 解析成 0，
+   * 于是左栏内容一超高，它就被挤成 0 高（自身能滚、但「＋ 添加」整颗按钮被裁掉，
+   * elementFromPoint 命中到的是 .sidebar —— 表现同样是「DOM 里有、点不到」）。
+   * 明确不参与收缩：要滚由左栏滚（见 .sidebar 的 overflow-y），列表保持自然高度。
+   */
+  flex-shrink: 0;
 }
 .agentList__add {
   margin-top: 4px;
@@ -620,6 +634,34 @@ body {
 .knowledgePanel__del:disabled {
   color: #9ca3af;
   cursor: default;
+}
+
+/* ---- 子阶段 2-B：最简项目入口（左栏顶部）----
+ * 刻意不做视觉设计（不是最终 UI）：只保证「看得见全部项目 / 能新建 / 点一下能切」。
+ * 复用既有 .contact / .btn / .authInput，这里只补几条让它在 220px 左栏里不撑破的约束。
+ */
+.projectBox {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 0 0 auto;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.projectBox__list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+.projectBox__row {
+  padding: 3px 6px;
+}
+.projectBox__note {
+  color: #b45309;
+  line-height: 1.45;
+  word-break: break-word;
 }
 
 /*

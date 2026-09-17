@@ -65,6 +65,12 @@ const bridge: WorkbenchBridge = {
   agentDrop: (targetWebContentsId?: number) => ipcRenderer.invoke('workbench:agent:drop', targetWebContentsId),
   /** 第 17 步：正在驾驶哪几张内嵌页（guest id 列表）——开第 3 张页时用来挑空闲的那张 */
   agentLanes: () => ipcRenderer.invoke('workbench:agent:lanes'),
+  /**
+   * Phase 3：登记「这张内嵌页是哪个智能体开的」。
+   * 分区改成按项目之后，主进程从分区名里读不到 agentId，下载记录靠这个标记 owner。
+   */
+  browserOwner: (webContentsId: number, agentId: number) =>
+    ipcRenderer.invoke('workbench:browser:owner', webContentsId, agentId),
   agentAnswer: (text: string, targetWebContentsId?: number) =>
     ipcRenderer.invoke('workbench:agent:answer', text, targetWebContentsId),
 
