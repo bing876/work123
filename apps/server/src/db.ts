@@ -199,6 +199,24 @@ CREATE TABLE IF NOT EXISTS agent_memories (
   UNIQUE (agent_id, mem_key)
 );
 CREATE INDEX IF NOT EXISTS idx_agent_memories_agent ON agent_memories (agent_id, updated_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- 子阶段 2-A：把「项目」从「一个用户一条默认项目」升级成真正的容器。
+-- 注意：projects 表与 agents/conversations/tasks/memories 的 project_id 外键**本来就存在**
+-- （第 5 步建的），这里补的是「当前项目」「母鸡权限」「知识库归属」三件缺的东西。
+--
+--   users.current_project_id       当前使用中的项目；为空时回落到 is_default 那条（老行为）
+--   agents.can_create_agents       权限开关：能不能建智能体。母鸡 true；普通智能体默认 false
+--   agents.kind = 'hen'            母鸡：随项目一起创建，**不可删除**（见 toAgentView / DELETE 路由）
+--   knowledge_documents.project_id 知识库的项目归属（老数据在 migrateProjectScope 里回填到默认项目）
+--   knowledge_chunks.project_id    同上；冗余一份是为了按项目高效检索，查询仍同时校验 document
+-- ---------------------------------------------------------------------------
+ALTER TABLE users ADD COLUMN IF NOT EXISTS current_project_id BIGINT REFERENCES projects(id) ON DELETE SET NULL;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS can_create_agents BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS project_id BIGINT REFERENCES projects(id) ON DELETE CASCADE;
+ALTER TABLE knowledge_chunks ADD COLUMN IF NOT EXISTS project_id BIGINT REFERENCES projects(id) ON DELETE CASCADE;
+CREATE INDEX IF NOT EXISTS idx_knowledge_documents_project ON knowledge_documents (project_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_project ON knowledge_chunks (project_id, document_id, chunk_index);
 `;
 
 
@@ -264,8 +282,73 @@ async function ensureAgentConversationIndex(pool: Pool): Promise<void> {
   }
 }
 
+/**
+ * 子阶段 2-A 的**幂等数据迁移**（每次启动都跑，跑第二遍是空操作）。
+ *
+ * 三件事，都只补空值、绝不覆盖用户已经选过的值：
+ *   1) `users.current_project_id` 为空 → 回落到该用户的默认项目（= 老行为，一行不变）；
+ *   2) 权限开关不变量：自带「小助」与母鸡（kind='assistant' / 'hen'）必须有「建智能体」权限
+ *      —— 这样**改造前就存在的账号**（没有母鸡，只有小助）也能继续点「＋ 添加」，
+ *      不需要动前端；普通智能体默认 false，不受影响；
+ *   3) 知识库归属：还没有 `project_id` 的老资料/片段 → 挂到**对应 owner 的默认项目**。
+ *      按 owner 分别回填（不是一刀切挂到某一个项目），所以多用户库里不会串号。
+ *
+ * 最后把 `project_id` 收紧成 NOT NULL —— **只有确认一行 NULL 都不剩才收**，
+ * 否则（比如某个用户没有项目）只告警、不拦启动。
+ */
+async function migrateProjectScope(pool: Pool): Promise<void> {
+  try {
+    const cur = await pool.query(
+      `UPDATE users u
+          SET current_project_id = (
+                SELECT p.id FROM projects p WHERE p.user_id = u.id ORDER BY p.is_default DESC, p.id ASC LIMIT 1
+              )
+        WHERE u.current_project_id IS NULL`,
+    );
+    const perm = await pool.query(
+      "UPDATE agents SET can_create_agents = true WHERE kind IN ('assistant', 'hen') AND can_create_agents = false",
+    );
+    const docs = await pool.query(
+      `UPDATE knowledge_documents kd
+          SET project_id = (
+                SELECT p.id FROM projects p WHERE p.user_id = kd.owner_id ORDER BY p.is_default DESC, p.id ASC LIMIT 1
+              )
+        WHERE kd.project_id IS NULL`,
+    );
+    const chunks = await pool.query(
+      `UPDATE knowledge_chunks kc
+          SET project_id = (
+                SELECT p.id FROM projects p WHERE p.user_id = kc.owner_id ORDER BY p.is_default DESC, p.id ASC LIMIT 1
+              )
+        WHERE kc.project_id IS NULL`,
+    );
+
+    const leftDocs = await pool.query<{ n: number }>('SELECT count(*)::int AS n FROM knowledge_documents WHERE project_id IS NULL');
+    const leftChunks = await pool.query<{ n: number }>('SELECT count(*)::int AS n FROM knowledge_chunks WHERE project_id IS NULL');
+    const docsLeft = Number(leftDocs.rows[0]?.n ?? 0);
+    const chunksLeft = Number(leftChunks.rows[0]?.n ?? 0);
+    if (docsLeft === 0 && chunksLeft === 0) {
+      await pool.query('ALTER TABLE knowledge_documents ALTER COLUMN project_id SET NOT NULL');
+      await pool.query('ALTER TABLE knowledge_chunks ALTER COLUMN project_id SET NOT NULL');
+    } else {
+      console.warn(
+        `[db] 知识库 project_id 仍有空值（资料 ${docsLeft} 条 / 片段 ${chunksLeft} 条），` +
+          '暂不收 NOT NULL —— 通常是这些 owner 名下没有项目，请先修数据',
+      );
+    }
+
+    console.log(
+      `[db] 项目层迁移完成：当前项目补 ${cur.rowCount ?? 0} 行、权限开关补 ${perm.rowCount ?? 0} 行、` +
+        `知识库归属回填 资料 ${docs.rowCount ?? 0} 条 / 片段 ${chunks.rowCount ?? 0} 条`,
+    );
+  } catch (err) {
+    console.warn('[db] 项目层迁移失败（忽略，继续启动）：', (err as Error).message);
+  }
+}
+
 export async function migrate(pool: Pool): Promise<void> {
   await pool.query(DDL);
+  await migrateProjectScope(pool);
   await dedupeAgentConversations(pool);
   await ensureAgentConversationIndex(pool);
 }

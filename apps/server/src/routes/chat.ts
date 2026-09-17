@@ -52,6 +52,7 @@ import { buildMemoryBlock } from './memories';
 import { buildKnowledgeBlock } from './knowledge';
 import { buildAgentContext, buildUserMemoryBlock, ensureAgentConversation } from './agents';
 import { latestPageStateOfAgent } from '../pageState';
+import { currentProjectId } from '../projectScope';
 import { startLoop } from '../toolLoop';
 
 export interface ChatDeps {
@@ -133,19 +134,21 @@ async function resolveConversation(
     if (conv === null) return { err: '建会话失败（智能体或项目缺失）', status: 500 };
     return { id: conv };
   }
+  /**
+   * 子阶段 2-A：没带智能体号时的兜底 —— 在**当前使用中的项目**里找最近一条会话。
+   * （原来写死 `p.is_default = true`，也就是永远只看默认项目；现在跟着「当前项目」走。）
+   */
+  const curProject = await currentProjectId(pool, userId);
+  if (curProject === null) return { err: '当前账号还没有项目（请重新登录一次让建号流程补上）', status: 500 };
   const latest = await pool.query<{ id: string }>(
-    'SELECT c.id FROM conversations c JOIN projects p ON p.id = c.project_id WHERE p.user_id = $1 AND p.is_default = true ORDER BY c.id DESC LIMIT 1',
-    [userId],
+    'SELECT c.id FROM conversations c JOIN projects p ON p.id = c.project_id WHERE p.user_id = $1 AND c.project_id = $2 ORDER BY c.id DESC LIMIT 1',
+    [userId, curProject],
   );
   if (latest.rowCount === 1) return { id: Number(latest.rows[0].id) };
-  const p = await pool.query<{ id: string }>(
-    'SELECT id FROM projects WHERE user_id = $1 ORDER BY is_default DESC, id ASC LIMIT 1',
-    [userId],
-  );
-  if (p.rowCount !== 1) return { err: '当前账号还没有默认项目（请重新登录一次让建号流程补上）', status: 500 };
+  // 当前项目里的「常驻智能体」：优先自带小助，其次母鸡（新建的项目里只有母鸡）
   const a = await pool.query<{ id: string }>(
-    "SELECT id FROM agents WHERE project_id = $1 AND kind = 'assistant' ORDER BY id ASC LIMIT 1",
-    [p.rows[0].id],
+    "SELECT id FROM agents WHERE project_id = $1 AND kind IN ('assistant', 'hen') ORDER BY (kind = 'assistant') DESC, id ASC LIMIT 1",
+    [curProject],
   );
   // 第 16 步 fixup：有「小助」就走原子的找/建（和 /chat/state、历史加载同一个入口），
   // 免得这条兜底路径和它们并发时又插出第二条会话。
@@ -155,7 +158,7 @@ async function resolveConversation(
   }
   const ins = await pool.query<{ id: string }>(
     'INSERT INTO conversations (project_id, agent_id, title) VALUES ($1, $2, $3) RETURNING id',
-    [p.rows[0].id, null, seedTitle.slice(0, 24) || '小助会话'],
+    [curProject, null, seedTitle.slice(0, 24) || '小助会话'],
   );
   return { id: Number(ins.rows[0].id) };
 }
@@ -390,7 +393,15 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
       // 第 11 步：知识库资料是与 memories 完全独立的、仅聊天用的上下文位置。
       // buildKnowledgeBlock 只按当前 owner 的加密片段做关键词字面匹配；空命中/异常都返回空，
       // 不进 agent 的驾驶员 JSON，也不触碰第 10 步的确认逻辑。
-      const knowledgeBlock = await buildKnowledgeBlock(pool, cipher, claims.sub, message);
+      // 子阶段 2-A：**按这条会话所属项目**检索（知识库现在有项目归属，不能跨项目串资料）。
+      const convProject = await pool.query<{ project_id: string }>(
+        'SELECT project_id FROM conversations WHERE id = $1',
+        [convId],
+      );
+      const convProjectId = Number(convProject.rows[0]?.project_id);
+      const knowledgeBlock = Number.isInteger(convProjectId) && convProjectId > 0
+        ? await buildKnowledgeBlock(pool, cipher, claims.sub, message, convProjectId)
+        : '';
       // 第 13 步：网页已开好时的当轮补充约束（只在带上 browserOpened 的那一轮出现）
       const browserContext = openedUrl
         ? `（本轮补充：用户要开网页，工作台浏览器卡片已经打开并加载 ${openedUrl}${

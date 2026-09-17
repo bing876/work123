@@ -121,3 +121,27 @@
 - **流程教训**：批复里「暂缓/不做」的项，**动手前先确认它是不是已经做完了**；遇到「指示与实际状态
   冲突」→ 如实报告 + 让总控定夺，绝不自己悄悄删或悄悄留。
 - `apps/desktop/NVIDIA Corporation/`（驱动 umdlogs）已加 `.gitignore`；从未被跟踪，是运行时残留。
+
+## 七、子阶段 2-A 契约：项目层 / 母鸡 / 知识库归属（易踩坏）
+
+- 报告 `docs/acceptance/substage-2a/验收报告.md` 是**本步唯一出处**（含四条硬指标真机取证 + 迁移对照）；
+  现状排查在 `docs/project-layer-audit.md`。**前端一行未改**，浏览器分区仍是按智能体。
+- **口径**：当前项目 = `users.current_project_id`，为空/失效回落 `is_default` 那条；
+  服务端唯一出口是 `projectScope.ts`（`currentProjectId` / `listProjects` / `createProjectWithHen` /
+  `resolveAgentCreator` / `loadOwnedProject`）。**别再各写一句 SQL 取项目**。
+- **母鸡** = `agents.kind='hen'`，随项目在**同一事务**里创建（`can_create_agents=true`、
+  `persona_status='ready'`、含一条空会话），并**把新项目设为当前项目**。母鸡不可删（`DELETE` 400）；
+  自带小助同样不可删、同样有建智能体权限 —— 所以**老账号（默认项目里没有母鸡）不需要补数据**。
+- **前端两条删除入口**：`App.tsx:1641` 按 `curAgent.deletable` 判（后端给内置角色 false 即可）；
+  `App.tsx:1900` 的 `AgentGuide onDelete` **没有 deletable 守卫**，只在 `personaStatus==='pending'` 时渲染 →
+  所以 `toAgentView()` 对内置角色**一律返回 `'ready'`**，那条入口结构性不可达。**改这两处前先读验收报告 §8。**
+- **权限闸**：`POST /agents` 的调用者 = `body.asAgentId`，不带则**回落自带小助**（老前端不传 body 行为不变，
+  但校验不被跳过）。闸门只认 `can_create_agents` 字段，**不按 kind 隐式放行** —— 因此**任何新建内置角色的
+  插入点都必须显式写 true**（`auth.ts` 建号那句漏过，见报告 §8 bug #1）。新智能体落在**当前项目**。
+- **知识库按项目隔离**：`knowledge_documents` / `knowledge_chunks` 都有 `project_id`（**NOT NULL**，
+  由 `migrateProjectScope()` 幂等回填：按 owner 各自挂到自己的默认项目）；列表/上传/检索一律按项目过滤，
+  检索用的是**会话所属项目**（`chat.ts` 把 `convProjectId` 传给 `buildKnowledgeBlock`）。
+  → 直接后果：挂在项目 B 的资料，在项目 A 的会话里检索不到（这是隔离语义，不是 bug）。
+- **`agent_memories` 本阶段明确不动**（仍是智能体级；UI 上那个「项目记忆」= 智能体级，命名待后续调整）。
+- 边界：**项目不可删**（`is_default` 永远兜底）；列表 `LIMIT 50`、项目名 ≤24 字；
+  没做项目级配额、没做项目级记忆、没做母鸡的「调度其他智能体」。

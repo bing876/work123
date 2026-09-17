@@ -37,6 +37,14 @@ import { isDbUnreachable, withTx } from '../db';
 import { llmFetch } from '../llm';
 import { REFERENCE_PREFIX, sanitizeReferenceLine } from '../promptPolicy';
 import { keepaliveOfAgent } from '../sessionState';
+import {
+  ASSISTANT_KIND,
+  HEN_KIND,
+  currentProjectId,
+  isProtectedKind,
+  loadOwnedProject,
+  resolveAgentCreator,
+} from '../projectScope';
 
 export interface AgentDeps {
   pool: Pool;
@@ -109,6 +117,9 @@ interface AgentRow {
   persona: unknown;
   persona_status: string;
   conversation_id: string | null;
+  /** 子阶段 2-A：项目归属 + 权限开关（老调用点的 SELECT 没带这两列时为 undefined） */
+  project_id?: string | null;
+  can_create_agents?: boolean | null;
 }
 
 function toAgentView(r: AgentRow): AgentView {
@@ -117,10 +128,20 @@ function toAgentView(r: AgentRow): AgentView {
     id: Number(r.id),
     name: r.name,
     kind: r.kind,
-    deletable: r.kind !== 'assistant',
+    // 小助（assistant）与母鸡（hen）都不可删。前端本来就只按 deletable 决定要不要画「删掉」按钮，
+    // 所以这里返回 false 就等于**前端也拦住了**，不需要改前端。
+    deletable: !isProtectedKind(r.kind),
+    projectId: r.project_id === null || r.project_id === undefined ? undefined : Number(r.project_id),
+    canCreateAgents: Boolean(r.can_create_agents),
     // 老库里的行没有 persona_status（DEFAULT 'ready'）——只要 kind 是 assistant 就一律 ready，
     // 「小助」不会被强制再走一遍引导表。
-    personaStatus: r.kind === 'assistant' ? 'ready' : r.persona_status === 'pending' ? 'pending' : 'ready',
+    //
+    // 子阶段 2-A：**母鸡也一律 ready**，而且这里必须写成 isProtectedKind —— 不只为好看：
+    // 前端「引导表」组件（App.tsx 的 `<AgentGuide>`）只在 personaStatus==='pending' 时渲染，
+    // 它里面那个 onDelete **没有** deletable 守卫（那是 UI 自己的路子，本阶段不动前端）。
+    // 所以只要保证「内置角色永远不是 pending」，那条**前端唯一没被 deletable 拦住**的删除入口
+    // 就永远渲染不出来 —— 前端拦截因此是结构性的，不靠人记得加判断。
+    personaStatus: isProtectedKind(r.kind) ? 'ready' : r.persona_status === 'pending' ? 'pending' : 'ready',
     persona,
     conversationId: r.conversation_id === null ? null : Number(r.conversation_id),
   };
@@ -129,7 +150,7 @@ function toAgentView(r: AgentRow): AgentView {
 /** 智能体必须属于这个账号（走 projects.user_id）；不是你的 = 当不存在 */
 async function loadOwnedAgent(pool: Pool, ownerId: number, agentId: number): Promise<AgentRow | null> {
   const r = await pool.query<AgentRow>(
-    `SELECT a.id, a.name, a.kind, a.persona, a.persona_status,
+    `SELECT a.id, a.name, a.kind, a.persona, a.persona_status, a.project_id, a.can_create_agents,
             (SELECT c.id FROM conversations c WHERE c.agent_id = a.id ORDER BY c.id DESC LIMIT 1) AS conversation_id
        FROM agents a JOIN projects p ON p.id = a.project_id
       WHERE a.id = $1 AND p.user_id = $2`,
@@ -281,7 +302,7 @@ export async function buildAgentContext(
     let row: AgentRow | null = null;
     if (conversationId !== null) {
       const r = await pool.query<AgentRow>(
-        `SELECT a.id, a.name, a.kind, a.persona, a.persona_status,
+        `SELECT a.id, a.name, a.kind, a.persona, a.persona_status, a.project_id, a.can_create_agents,
                 (SELECT c2.id FROM conversations c2 WHERE c2.agent_id = a.id ORDER BY c2.id DESC LIMIT 1) AS conversation_id
            FROM conversations c JOIN projects p ON p.id = c.project_id
            LEFT JOIN agents a ON a.id = c.agent_id
@@ -300,6 +321,15 @@ export async function buildAgentContext(
     let personaBlock: string;
     if (view.kind === 'assistant') {
       personaBlock = ''; // 小助的身份写在基础系统提示词里，不重复
+    } else if (view.kind === HEN_KIND) {
+      // 子阶段 2-A：母鸡是**随项目创建的常驻智能体**，没有引导表、也没有单独人设。
+      // 不给它这块的话会掉进下面「还没设定 → 请用户去填引导表」的分支，
+      // 而它压根没有引导表 —— 那会让模型一直催用户填一个不存在的东西。
+      personaBlock = [
+        '【当前智能体是「项目管家」（母鸡）】',
+        '它是随项目一起创建的常驻智能体，具备「创建智能体」的权限；用户想再加一个智能体时可以走它。',
+        '它没有单独的人设，按基座规则正常对话即可。**不要**向用户索要引导表、也不要说自己「还没设定」。',
+      ].join('\n');
     } else if (view.personaStatus === 'pending' || !persona) {
       // 引导表还没填完：先用引导表，不要空人设乱聊很久。
       personaBlock = [
@@ -443,15 +473,32 @@ export function registerMultiAgentRoutes(app: FastifyInstance, deps: AgentDeps):
   app.get('/agents', async (req: FastifyRequest, reply: FastifyReply) => {
     const claims = authed(req, env);
     if (!claims) return errJson(reply, 401, '未登录或登录已过期');
+    /**
+     * 子阶段 2-A：可选按项目过滤。
+     *   `?projectId=123` → 只回这个项目里的智能体（不是自己的项目 → 404，不泄漏别人有几个项目）；
+     *   不带参数        → **保持改造前的行为**（这个账号的全部智能体），
+     *                     因为前端还没接项目层，改默认语义会悄悄改掉它看到的东西。
+     */
+    const rawProjectId = (req.query as { projectId?: unknown } | null)?.projectId;
+    let projectId: number | null = null;
+    if (rawProjectId !== undefined && rawProjectId !== null && String(rawProjectId).trim() !== '') {
+      const n = Number(String(rawProjectId).trim());
+      if (!Number.isSafeInteger(n) || n <= 0) return errJson(reply, 400, 'projectId 不正确');
+      projectId = n;
+    }
     try {
+      if (projectId !== null) {
+        const owned = await loadOwnedProject(pool, claims.sub, projectId);
+        if (!owned) return errJson(reply, 404, '项目不存在或不是你的');
+      }
       const r = await pool.query<AgentRow>(
-        `SELECT a.id, a.name, a.kind, a.persona, a.persona_status,
+        `SELECT a.id, a.name, a.kind, a.persona, a.persona_status, a.project_id, a.can_create_agents,
                 (SELECT c.id FROM conversations c WHERE c.agent_id = a.id ORDER BY c.id DESC LIMIT 1) AS conversation_id
            FROM agents a JOIN projects p ON p.id = a.project_id
-          WHERE p.user_id = $1
-          ORDER BY CASE WHEN a.kind = 'assistant' THEN 0 ELSE 1 END, a.id ASC
+          WHERE p.user_id = $1 AND ($2::bigint IS NULL OR a.project_id = $2::bigint)
+          ORDER BY CASE WHEN a.kind = 'assistant' THEN 0 WHEN a.kind = 'hen' THEN 1 ELSE 2 END, a.id ASC
           LIMIT 20`,
-        [claims.sub],
+        [claims.sub, projectId],
       );
       const out: AgentListResult = { agents: r.rows.map(toAgentView) };
       // 第 16 步：「启动并保活」的监听态挂在会话状态上（conversations.keepalive），
@@ -467,23 +514,44 @@ export function registerMultiAgentRoutes(app: FastifyInstance, deps: AgentDeps):
 
   // -------------------------------------------- 点「添加」：建智能体 + 立刻建空会话
   // 前端一点就切到这个新会话（引导表摆在聊天里），这里不做任何“先填后台表”的前置。
+  //
+  // 子阶段 2-A 加了两件事：
+  //   1. **权限校验**：调用者（body.asAgentId；不带则回落到自带小助）必须有
+  //      `can_create_agents = true`，否则 403。母鸡与自带小助为 true，普通智能体默认 false。
+  //   2. **项目归属**：新智能体进「当前使用中的项目」（没有当前项目则回落默认项目）。
   app.post('/agents', async (req: FastifyRequest, reply: FastifyReply) => {
     const claims = authed(req, env);
     if (!claims) return errJson(reply, 401, '未登录或登录已过期');
     try {
-      const p = await pool.query<{ id: string }>(
-        'SELECT id FROM projects WHERE user_id = $1 ORDER BY is_default DESC, id ASC LIMIT 1',
-        [claims.sub],
+      const { caller, explicit } = await resolveAgentCreator(
+        pool,
+        claims.sub,
+        (req.body as { asAgentId?: unknown } | null)?.asAgentId,
       );
-      if (p.rowCount !== 1) return errJson(reply, 500, '当前账号还没有默认项目（请重新登录一次让建号流程补上）');
+      if (!caller) {
+        return explicit
+          ? errJson(reply, 404, '调用者智能体不存在或不是你的')
+          : errJson(reply, 500, '这个账号没有可用的调用者智能体（自带的「小助」缺失，请重新登录一次让建号流程补上）');
+      }
+      if (!caller.canCreateAgents) {
+        return errJson(
+          reply,
+          403,
+          `「${caller.name}」没有创建智能体的权限 —— 只有项目里的母鸡和自带的「小助」可以建智能体。`,
+        );
+      }
+      const projectId = await currentProjectId(pool, claims.sub);
+      if (projectId === null) {
+        return errJson(reply, 500, '当前账号还没有项目（请重新登录一次让建号流程补上）');
+      }
       const created = await withTx(pool, async (client) => {
         const a = await client.query<{ id: string; name: string }>(
           "INSERT INTO agents (project_id, name, kind, persona_status) VALUES ($1, $2, 'custom', 'pending') RETURNING id, name",
-          [p.rows[0].id, DEFAULT_AGENT_NAME],
+          [projectId, DEFAULT_AGENT_NAME],
         );
         const c = await client.query<{ id: string }>(
           'INSERT INTO conversations (project_id, agent_id, title) VALUES ($1, $2, $3) RETURNING id',
-          [p.rows[0].id, a.rows[0].id, DEFAULT_AGENT_NAME],
+          [projectId, a.rows[0].id, DEFAULT_AGENT_NAME],
         );
         return { agentId: a.rows[0].id, conversationId: c.rows[0].id };
       });
@@ -536,8 +604,14 @@ export function registerMultiAgentRoutes(app: FastifyInstance, deps: AgentDeps):
     try {
       const a = await loadOwnedAgent(pool, claims.sub, agentId);
       if (!a) return errJson(reply, 404, '智能体不存在或不是你的');
-      // 「小助」不能删（自带智能体，第 5 步建号时就跟着账号一起创建）
+      // 「小助」不能删（自带智能体，第 5 步建号时就跟着账号一起创建）；
+      // 子阶段 2-A 起**母鸡也不能删** —— 它是项目的「能建智能体的那个角色」，
+      // 删了那个项目就再没人能建智能体了。前端靠 deletable=false 已经不画删除按钮，
+      // 这里再挡一道（后端才是权威闸）。
       if (a.kind === 'assistant') return errJson(reply, 400, '「小助」是自带的，不能删');
+      if (a.kind === HEN_KIND) {
+        return errJson(reply, 400, '这是项目的母鸡（随项目创建、有建智能体的权限），不能删。');
+      }
       // 只删自己的：它的会话、消息、项目记忆一并级联（不会碰到别的智能体）
       await withTx(pool, async (client) => {
         await client.query('DELETE FROM conversations WHERE agent_id = $1', [agentId]);

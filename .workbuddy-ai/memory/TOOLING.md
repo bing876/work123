@@ -58,3 +58,19 @@
 - **知识库本来是空的**（`knowledge_documents` / `knowledge_chunks` 0 行），「回答带来源」这条
   要**先传一份资料**才能抽查，别误判成自己把功能改坏了。
 - 验收完清干净自己的实例：`TaskStop` + 按端口杀进程，复查端口已释放。
+
+## 五、子阶段 2-A 取证工具（自包含：自己起后端、自己收尾）
+
+三个 `scripts/verify/2a-*.mjs` + `db-snapshot.mjs`，复跑说明在 `scripts/verify/README.md`。
+**前提**：`2a-migrate-replay` 读的是 `apps/server/dist/db.js`，**构建产物必须比 src 新**（先 `npm run build -w @ai-workbench/server`）。
+
+- **自起后端前先探端口**。脚本异常退出时如果没杀干净子孙进程（`spawn(taskkill)` 后立刻 `process.exit`
+  = taskkill 根本没跑），残留实例占着端口 → 下一轮新起的实例 `EADDRINUSE` 秒退，而健康检查打到**残留实例**上：
+  测试「跑得下去」但日志是空的（验证码读不到），极像功能坏了。**收尾用 `spawnSync(taskkill /F /T)` 并复验端口已释放。**
+- **等 `SMS_MOCK` 的验证码不能用 `Atomics.wait` 同步睡**：主线程锁死 → stdout 管道刷不进日志文件，
+  等再久也等不到。必须 `await setTimeout` 让出事件循环。
+- **迁移对照要用「上一个提交的真实 DDL」建迁移前结构**（`git show HEAD:apps/server/src/db.ts` 里抠 DDL，
+  脚本已断言新列都不存在），**绝不能用活库对比** —— 活库开发中已跑过一次迁移，直接比是「迁移后 vs 迁移后」。
+  活库只有 1 个 owner 有知识库资料，样本不够就**按 owner 加合成放大样本**（只进验收库，跑完连库删）。
+- **活库零污染**的写法：基线拍「逐表行数 + 逐表 id 集合」，跑完复拍并断言一致；测试账号整体级联删除。
+- 老账号只读回归可以**自签 JWT**（`dist/crypto.js` 的 `signToken` + `.env` 的 `JWT_SECRET`），不必走短信。

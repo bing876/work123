@@ -28,6 +28,7 @@ import { registerAgentRoutes } from './routes/agent';
 import { registerMemoryRoutes, startIdleScheduler } from './routes/memories';
 import { registerKnowledgeRoutes, KNOWLEDGE_MAX_UPLOAD_BYTES } from './routes/knowledge';
 import { registerMultiAgentRoutes } from './routes/agents';
+import { registerProjectRoutes } from './routes/projects';
 import { registerLoopRoutes } from './routes/loop';
 import { liveLoopCount } from './toolLoop';
 import { pageStateCount } from './pageState';
@@ -83,6 +84,8 @@ async function main(): Promise<void> {
   registerKnowledgeRoutes(app, { pool, env, cipher });
   // 第 15 步：智能体（添加/引导表人设/删）+ 两层记忆（user_memories 账号级、agent_memories 智能体级）。
   registerMultiAgentRoutes(app, { pool, env, cipher });
+  // 子阶段 2-A：项目（智能体的上层容器）—— 建/列/改名/设为当前；建项目会连带建一只母鸡。
+  registerProjectRoutes(app, { pool, env, cipher });
   // 第 21 步：网页工具循环（脑在服务端；工具 open_url/read_page/click/type/scroll/stop，
   // 执行在桌面主进程的现有 driver 上）。/chat/stream 的任务轮与它共用同一份 session_state。
   registerLoopRoutes(app, { pool, env, cipher });

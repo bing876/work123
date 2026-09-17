@@ -1,0 +1,124 @@
+{
+  "takenAt": "2026-09-17T02:35:52.634Z",
+  "tables": {
+    "users": 3,
+    "projects": 4,
+    "agents": 7,
+    "conversations": 7,
+    "messages": 519,
+    "tasks": 212,
+    "memories": 39,
+    "user_memories": 3,
+    "agent_memories": 1,
+    "knowledge_documents": 2,
+    "knowledge_chunks": 2
+  },
+  "columns": {
+    "users": {
+      "current_project_id": true
+    },
+    "agents": {
+      "can_create_agents": true
+    },
+    "knowledge_documents": {
+      "project_id": true
+    },
+    "knowledge_chunks": {
+      "project_id": true
+    }
+  },
+  "nullProjectId": {
+    "knowledge_documents": 0,
+    "knowledge_chunks": 0,
+    "users.current_project_id": 0
+  },
+  "projects": [
+    {
+      "id": "1",
+      "user_id": "1",
+      "name": "默认项目",
+      "is_default": true
+    },
+    {
+      "id": "2",
+      "user_id": "2",
+      "name": "默认项目",
+      "is_default": true
+    },
+    {
+      "id": "3",
+      "user_id": "3",
+      "name": "默认项目",
+      "is_default": true
+    },
+    {
+      "id": "10",
+      "user_id": "1",
+      "name": "项目甲改名",
+      "is_default": false
+    }
+  ],
+  "agents": [
+    {
+      "id": "1",
+      "project_id": "1",
+      "name": "小助",
+      "kind": "assistant",
+      "can_create_agents": true
+    },
+    {
+      "id": "2",
+      "project_id": "2",
+      "name": "小助",
+      "kind": "assistant",
+      "can_create_agents": true
+    },
+    {
+      "id": "3",
+      "project_id": "3",
+      "name": "小助",
+      "kind": "assistant",
+      "can_create_agents": true
+    },
+    {
+      "id": "8",
+      "project_id": "1",
+      "name": "卡布",
+      "kind": "custom",
+      "can_create_agents": false
+    },
+    {
+      "id": "9",
+      "project_id": "1",
+      "name": "电商小助手",
+      "kind": "custom",
+      "can_create_agents": false
+    },
+    {
+      "id": "30",
+      "project_id": "10",
+      "name": "项目管家",
+      "kind": "hen",
+      "can_create_agents": true
+    },
+    {
+      "id": "32",
+      "project_id": "10",
+      "name": "新智能体",
+      "kind": "custom",
+      "can_create_agents": false
+    }
+  ],
+  "knowledgeByOwnerProject": [
+    {
+      "owner_id": "1",
+      "project_id": "1",
+      "n": 1
+    },
+    {
+      "owner_id": "1",
+      "project_id": "10",
+      "n": 1
+    }
+  ]
+}

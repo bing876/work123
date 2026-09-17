@@ -41,6 +41,7 @@ import {
 } from '../crypto';
 import { isDbUnreachable, isUniqueViolation, withTx } from '../db';
 import { allocateXyz, normalizeXyz } from '../xyz';
+import { currentProjectId, loadOwnedProject, toProjectSummary } from '../projectScope';
 
 export interface AuthDeps {
   pool: Pool;
@@ -97,14 +98,13 @@ async function loadUser(pool: Pool, where: 'id' | 'xyz_id' | 'phone_hash', value
 }
 
 async function buildSession(pool: Pool, env: ServerEnv, cipher: JsonCipher, userId: string): Promise<AuthSession> {
-  const p = await pool.query<{ id: string; name: string }>(
-    'SELECT id, name FROM projects WHERE user_id = $1 ORDER BY is_default DESC, id ASC LIMIT 1',
-    [userId],
-  );
-  if (p.rowCount !== 1) throw new Error('账号数据不完整（默认项目缺失）');
+  // 子阶段 2-A：登录/建号回的是**当前使用中的项目**（没有就回落默认项目）。
+  const curId = await currentProjectId(pool, Number(userId));
+  const p = curId === null ? null : await loadOwnedProject(pool, Number(userId), curId);
+  if (!p) throw new Error('账号数据不完整（没有项目）');
   const a = await pool.query<{ id: string; name: string }>(
     'SELECT id, name FROM agents WHERE project_id = $1 ORDER BY id ASC LIMIT 8',
-    [p.rows[0].id],
+    [p.id],
   );
   const user = await loadUser(pool, 'id', userId);
   if (!user) throw new Error('账号已不存在');
@@ -116,7 +116,7 @@ async function buildSession(pool: Pool, env: ServerEnv, cipher: JsonCipher, user
       has_password: Boolean(user.password_hash),
       phone_masked: user.phone_enc ? maskPhone(cipher.decryptText(user.phone_enc)) : null,
     },
-    project: { id: Number(p.rows[0].id), name: p.rows[0].name } satisfies ProjectSummary,
+    project: toProjectSummary(p, curId) satisfies ProjectSummary,
     agents: a.rows.map((r) => ({ id: Number(r.id), name: r.name }) satisfies AgentSummary),
   };
   return session;
@@ -234,7 +234,11 @@ export function registerAuthRoutes(app: FastifyInstance, { pool, env, cipher }: 
               [u.rows[0].id],
             );
             const a = await client.query<{ id: string; name: string }>(
-              "INSERT INTO agents (project_id, name, kind) VALUES ($1, '小助', 'assistant') RETURNING id, name",
+              // 子阶段 2-A：自带「小助」必须有「建智能体」的权限，否则新账号一点「＋ 添加」就 403。
+              // 这个开关**必须在这里显式写 true**：列的默认值是 false（那是给「用户自建的普通智能体」的），
+              // 而启动时那次不变量回填只在服务重启时跑 —— 光靠它，**服务运行期间新注册的账号**
+              // 会拿到一只没有权限的小助（本轮真机验收就是这么抓到的）。
+              "INSERT INTO agents (project_id, name, kind, can_create_agents) VALUES ($1, '小助', 'assistant', true) RETURNING id, name",
               [p.rows[0].id],
             );
             return { userId: u.rows[0].id, createdProject: p.rows[0], createdAgent: a.rows[0] };
@@ -312,14 +316,13 @@ export function registerAuthRoutes(app: FastifyInstance, { pool, env, cipher }: 
     try {
       const user = await loadUser(pool, 'id', claims.sub);
       if (!user) return reply.code(401).send({ error: '账号已不存在' });
-      const p = await pool.query<{ id: string; name: string }>(
-        'SELECT id, name FROM projects WHERE user_id = $1 ORDER BY is_default DESC, id ASC LIMIT 1',
-        [user.id],
-      );
-      const a = p.rowCount === 1
+      // 子阶段 2-A：回**当前使用中的项目**（没有就回落默认项目）
+      const curId = await currentProjectId(pool, Number(user.id));
+      const p = curId === null ? null : await loadOwnedProject(pool, Number(user.id), curId);
+      const a = p
         ? await pool.query<{ id: string; name: string }>(
             'SELECT id, name FROM agents WHERE project_id = $1 ORDER BY id ASC LIMIT 8',
-            [p.rows[0].id],
+            [p.id],
           )
         : { rows: [] };
       const profile: AuthProfile = {
@@ -329,7 +332,7 @@ export function registerAuthRoutes(app: FastifyInstance, { pool, env, cipher }: 
           has_password: Boolean(user.password_hash),
           phone_masked: user.phone_enc ? maskPhone(cipher.decryptText(user.phone_enc)) : null,
         } satisfies AuthUser,
-        project: p.rowCount === 1 ? { id: Number(p.rows[0].id), name: p.rows[0].name } : { id: 0, name: '（无默认项目）' },
+        project: p ? toProjectSummary(p, curId) : { id: 0, name: '（无项目）' },
         agents: a.rows.map((r) => ({ id: Number(r.id), name: r.name })),
       };
       return profile;

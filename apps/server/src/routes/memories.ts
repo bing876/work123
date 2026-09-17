@@ -25,6 +25,7 @@ import { bearerFrom, verifyToken } from '../crypto';
 import { isDbUnreachable } from '../db';
 import { llmFetch } from '../llm';
 import { REFERENCE_PREFIX, sanitizeReferenceLine } from '../promptPolicy';
+import { currentProjectId } from '../projectScope';
 
 export interface MemoryDeps {
   pool: Pool;
@@ -262,13 +263,10 @@ async function extractCore(
     [ownerId],
   );
   const seen = new Set(exist.rows.map((r) => r.mem_key));
-  const p = await pool.query<{ id: string }>(
-    'SELECT id FROM projects WHERE user_id = $1 ORDER BY is_default DESC, id ASC LIMIT 1',
-    [ownerId],
-  );
-  // memories.project_id 是老表的 NOT NULL 外键（兼容保留）：没有默认项目就明确跳过，不撞约束
-  if (p.rowCount !== 1) return { extracted: 0, pending: [], skipped: 'no_project' };
-  const projectId = Number(p.rows[0].id);
+  // 子阶段 2-A：挂到**当前使用中的项目**（没有就回落默认项目）
+  const projectId = await currentProjectId(pool, ownerId);
+  // memories.project_id 是老表的 NOT NULL 外键（兼容保留）：没有项目就明确跳过，不撞约束
+  if (projectId === null) return { extracted: 0, pending: [], skipped: 'no_project' };
 
   let inserted = 0;
   const pending: MemoryItem[] = [];

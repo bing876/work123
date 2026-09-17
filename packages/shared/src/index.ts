@@ -301,10 +301,34 @@ export interface AuthUser {
   phone_masked: string | null;
 }
 
-/** 注册成功自动创建的项目 */
+/** 一个项目（注册时自动建的那条「默认项目」，以及子阶段 2-A 起用户自己建的项目） */
 export interface ProjectSummary {
   id: number;
   name: string;
+  /** 是不是「当前使用中的项目」。一个账号同一时刻只有一个 true（没有时回落到 is_default 那条） */
+  isCurrent?: boolean;
+  /** 是不是建号时自动建的那条默认项目（**不可删**，也是没有 current 时的兜底） */
+  isDefault?: boolean;
+  /** 子阶段 2-A：这个项目随项目一起创建的「母鸡」智能体 id（老项目/默认项目可能没有） */
+  henAgentId?: number | null;
+  createdAt?: string;
+}
+
+/** GET /projects —— 当前用户的项目列表 */
+export interface ProjectListResult {
+  projects: ProjectSummary[];
+  /** 当前使用中的项目 id（= 列表里 isCurrent 为 true 的那条） */
+  currentProjectId: number | null;
+}
+
+/** POST /projects 成功响应 */
+export interface ProjectCreateResult {
+  project: ProjectSummary;
+}
+
+/** PATCH /projects/:id（重命名）与 POST /projects/:id/activate（设为当前）成功响应 */
+export interface ProjectUpdateResult {
+  project: ProjectSummary;
 }
 
 /** 注册成功自动创建的 Agent「小助」 */
@@ -441,6 +465,8 @@ export interface KnowledgeDocument {
   byteSize: number;
   chunkCount: number;
   createdAt: string;
+  /** 子阶段 2-A：这份资料归属哪个项目（列表与检索都按项目隔离） */
+  projectId?: number;
 }
 
 /** GET /knowledge：当前登录用户自己的资料列表及每份资料的已入库段数。 */
@@ -488,10 +514,15 @@ export interface AgentPersona {
 export interface AgentView {
   id: number;
   name: string;
-  /** 'assistant' = 自带的「小助」（不可删、不强制走引导表）；'custom' = 用户点「添加」新建的 */
+  /** 'assistant' = 自带的「小助」（不可删、不强制走引导表）；'custom' = 用户点「添加」新建的；
+   *  'hen' = 子阶段 2-A 起「随项目一起创建的母鸡」（不可删、有建智能体的权限） */
   kind: string;
-  /** 能不能删（小助恒为 false） */
+  /** 能不能删（小助与母鸡恒为 false） */
   deletable: boolean;
+  /** 子阶段 2-A：这个智能体属于哪个项目 */
+  projectId?: number;
+  /** 子阶段 2-A：有没有「创建智能体」的权限（母鸡与小助为 true，普通智能体默认 false） */
+  canCreateAgents?: boolean;
   /** 'pending' = 引导表还没填完；'ready' = 已按人设干活 */
   personaStatus: 'pending' | 'ready';
   persona: AgentPersona | null;

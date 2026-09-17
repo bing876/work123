@@ -1,0 +1,298 @@
+{
+  "startedAt": "2026-09-17T02:48:16.683Z",
+  "checkDb": "workbench_2a_check",
+  "checks": [],
+  "failures": [],
+  "step1": {
+    "note": "已新建验收库 workbench_2a_check（活库只 SELECT）"
+  },
+  "step2": {
+    "headCommit": "3c4f27b",
+    "oldDdlLength": 8406,
+    "oldDdlSha256": "1567da7ae8c4ac0303a029a4d2dcae7cd98d5495739258f81e7aa80764e85ba0"
+  },
+  "step3b": {
+    "note": "按 owner 放大样本（合成，仅存在于验收库）",
+    "owners": [
+      1,
+      2,
+      3
+    ],
+    "docsPerOwner": 30,
+    "chunksPerDoc": 8,
+    "docs": 90,
+    "chunks": 720
+  },
+  "step3": {
+    "liveCounts": {
+      "users": 3,
+      "projects": 4,
+      "agents": 7,
+      "conversations": 7,
+      "messages": 519,
+      "tasks": 212,
+      "memories": 39,
+      "user_memories": 3,
+      "agent_memories": 1,
+      "knowledge_documents": 2,
+      "knowledge_chunks": 2
+    },
+    "beforeCounts": {
+      "users": 3,
+      "projects": 4,
+      "agents": 7,
+      "conversations": 7,
+      "messages": 519,
+      "tasks": 212,
+      "memories": 39,
+      "user_memories": 3,
+      "agent_memories": 1,
+      "knowledge_documents": 92,
+      "knowledge_chunks": 722
+    },
+    "beforeDigest": {
+      "documents": 92,
+      "chunks": 722,
+      "documentDigest": "3d2ad04eb1437bc475c84a5d9651edeafa52566f532fb935980a43e99b80ba4b",
+      "chunkDigest": "6f5526a66f3bc0c37b62b9f2bc344c197556300dca3a0f8e1dd57ac709fd2091",
+      "contentBytesEnc": 105671
+    },
+    "beforeByOwner": {
+      "documents": [
+        {
+          "ownerId": "1",
+          "n": 32
+        },
+        {
+          "ownerId": "2",
+          "n": 30
+        },
+        {
+          "ownerId": "3",
+          "n": 30
+        }
+      ],
+      "chunks": [
+        {
+          "ownerId": "1",
+          "n": 242
+        },
+        {
+          "ownerId": "2",
+          "n": 240
+        },
+        {
+          "ownerId": "3",
+          "n": 240
+        }
+      ]
+    }
+  },
+  "before": {
+    "counts": {
+      "users": 3,
+      "projects": 4,
+      "agents": 7,
+      "conversations": 7,
+      "messages": 519,
+      "tasks": 212,
+      "memories": 39,
+      "user_memories": 3,
+      "agent_memories": 1,
+      "knowledge_documents": 92,
+      "knowledge_chunks": 722
+    },
+    "byOwner": {
+      "documents": [
+        {
+          "ownerId": "1",
+          "n": 32
+        },
+        {
+          "ownerId": "2",
+          "n": 30
+        },
+        {
+          "ownerId": "3",
+          "n": 30
+        }
+      ],
+      "chunks": [
+        {
+          "ownerId": "1",
+          "n": 242
+        },
+        {
+          "ownerId": "2",
+          "n": 240
+        },
+        {
+          "ownerId": "3",
+          "n": 240
+        }
+      ]
+    },
+    "columns": {
+      "users": {
+        "current_project_id": false
+      },
+      "agents": {
+        "can_create_agents": false
+      },
+      "knowledge_documents": {
+        "project_id": false
+      },
+      "knowledge_chunks": {
+        "project_id": false
+      }
+    },
+    "nullProjectId": {
+      "users.current_project_id": "n/a（列不存在）",
+      "knowledge_documents.project_id": "n/a（列不存在）",
+      "knowledge_chunks.project_id": "n/a（列不存在）"
+    },
+    "nullability": {
+      "knowledge_documents.project_id": null,
+      "knowledge_chunks.project_id": null
+    },
+    "digest": {
+      "documents": 92,
+      "chunks": 722,
+      "documentDigest": "3d2ad04eb1437bc475c84a5d9651edeafa52566f532fb935980a43e99b80ba4b",
+      "chunkDigest": "6f5526a66f3bc0c37b62b9f2bc344c197556300dca3a0f8e1dd57ac709fd2091",
+      "contentBytesEnc": 105671
+    }
+  },
+  "migrateLogs": [
+    [
+      "log",
+      "[db] 项目层迁移完成：当前项目补 3 行、权限开关补 4 行、知识库归属回填 资料 92 条 / 片段 722 条"
+    ]
+  ],
+  "after": {
+    "counts": {
+      "users": 3,
+      "projects": 4,
+      "agents": 7,
+      "conversations": 7,
+      "messages": 519,
+      "tasks": 212,
+      "memories": 39,
+      "user_memories": 3,
+      "agent_memories": 1,
+      "knowledge_documents": 92,
+      "knowledge_chunks": 722
+    },
+    "byOwner": {
+      "documents": [
+        {
+          "ownerId": "1",
+          "n": 32
+        },
+        {
+          "ownerId": "2",
+          "n": 30
+        },
+        {
+          "ownerId": "3",
+          "n": 30
+        }
+      ],
+      "chunks": [
+        {
+          "ownerId": "1",
+          "n": 242
+        },
+        {
+          "ownerId": "2",
+          "n": 240
+        },
+        {
+          "ownerId": "3",
+          "n": 240
+        }
+      ]
+    },
+    "columns": {
+      "users": {
+        "current_project_id": true
+      },
+      "agents": {
+        "can_create_agents": true
+      },
+      "knowledge_documents": {
+        "project_id": true
+      },
+      "knowledge_chunks": {
+        "project_id": true
+      }
+    },
+    "nullProjectId": {
+      "users.current_project_id": 0,
+      "knowledge_documents.project_id": 0,
+      "knowledge_chunks.project_id": 0
+    },
+    "nullability": {
+      "knowledge_documents.project_id": "NO",
+      "knowledge_chunks.project_id": "NO"
+    },
+    "digest": {
+      "documents": 92,
+      "chunks": 722,
+      "documentDigest": "3d2ad04eb1437bc475c84a5d9651edeafa52566f532fb935980a43e99b80ba4b",
+      "chunkDigest": "6f5526a66f3bc0c37b62b9f2bc344c197556300dca3a0f8e1dd57ac709fd2091",
+      "contentBytesEnc": 105671
+    },
+    "assignment": {
+      "documents": 92,
+      "chunks": 722,
+      "mismatches": []
+    },
+    "expectedAssignment": {
+      "1": "1",
+      "2": "2",
+      "3": "3"
+    }
+  },
+  "idempotency": {
+    "logs": [
+      [
+        "log",
+        "[db] 项目层迁移完成：当前项目补 0 行、权限开关补 0 行、知识库归属回填 资料 0 条 / 片段 0 条"
+      ]
+    ],
+    "counts": {
+      "users": 3,
+      "projects": 4,
+      "agents": 7,
+      "conversations": 7,
+      "messages": 519,
+      "tasks": 212,
+      "memories": 39,
+      "user_memories": 3,
+      "agent_memories": 1,
+      "knowledge_documents": 92,
+      "knowledge_chunks": 722
+    },
+    "digest": {
+      "documents": 92,
+      "chunks": 722,
+      "documentDigest": "3d2ad04eb1437bc475c84a5d9651edeafa52566f532fb935980a43e99b80ba4b",
+      "chunkDigest": "6f5526a66f3bc0c37b62b9f2bc344c197556300dca3a0f8e1dd57ac709fd2091",
+      "contentBytesEnc": 105671
+    },
+    "migrateLine": "[db] 项目层迁移完成：当前项目补 0 行、权限开关补 0 行、知识库归属回填 资料 0 条 / 片段 0 条"
+  },
+  "currentProjectPreserved": {
+    "userId": "1",
+    "projectId": "10",
+    "afterMigrate": "10",
+    "logs": [
+      [
+        "log",
+        "[db] 项目层迁移完成：当前项目补 0 行、权限开关补 0 行、知识库归属回填 资料 0 条 / 片段 0 条"
+      ]
+    ]
+  },
+  "endedAt": "2026-09-17T02:48:19.516Z"
+}

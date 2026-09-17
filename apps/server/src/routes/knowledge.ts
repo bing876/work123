@@ -26,6 +26,7 @@ import type { JsonCipher } from '../crypto';
 import type { ServerEnv } from '../env';
 import { bearerFrom, verifyToken } from '../crypto';
 import { isDbUnreachable, withTx } from '../db';
+import { currentProjectId, loadOwnedProject } from '../projectScope';
 
 export interface KnowledgeDeps {
   pool: Pool;
@@ -42,6 +43,8 @@ type DbDocumentRow = {
   byte_size: string | number;
   chunk_count: string | number;
   created_at: Date | string;
+  /** 子阶段 2-A：项目归属（老调用点没带这一列时为 undefined） */
+  project_id?: string | null;
 };
 
 type DbChunkRow = {
@@ -247,6 +250,7 @@ function documentFromRow(cipher: JsonCipher, row: DbDocumentRow): KnowledgeDocum
     byteSize: Number(row.byte_size),
     chunkCount: Number(row.chunk_count),
     createdAt: toIso(row.created_at),
+    projectId: row.project_id === null || row.project_id === undefined ? undefined : Number(row.project_id),
   };
 }
 
@@ -322,12 +326,16 @@ function clipText(text: string, maxChars: number): string {
 /**
  * 给 /chat/stream 专用的资料上下文。它只被 chat.ts 调用，绝不接到 agent 的驾驶 JSON。
  * 查不到、密文坏了或数据库暂时出错都返回空串，因此“知识库没有命中”不会中断正常聊天。
+ *
+ * 子阶段 2-A：**按项目检索** —— 传进来的 `projectId` 是这条会话所属项目，
+ * 只在这个项目自己的资料里找。chunk 与 document 的 project_id 都校验（冗余列防不一致）。
  */
 export async function buildKnowledgeBlock(
   pool: Pool,
   cipher: JsonCipher,
   ownerId: number,
   userText: string,
+  projectId: number,
 ): Promise<string> {
   const terms = keywordsFromMessage(userText);
   if (terms.length === 0) return '';
@@ -337,10 +345,10 @@ export async function buildKnowledgeBlock(
       `SELECT c.id, c.document_id, c.chunk_index, c.content_enc, d.filename_enc
        FROM knowledge_chunks c
        JOIN knowledge_documents d ON d.id = c.document_id
-       WHERE c.owner_id = $1 AND d.owner_id = $1
+       WHERE c.owner_id = $1 AND d.owner_id = $1 AND c.project_id = $2 AND d.project_id = $2
        ORDER BY d.created_at DESC, c.chunk_index ASC
-       LIMIT $2`,
-      [ownerId, MAX_RETRIEVAL_SCAN],
+       LIMIT $3`,
+      [ownerId, projectId, MAX_RETRIEVAL_SCAN],
     );
 
     const candidates: Array<{ score: number; documentId: number; chunkIndex: number; filename: string; content: string }> = [];
@@ -406,18 +414,37 @@ export async function buildKnowledgeBlock(
 }
 
 export function registerKnowledgeRoutes(app: FastifyInstance, { pool, env, cipher }: KnowledgeDeps): void {
-  /** 资料列表只回解密后的显示名和段数，绝不把资料正文回给前端。 */
+  /**
+   * 资料列表只回解密后的显示名和段数，绝不把资料正文回给前端。
+   *
+   * 子阶段 2-A：**按项目隔离** —— 默认只看「当前使用中的项目」自己的资料；
+   * 也可以显式传 `?projectId=`（必须是自己的项目，否则 404）。
+   */
   app.get('/knowledge', async (req: FastifyRequest, reply: FastifyReply) => {
     const claims = authed(req, env);
     if (!claims) return errJson(reply, 401, '未登录或登录已过期');
+    const rawProjectId = (req.query as { projectId?: unknown } | null)?.projectId;
     try {
+      let projectId: number | null = null;
+      if (rawProjectId !== undefined && rawProjectId !== null && String(rawProjectId).trim() !== '') {
+        const n = Number(String(rawProjectId).trim());
+        if (!Number.isSafeInteger(n) || n <= 0) return errJson(reply, 400, 'projectId 不正确');
+        projectId = n;
+      } else {
+        projectId = await currentProjectId(pool, claims.sub);
+      }
+      if (projectId === null) return errJson(reply, 500, '当前账号还没有项目（请重新登录一次让建号流程补上）');
+      if (rawProjectId !== undefined && rawProjectId !== null && String(rawProjectId).trim() !== '') {
+        const owned = await loadOwnedProject(pool, claims.sub, projectId);
+        if (!owned) return errJson(reply, 404, '项目不存在或不是你的');
+      }
       const result = await pool.query<DbDocumentRow>(
-        `SELECT id, filename_enc, file_kind, byte_size, chunk_count, created_at
+        `SELECT id, filename_enc, file_kind, byte_size, chunk_count, created_at, project_id
          FROM knowledge_documents
-         WHERE owner_id = $1
+         WHERE owner_id = $1 AND project_id = $2
          ORDER BY id DESC
-         LIMIT $2`,
-        [claims.sub, MAX_LIST_DOCUMENTS],
+         LIMIT $3`,
+        [claims.sub, projectId, MAX_LIST_DOCUMENTS],
       );
       const out: KnowledgeListResult = { documents: result.rows.map((row) => documentFromRow(cipher, row)) };
       return out;
@@ -499,23 +526,26 @@ export function registerKnowledgeRoutes(app: FastifyInstance, { pool, env, ciphe
       const kind = kindFromFilename(filename);
       const text = await extractText(buffer, kind);
       const chunks = chunkText(text);
+      // 子阶段 2-A：这份资料归属**当前使用中的项目**（没有项目就不入库，绝不写 NULL）
+      const projectId = await currentProjectId(pool, claims.sub);
+      if (projectId === null) return errJson(reply, 500, '当前账号还没有项目（请重新登录一次让建号流程补上）');
 
       const saved = await withTx(pool, async (client) => {
         const inserted = await client.query<{ id: string; created_at: Date | string }>(
-          `INSERT INTO knowledge_documents (owner_id, filename_enc, file_kind, byte_size, chunk_count)
-           VALUES ($1, $2, $3, $4, $5)
+          `INSERT INTO knowledge_documents (owner_id, filename_enc, file_kind, byte_size, chunk_count, project_id)
+           VALUES ($1, $2, $3, $4, $5, $6)
            RETURNING id, created_at`,
-          [claims.sub, cipher.encryptText(filename), kind, buffer.length, chunks.length],
+          [claims.sub, cipher.encryptText(filename), kind, buffer.length, chunks.length, projectId],
         );
         const docId = Number(inserted.rows[0].id);
         const values: unknown[] = [];
         const placeholders = chunks.map((chunk, index) => {
-          const offset = index * 4;
-          values.push(docId, claims.sub, index, cipher.encryptText(chunk));
-          return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4})`;
+          const offset = index * 5;
+          values.push(docId, claims.sub, index, cipher.encryptText(chunk), projectId);
+          return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5})`;
         });
         await client.query(
-          `INSERT INTO knowledge_chunks (document_id, owner_id, chunk_index, content_enc)
+          `INSERT INTO knowledge_chunks (document_id, owner_id, chunk_index, content_enc, project_id)
            VALUES ${placeholders.join(', ')}`,
           values,
         );
@@ -526,6 +556,7 @@ export function registerKnowledgeRoutes(app: FastifyInstance, { pool, env, ciphe
           byteSize: buffer.length,
           chunkCount: chunks.length,
           createdAt: toIso(inserted.rows[0].created_at),
+          projectId,
         };
         return document;
       });

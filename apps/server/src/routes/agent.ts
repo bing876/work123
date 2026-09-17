@@ -26,6 +26,7 @@ import { llmFetch } from '../llm';
 import { notifyUser } from '../notify';
 import { buildMemoryBlock, triggerTaskExtract } from './memories';
 import { decideOnce } from '../toolLoop';
+import { currentProjectId } from '../projectScope';
 
 export interface AgentDeps {
   pool: Pool;
@@ -167,14 +168,12 @@ export function registerAgentRoutes(app: FastifyInstance, { pool, env, cipher }:
     const goal = typeof (req.body as { goal?: unknown } | null)?.goal === 'string' ? String((req.body as { goal: string }).goal).trim() : '';
     if (!goal) return errJson(reply, 400, 'goal 不能为空');
     try {
-      const p = await pool.query<{ id: string }>(
-        'SELECT id FROM projects WHERE user_id = $1 ORDER BY is_default DESC, id ASC LIMIT 1',
-        [claims.sub],
-      );
-      if (p.rowCount !== 1) return errJson(reply, 500, '当前账号没有默认项目（重新登录一次让建号流程补上）');
+      // 子阶段 2-A：任务挂到**当前使用中的项目**（没有就回落默认项目）
+      const projectId = await currentProjectId(pool, claims.sub);
+      if (projectId === null) return errJson(reply, 500, '当前账号没有项目（重新登录一次让建号流程补上）');
       const t = await pool.query<{ id: string }>(
         "INSERT INTO tasks (project_id, status, title, payload) VALUES ($1, 'running', $2, $3::jsonb) RETURNING id",
-        [p.rows[0].id, goal.slice(0, 80), JSON.stringify({ goal, steps: [] })],
+        [projectId, goal.slice(0, 80), JSON.stringify({ goal, steps: [] })],
       );
       return { taskId: Number(t.rows[0].id) };
     } catch (err) {
