@@ -350,3 +350,13 @@ Chromium 需要写缓存/临时文件，磁盘写不进去就会静默死掉 —
 | 验收工具 | `scripts/verify/`（假模型 + 服务端用例 + 桌面用例 + CDP 探针 + README 复跑步骤） |
 
 `npm run typecheck` 三个包全绿。
+
+### 7.1 收尾状态
+
+- 自己的验收实例（vite 5273 / electron 9333）、验收后端（8799）、假模型（8892–8899）**已全部停止**，
+  端口复查已释放；**用户自己的 8787 / 5173 全程未动**。
+- 本次验收的临时工作目录 `%TEMP%\subA`（约 17MB：假模型日志、登录 token、独立 Electron profile）
+  **按权限策略保留在原地未删**，需要清理时直接删这个目录即可（`C:\Users\bing\AppData\Local\Temp\subA`）。
+  其中的**结论性证据已全部落到仓库**：`substage-a-evidence.json` + 本报告。
+- 顺带说明：为腾出磁盘空间（见 §5.4），删掉的是工作区内的 `apps/desktop/node_modules/.vite`
+  （vite 依赖预构建缓存，会自动重建）。**没有删任何用户数据**。
