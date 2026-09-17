@@ -79,8 +79,10 @@
 
 ## 五、子阶段 A 契约：并发闸 / 状态按页分片 / advance 重入（易踩坏）
 - 报告 `docs/acceptance/substage-a-验收报告.md`（+ 原始取证 `substage-a-evidence.json`、
-  复跑工具 `scripts/verify/`）是本步唯一出处。提交 `3be2251` + `3384e88` + 补遗 `865c82a`（父 `647ac1b`），
-  基线 `76441a7`，全部快进推送无 force。
+  复跑工具 `scripts/verify/`）是本步唯一出处。提交链（**最新 `c85b5d2`**）：
+  `3be2251`（三个改造点）+ `3384e88`（报告收尾）+ `647ac1b`（记忆拆分）+ `865c82a`（读侧兜底 + 脚本补强 +
+  报告/证据复验）+ `69ac2fa`（记忆补记）+ `c85b5d2`（融合报告 §14 同步）；基线 `76441a7`，
+  全部快进推送无 force。融合报告 §14 也是子阶段 A 的官方摘要，改这块要同步它。
 - **并发闸默认 20**（`shared` 的 `DEFAULT_SETTINGS.maxConcurrentAgentTasks`）。
   **改默认值必须同时改 `SETTINGS_RANGE`**，否则 `settings.ts:normalizeSettings` 会把默认值夹回区间上限。
 - **状态两个粒度，别混**：
