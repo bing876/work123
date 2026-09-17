@@ -11,6 +11,14 @@
 - 起自己的验收实例：`npm run build -w @ai-workbench/shared && npm run build:electron -w @ai-workbench/desktop`，
   再 `npx vite --port 5273 --strictPort` + `VITE_DEV_SERVER_URL=http://localhost:5273 node scripts/start-electron.mjs
   --user-data-dir=<临时目录> --remote-debugging-port=9333`。**用户自己的 5173 / 8787 一律不动。**
+- **起 Electron 必须清掉 `ELECTRON_RUN_AS_NODE`**（本机会话环境会设它）：
+  `env -u ELECTRON_RUN_AS_NODE -u NODE_OPTIONS node scripts/start-electron.mjs ...`。
+  带上它 Electron 会以普通 Node 身份跑主进程，**启动 0 秒崩**：
+  `Cannot read properties of undefined (reading 'isPackaged')`，退出码 1、无其它栈 ——
+  极容易被误判成「刚改坏了代码」。
+- **`taskkill` 要按端口找 PID**：`netstat -ano | grep ":<port>.*LISTENING"` 取 PID 再
+  `MSYS_NO_PATHCONV=1 taskkill /F /T /PID <pid>`。**只 TaskStop 后台任务不会杀掉 node/electron 本体**
+  （会留着占端口，下一次启动直接 `EADDRINUSE`）。
 
 ## 二、本机环境坑
 - **`docker` CLI 被拦掉**（无输出）→ 查库写 node 脚本直连：`pg` 提升在**根** `node_modules`
@@ -39,6 +47,14 @@
   bash + curl + 内联 python 每次 ~0.5s 开销，几秒就结束的循环根本采不到。采样前先读基线（重启后端会归零）。
 - **验并发一律用假模型 + 毫秒时间戳**，别用真 LLM（真模型延迟抖动会把「有没有真重叠」掩盖掉）——
   见技能 `llm-prompt-capture-verify` 第七节，工具在 `scripts/verify/`（含复跑 README）。
+- **`liveLoops` 会被「建了循环但没人驱动」的条目读歪**：循环只在 `advance()` 被调用时才离开 `running`，
+  所以任务轮建了循环而桌面没驱动、或某一路放下时没来得及 `/agent/loop/stop`，都会以 `running`
+  挂到 10 分钟 TTL 到期（不烧模型、不吃 CPU，只是指标读歪）。**取证前先重启后端拿 `liveLoops=0` 的干净基线**。
+- **接口一旦带「兜底合并」，就不能再拿它当原始证据**：例如 `GET /chat/state` 会用页级状态补空字段，
+  于是「`conversations` 有没有被覆写」只能**直连库读原始行**（`createRequire('<repo>/')('pg')` + 手工解析 `.env`，
+  密钥只进内存）。同理，验「空值才会被补」要用**全新实体**（老数据里的旧值会把结论盖住），验完即删。
+- 写用例时两个常踩的坑：`DELETE` 带 `content-type: json` 却空 body 会被 Fastify **400**（无 body 就别带该头）；
+  按 id 分片/缓存的键（如 `wcId`）**每轮要换新值**，复用旧键会读到上一轮留下的条目。
 - **知识库本来是空的**（`knowledge_documents` / `knowledge_chunks` 0 行），「回答带来源」这条
   要**先传一份资料**才能抽查，别误判成自己把功能改坏了。
 - 验收完清干净自己的实例：`TaskStop` + 按端口杀进程，复查端口已释放。

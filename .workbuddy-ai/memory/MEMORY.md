@@ -79,7 +79,8 @@
 
 ## 五、子阶段 A 契约：并发闸 / 状态按页分片 / advance 重入（易踩坏）
 - 报告 `docs/acceptance/substage-a-验收报告.md`（+ 原始取证 `substage-a-evidence.json`、
-  复跑工具 `scripts/verify/`）是本步唯一出处。提交 `3be2251` + `3384e88`，基线 `76441a7`。
+  复跑工具 `scripts/verify/`）是本步唯一出处。提交 `3be2251` + `3384e88` + 补遗 `865c82a`（父 `647ac1b`），
+  基线 `76441a7`，全部快进推送无 force。
 - **并发闸默认 20**（`shared` 的 `DEFAULT_SETTINGS.maxConcurrentAgentTasks`）。
   **改默认值必须同时改 `SETTINGS_RANGE`**，否则 `settings.ts:normalizeSettings` 会把默认值夹回区间上限。
 - **状态两个粒度，别混**：
@@ -92,6 +93,11 @@
   - 任务轮**不再覆写** `conversations` 的 `current_task/latest_user_intent/last_page_summary/login_required/sensitive_action`。
   - 分片表**只当缓存**：首次用到某张页时才拿会话态当种子，之后**页级优先**，绝不被会话级覆盖回去。
   - 读口：`GET /agent/loop/state?wcId=`（要 JWT，别人的页 404）；不传 wcId 回自己名下全部。
+  - **`GET /chat/state` 有读侧兜底**（补遗 `865c82a`）：会话级**优先**，会话级为空时才用
+    `pageState.latestPageStateOfAgent(agentId)`（该智能体最近被碰过的那张页）补 `current_task` /
+    `last_page_summary` / `browser_confirmed` / `login_required`。**只填空不覆盖** ——
+    因为桌面 `.taskState` 那一行读的就是它，不补会出现「下完网页任务、左栏当前任务反而空了」。
+    也正因为有这层合并，**它不再是「conversations 有没有被覆写」的原始证据**（要直连库读）。
 - **`advance()` 有重入锁**：锁是 `LoopSession.advancing`（**粒度 = 一个 loopId 一把**）。
   已锁 → 抛 `LoopBusyError` → 路由 **409 `code=loop_busy`**（不是 500）。
   外部**只能调 `advance`**；真实现是 `advanceInner`，别从外面直接调它（会绕过锁）。
