@@ -1,18 +1,27 @@
 /**
- * 第 16 步：轻量会话状态（每个智能体的那条会话一份），随会话一起持久化。
+ * 第 16 步：轻量会话状态。**子阶段 A 起按「页」与「会话」两个粒度分开存**：
  *
- * 存在哪：**现有 Postgres 的 conversations 表**（第 5 步就有的会话表，只补了几列），
- * 不新建 SQLite、不建第二套库、不上向量库。
+ *   - **会话级**（本文件，继续存在 `conversations` 表上，表结构与唯一约束一律不动）：
+ *     `browser_confirmed` / `already_told_user_login_themselves` / `keepalive`，
+ *     以及闲聊轮（没有页维度）下的全部字段。它服务的是「一个智能体的那条会话」。
+ *   - **页级 / 任务级**（`pageState.ts`，按 wcId 分片的内存注册表）：
+ *     `current_task` / `latest_user_intent` / `last_page_summary` / `login_required` /
+ *     `sensitive_action`（+ 上面那几个的页内副本）。
+ *     任务轮（`/chat/stream` 带 taskMode 且带 wcId）**不再覆写 conversations 这几列**，
+ *     否则同一智能体的两个浏览器任务会互相覆盖。
+ *
+ * 存在哪：会话级仍是**现有 Postgres 的 conversations 表**（第 5 步就有的会话表），
+ * 不新建 SQLite、不建第二套库、不上向量库；页级见 pageState.ts 的选型说明。
  *
  * 字段（与提示词里的块一一对应）：
- *   current_task                        当前任务（一句话）
- *   latest_user_intent                  用户最新一句
- *   browser_confirmed                   本会话是否已确认过用浏览器
- *   login_required                      是否需要用户自己在网页里登录
- *   sensitive_action                    本轮是否涉及敏感/不可逆操作
- *   last_page_summary                   最后一页摘要（可选，短）
+ *   current_task                        当前任务（一句话）           ← 任务轮：页级
+ *   latest_user_intent                  用户最新一句                 ← 任务轮：页级
+ *   browser_confirmed                   本会话是否已确认过用浏览器     ← 会话级 + 页级副本
+ *   login_required                      是否需要用户自己在网页里登录   ← 任务轮：页级
+ *   sensitive_action                    本轮是否涉及敏感/不可逆操作    ← 任务轮：页级
+ *   last_page_summary                   最后一页摘要（可选，短）      ← 任务轮：页级
  *   already_told_user_login_themselves  是否已经提醒过用户自己登录（提醒一次就够）
- *   keepalive                           该智能体是否处于「启动并保活」监听态
+ *   keepalive                           该智能体是否处于「启动并保活」监听态（**智能体级**）
  *
  * 更新规则（本文件是唯一入口，别在路由里另写一套）：
  *   - 每轮先解析最新用户消息，更新 latest_user_intent；
@@ -23,6 +32,7 @@
  *   - 空闲保活不调模型：本文件只读写状态，不触发任何模型调用。
  */
 import type { Pool } from 'pg';
+import { patchPageState } from './pageState';
 import {
   isContinueMarker,
   looksLikeLoginReminder,
@@ -76,6 +86,17 @@ export async function loadConversationState(pool: Pool, conversationId: number):
 export interface ApplyUserMessageOptions {
   /** 桌面已因「明确开页指令」打开（或复用）了网页卡片时带上的地址 —— 视为用户已确认用浏览器 */
   browserOpened?: string;
+  /**
+   * 子阶段 A：这一轮**是任务轮、且知道在哪张页上干活**时传它（wcId + 归属 + 智能体）。
+   *
+   * 传了以后，**任务态**（current_task / latest_user_intent / last_page_summary /
+   * login_required / sensitive_action）写进 `pageState.ts` 那个**按 wcId 分片**的存储，
+   * **不再覆写 `conversations` 这几列** —— 这就是「同一个智能体两个任务互相覆盖」的根治点。
+   * `conversations` 上只保留 agent 级的聚合标志（browser_confirmed），供闲聊轮与桌面恢复使用。
+   *
+   * 不传（闲聊 / 知识库 / 没有页的任务轮）时行为与改造前**完全一致**。
+   */
+  page?: { wcId: number; userId: number; agentId: number | null } | null;
 }
 
 /**
@@ -108,6 +129,46 @@ export async function applyUserMessage(
    * 只在本轮内存里用（提示词里给模型一个「旧目标作废」的信号），不落库。
    */
   const taskSwitched = !cont && Boolean(msg) && Boolean(cur.current_task) && cur.current_task !== msg;
+
+  /**
+   * 子阶段 A · 任务轮：**任务态写进按 wcId 分片的存储**。
+   *
+   * 为什么这里必须分叉：任务轮（/chat/stream 带 taskMode）本来就是「某一张页上的一个任务」，
+   * 而 conversations 是「一个智能体一条会话」。同一个智能体开两张页跑两个任务时，
+   * 两条任务轮会先后覆写同一行 —— 后开的那条把先开那条的 current_task / last_page_summary 顶掉。
+   */
+  const page = opts.page && Number.isInteger(Number(opts.page.wcId)) ? opts.page : null;
+  if (page) {
+    const ps = patchPageState(
+      page.wcId,
+      {
+        current_task: currentTask || '',
+        latest_user_intent: msg || '',
+        browser_confirmed: browserConfirmed,
+        login_required: loginRequired,
+        sensitive_action: sensitiveAction,
+        last_page_summary: lastPageSummary || '',
+      },
+      { userId: page.userId, agentId: page.agentId },
+    );
+    // conversations 只保留 agent 级聚合：确认过用浏览器这件事仍然是「这个会话」的属性
+    const r = await pool.query<StateRow>(
+      `UPDATE conversations SET browser_confirmed = $2, state_updated_at = now() WHERE id = $1 RETURNING ${STATE_COLS}`,
+      [conversationId, browserConfirmed],
+    );
+    const base = toState(conversationId, r.rowCount === 1 ? r.rows[0] : undefined, taskSwitched);
+    return {
+      ...base,
+      current_task: ps.current_task,
+      latest_user_intent: ps.latest_user_intent,
+      login_required: ps.login_required,
+      sensitive_action: ps.sensitive_action,
+      last_page_summary: ps.last_page_summary,
+      already_told_user_login_themselves:
+        ps.already_told_user_login_themselves || base.already_told_user_login_themselves,
+      browser_confirmed: browserConfirmed,
+    };
+  }
 
   const r = await pool.query<StateRow>(
     `UPDATE conversations

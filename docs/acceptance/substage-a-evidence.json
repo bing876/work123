@@ -1,0 +1,2289 @@
+{
+  "generatedAt": "2026-09-16T23:56:29.279Z",
+  "note": "子阶段 A 真机验收原始取证（由 desk-tests.py / server-tests.mjs / fake-llm.mjs 产出）",
+  "server-tests": {
+    "startedAt": "2026-09-16T23:28:28.424Z",
+    "checks": [
+      {
+        "name": "7.1 并发两次 next：恰好一次成功",
+        "ok": true,
+        "detail": {
+          "statuses": [
+            200,
+            409
+          ]
+        }
+      },
+      {
+        "name": "7.2 被拒的那次是 409 + code=loop_busy + 明确话术",
+        "ok": true,
+        "detail": {
+          "code": "loop_busy",
+          "error": "循环 loop_mu4qev68_1 正在推进中（上一次 /agent/loop/next 还没返回），本次调用被拒绝：没有执行任何动作，也没有改动它的状态。等它返回后再调。"
+        }
+      },
+      {
+        "name": "7.3 被拒后循环仍可正常推进（没被拒绝搞坏）",
+        "ok": true,
+        "detail": {
+          "status": 200,
+          "kind": "tool"
+        }
+      },
+      {
+        "name": "4.0 两路并发推进都成功",
+        "ok": true,
+        "detail": {
+          "statuses": [
+            200,
+            200
+          ]
+        }
+      },
+      {
+        "name": "4.1 两张页各自有独立的分片记录",
+        "ok": true,
+        "detail": {
+          "wcIds": [
+            70011,
+            70012
+          ]
+        }
+      },
+      {
+        "name": "4.2 current_task 不串位",
+        "ok": true,
+        "detail": {
+          "A": "甲任务：在 A 页上找报价",
+          "B": "乙任务：在 B 页上找联系方式"
+        }
+      },
+      {
+        "name": "4.3 last_page_summary 不串位（各是自己那张页）",
+        "ok": true,
+        "detail": {
+          "A": "已读 http://127.0.0.1:8899/page-a · 验收页 PAGE-A",
+          "B": "已读 http://127.0.0.1:8899/page-b · 验收页 PAGE-B"
+        }
+      },
+      {
+        "name": "4.4 分片表里确实有这两条（诊断接口可读）",
+        "ok": true,
+        "detail": {
+          "count": 3,
+          "pages": [
+            70001,
+            70011,
+            70012
+          ]
+        }
+      },
+      {
+        "name": "4.5 各自推进后仍各写各的（无交叉覆写）",
+        "ok": true,
+        "detail": {
+          "A": "已读 http://127.0.0.1:8899/page-a?p=2 · 验收页 PAGE-A 第二屏",
+          "B": "已读 http://127.0.0.1:8899/page-b?p=2 · 验收页 PAGE-B 第二屏"
+        }
+      },
+      {
+        "name": "4.6 没在册的页 → 404（不泄漏）",
+        "ok": true,
+        "detail": {
+          "status": 404,
+          "error": "这张页没有在册的分片状态（或不是你的）"
+        }
+      },
+      {
+        "name": "4.7 /health 暴露 pageStates 计数",
+        "ok": true,
+        "detail": {
+          "pageStates": 3
+        }
+      }
+    ],
+    "finishedAt": "2026-09-16T23:28:33.421Z",
+    "pass": true
+  },
+  "concurrency": {
+    "wcA": 3,
+    "wcB": 4,
+    "lane1": {
+      "phase": "running",
+      "detail": "AI 驾驶中 · 任务：并发任务甲：整理 A 页要点",
+      "step": 0,
+      "blocked": false,
+      "wcId": 3
+    },
+    "lane2": {
+      "phase": "running",
+      "detail": "2 路驾驶中 · 本路任务：并发任务乙：整理 B 页要点",
+      "step": 0,
+      "blocked": false,
+      "wcId": 4
+    },
+    "timeline": [
+      {
+        "t": 1.2,
+        "liveLoops": 2,
+        "llmCalls": 42,
+        "pageStates": 5,
+        "lanes": [
+          3,
+          4
+        ],
+        "taskA": {
+          "phase": "running",
+          "detail": "AI 驾驶中 · 任务：并发任务甲：整理 A 页要点",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：并发任务乙：整理 B 页要点",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        }
+      },
+      {
+        "t": 2.3,
+        "liveLoops": 2,
+        "llmCalls": 44,
+        "pageStates": 5,
+        "lanes": [
+          3,
+          4
+        ],
+        "taskA": {
+          "phase": "running",
+          "detail": "AI 驾驶中 · 任务：并发任务甲：整理 A 页要点",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：并发任务乙：整理 B 页要点",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        }
+      },
+      {
+        "t": 3.5,
+        "liveLoops": 2,
+        "llmCalls": 46,
+        "pageStates": 5,
+        "lanes": [
+          3,
+          4
+        ],
+        "taskA": {
+          "phase": "running",
+          "detail": "AI 驾驶中 · 任务：并发任务甲：整理 A 页要点",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：并发任务乙：整理 B 页要点",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        }
+      },
+      {
+        "t": 4.7,
+        "liveLoops": 2,
+        "llmCalls": 48,
+        "pageStates": 5,
+        "lanes": [
+          3,
+          4
+        ],
+        "taskA": {
+          "phase": "running",
+          "detail": "AI 驾驶中 · 任务：并发任务甲：整理 A 页要点",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：并发任务乙：整理 B 页要点",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        }
+      },
+      {
+        "t": 5.8,
+        "liveLoops": 2,
+        "llmCalls": 50,
+        "pageStates": 5,
+        "lanes": [
+          3,
+          4
+        ],
+        "taskA": {
+          "phase": "running",
+          "detail": "AI 驾驶中 · 任务：并发任务甲：整理 A 页要点",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：并发任务乙：整理 B 页要点",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        }
+      },
+      {
+        "t": 7,
+        "liveLoops": 2,
+        "llmCalls": 52,
+        "pageStates": 5,
+        "lanes": [
+          3,
+          4
+        ],
+        "taskA": {
+          "phase": "running",
+          "detail": "AI 驾驶中 · 任务：并发任务甲：整理 A 页要点",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：并发任务乙：整理 B 页要点",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        }
+      },
+      {
+        "t": 8.1,
+        "liveLoops": 2,
+        "llmCalls": 54,
+        "pageStates": 5,
+        "lanes": [
+          3,
+          4
+        ],
+        "taskA": {
+          "phase": "running",
+          "detail": "AI 驾驶中 · 任务：并发任务甲：整理 A 页要点",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：并发任务乙：整理 B 页要点",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        }
+      },
+      {
+        "t": 9.2,
+        "liveLoops": 2,
+        "llmCalls": 56,
+        "pageStates": 5,
+        "lanes": [
+          3,
+          4
+        ],
+        "taskA": {
+          "phase": "running",
+          "detail": "AI 驾驶中 · 任务：并发任务甲：整理 A 页要点",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：并发任务乙：整理 B 页要点",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        }
+      },
+      {
+        "t": 10.4,
+        "liveLoops": 2,
+        "llmCalls": 58,
+        "pageStates": 5,
+        "lanes": [
+          3,
+          4
+        ],
+        "taskA": {
+          "phase": "running",
+          "detail": "AI 驾驶中 · 任务：并发任务甲：整理 A 页要点",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：并发任务乙：整理 B 页要点",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        }
+      },
+      {
+        "t": 11.5,
+        "liveLoops": 2,
+        "llmCalls": 60,
+        "pageStates": 5,
+        "lanes": [
+          3,
+          4
+        ],
+        "taskA": {
+          "phase": "running",
+          "detail": "AI 驾驶中 · 任务：并发任务甲：整理 A 页要点",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：并发任务乙：整理 B 页要点",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        }
+      },
+      {
+        "t": 12.6,
+        "liveLoops": 0,
+        "llmCalls": 60,
+        "pageStates": 5,
+        "lanes": [],
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：并发任务甲：整理 A 页要点",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：并发任务乙：整理 B 页要点",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        }
+      }
+    ],
+    "llm_spans_ms": {
+      "并发任务甲：整理 A 页要点": {
+        "from": 1789601860364,
+        "to": 1789601872600,
+        "dur_s": 12.24
+      },
+      "并发任务乙：整理 B 页要点": {
+        "from": 1789601860390,
+        "to": 1789601872601,
+        "dur_s": 12.21
+      }
+    },
+    "overlap_s": 12.21,
+    "llm_request_count": 20,
+    "stateA": {
+      "wcId": 3,
+      "userId": 1,
+      "agentId": 1,
+      "loopId": "loop_mu4qqozc_8",
+      "current_task": "并发任务甲：整理 A 页要点",
+      "latest_user_intent": "",
+      "browser_confirmed": true,
+      "login_required": false,
+      "sensitive_action": false,
+      "last_page_summary": "已读 http://127.0.0.1:8899/page-a · 验收页 PAGE-A",
+      "already_told_user_login_themselves": false,
+      "step": 10,
+      "createdAt": 1789601604655,
+      "touchedAt": 1789601872610
+    },
+    "stateB": {
+      "wcId": 4,
+      "userId": 1,
+      "agentId": 1,
+      "loopId": "loop_mu4qqp0a_9",
+      "current_task": "并发任务乙：整理 B 页要点",
+      "latest_user_intent": "",
+      "browser_confirmed": true,
+      "login_required": false,
+      "sensitive_action": false,
+      "last_page_summary": "已读 http://127.0.0.1:8898/page-b · 验收页 PAGE-B",
+      "already_told_user_login_themselves": false,
+      "step": 10,
+      "createdAt": 1789601604691,
+      "touchedAt": 1789601872610
+    }
+  },
+  "pause": {
+    "wcA": 3,
+    "wcB": 4,
+    "lane1": {
+      "phase": "running",
+      "detail": "AI 驾驶中 · 任务：暂停实验甲：整理 A 页",
+      "step": 0,
+      "blocked": false,
+      "wcId": 3
+    },
+    "lane2": {
+      "phase": "running",
+      "detail": "2 路驾驶中 · 本路任务：暂停实验乙：整理 B 页",
+      "step": 0,
+      "blocked": false,
+      "wcId": 4
+    },
+    "pause_ret": {
+      "phase": "paused",
+      "detail": "已暂停 — 自动 click/type 已停止，内嵌页可手点（点「继续」先读你停留的页面）",
+      "step": 0,
+      "blocked": true,
+      "wcId": 3
+    },
+    "llm_reqs_before_pause": 8,
+    "A_reqs_after_pause": 0,
+    "B_reqs_after_pause": 6,
+    "samples": [
+      {
+        "t": 1,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 3,
+        "liveLoops": 1
+      },
+      {
+        "t": 2.2,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 4,
+        "liveLoops": 1
+      },
+      {
+        "t": 3.3,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 5,
+        "liveLoops": 1
+      },
+      {
+        "t": 4.4,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 6,
+        "liveLoops": 1
+      },
+      {
+        "t": 5.6,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 6,
+        "liveLoops": 1
+      },
+      {
+        "t": 6.8,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 7,
+        "liveLoops": 1
+      },
+      {
+        "t": 7.9,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 8,
+        "liveLoops": 1
+      },
+      {
+        "t": 9.1,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      },
+      {
+        "t": 10.3,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      },
+      {
+        "t": 11.4,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      },
+      {
+        "t": 12.6,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      },
+      {
+        "t": 13.7,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      },
+      {
+        "t": 14.9,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      },
+      {
+        "t": 16.1,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      },
+      {
+        "t": 17.3,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      },
+      {
+        "t": 18.4,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      },
+      {
+        "t": 19.5,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      },
+      {
+        "t": 20.7,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      },
+      {
+        "t": 21.9,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      },
+      {
+        "t": 23,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      },
+      {
+        "t": 24.2,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      },
+      {
+        "t": 25.3,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      },
+      {
+        "t": 26.5,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      },
+      {
+        "t": 27.6,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      },
+      {
+        "t": 28.8,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      },
+      {
+        "t": 29.9,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      },
+      {
+        "t": 31.2,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      },
+      {
+        "t": 32.4,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      },
+      {
+        "t": 33.7,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      },
+      {
+        "t": 34.8,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验甲：整理 A 页",
+          "step": 0,
+          "blocked": true,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：暂停实验乙：整理 B 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 4
+        },
+        "stateA_step": 3,
+        "stateB_step": 10,
+        "liveLoops": 0
+      }
+    ],
+    "finalA": {
+      "phase": "paused",
+      "detail": "等你的下一步：暂停实验甲：整理 A 页",
+      "step": 0,
+      "blocked": true,
+      "wcId": 3
+    },
+    "finalB": {
+      "phase": "paused",
+      "detail": "等你的下一步：暂停实验乙：整理 B 页",
+      "step": 0,
+      "blocked": false,
+      "wcId": 4
+    }
+  },
+  "crossagent": {
+    "wcA": 3,
+    "wcB": 5,
+    "partitions": {
+      "3": "persist:workbench-browser-agent-1",
+      "4": "persist:workbench-browser-agent-1",
+      "5": "persist:workbench-browser-agent-8"
+    },
+    "timeline": [
+      {
+        "t": 1,
+        "taskA": {
+          "phase": "running",
+          "detail": "AI 驾驶中 · 任务：跨智能体甲：小助的 A 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：跨智能体乙：卡布的 C 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 5
+        },
+        "liveLoops": 2
+      },
+      {
+        "t": 2.1,
+        "taskA": {
+          "phase": "running",
+          "detail": "AI 驾驶中 · 任务：跨智能体甲：小助的 A 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：跨智能体乙：卡布的 C 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 5
+        },
+        "liveLoops": 2
+      },
+      {
+        "t": 3.2,
+        "taskA": {
+          "phase": "running",
+          "detail": "AI 驾驶中 · 任务：跨智能体甲：小助的 A 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：跨智能体乙：卡布的 C 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 5
+        },
+        "liveLoops": 2
+      },
+      {
+        "t": 4.3,
+        "taskA": {
+          "phase": "running",
+          "detail": "AI 驾驶中 · 任务：跨智能体甲：小助的 A 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：跨智能体乙：卡布的 C 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 5
+        },
+        "liveLoops": 2
+      },
+      {
+        "t": 5.4,
+        "taskA": {
+          "phase": "running",
+          "detail": "AI 驾驶中 · 任务：跨智能体甲：小助的 A 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：跨智能体乙：卡布的 C 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 5
+        },
+        "liveLoops": 2
+      },
+      {
+        "t": 6.5,
+        "taskA": {
+          "phase": "running",
+          "detail": "AI 驾驶中 · 任务：跨智能体甲：小助的 A 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：跨智能体乙：卡布的 C 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 5
+        },
+        "liveLoops": 2
+      },
+      {
+        "t": 8.2,
+        "taskA": {
+          "phase": "running",
+          "detail": "AI 驾驶中 · 任务：跨智能体甲：小助的 A 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：跨智能体乙：卡布的 C 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 5
+        },
+        "liveLoops": 2
+      },
+      {
+        "t": 9.4,
+        "taskA": {
+          "phase": "running",
+          "detail": "AI 驾驶中 · 任务：跨智能体甲：小助的 A 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：跨智能体乙：卡布的 C 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 5
+        },
+        "liveLoops": 2
+      },
+      {
+        "t": 10.5,
+        "taskA": {
+          "phase": "running",
+          "detail": "AI 驾驶中 · 任务：跨智能体甲：小助的 A 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：跨智能体乙：卡布的 C 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 5
+        },
+        "liveLoops": 2
+      },
+      {
+        "t": 11.6,
+        "taskA": {
+          "phase": "running",
+          "detail": "AI 驾驶中 · 任务：跨智能体甲：小助的 A 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：跨智能体乙：卡布的 C 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 5
+        },
+        "liveLoops": 2
+      },
+      {
+        "t": 12.7,
+        "taskA": {
+          "phase": "paused",
+          "detail": "等你的下一步：跨智能体甲：小助的 A 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "paused",
+          "detail": "等你的下一步：跨智能体乙：卡布的 C 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 5
+        },
+        "liveLoops": 0
+      }
+    ],
+    "finalA": {
+      "phase": "paused",
+      "detail": "等你的下一步：跨智能体甲：小助的 A 页",
+      "step": 0,
+      "blocked": false,
+      "wcId": 3
+    },
+    "finalB": {
+      "phase": "paused",
+      "detail": "等你的下一步：跨智能体乙：卡布的 C 页",
+      "step": 0,
+      "blocked": false,
+      "wcId": 5
+    },
+    "stateA": {
+      "wcId": 3,
+      "userId": 1,
+      "agentId": 1,
+      "loopId": "loop_mu4qsb66_c",
+      "current_task": "跨智能体甲：小助的 A 页",
+      "latest_user_intent": "",
+      "browser_confirmed": true,
+      "login_required": false,
+      "sensitive_action": false,
+      "last_page_summary": "已读 http://127.0.0.1:8899/page-a · 验收页 PAGE-A",
+      "already_told_user_login_themselves": false,
+      "step": 10,
+      "createdAt": 1789601604655,
+      "touchedAt": 1789601947958
+    },
+    "stateB": {
+      "wcId": 5,
+      "userId": 1,
+      "agentId": 8,
+      "loopId": "loop_mu4qsb7w_d",
+      "current_task": "跨智能体乙：卡布的 C 页",
+      "latest_user_intent": "",
+      "browser_confirmed": true,
+      "login_required": false,
+      "sensitive_action": false,
+      "last_page_summary": "已读 http://127.0.0.1:8897/page-c · 验收页 PAGE-C",
+      "already_told_user_login_themselves": false,
+      "step": 10,
+      "createdAt": 1789601935820,
+      "touchedAt": 1789601948052
+    },
+    "llm_reqs": 20
+  },
+  "failfast": {
+    "lanes_during_test": [
+      3,
+      4
+    ],
+    "liveLoops_during_test": 2,
+    "readPage_no_target": {
+      "threw": false,
+      "r": {
+        "ok": false,
+        "action": "read_page",
+        "error": "驾驶目标未指定：必须显式给出内嵌页的 webContentsId（多张页并存时不允许再自动挑一张）。"
+      }
+    },
+    "readPage_bad_target": {
+      "threw": false,
+      "r": {
+        "ok": false,
+        "action": "read_page",
+        "error": "指定的内嵌页已经不在了（webContents 999999 已关闭或不是内嵌页），这一路停止。"
+      }
+    },
+    "drive_no_target": {
+      "threw": false,
+      "r": {
+        "ok": false,
+        "action": "read_page",
+        "error": "驾驶目标未指定：必须显式给出内嵌页的 webContentsId（多张页并存时不允许再自动挑一张）。"
+      }
+    }
+  },
+  "sensitive": {
+    "wcForm": 4,
+    "wcA": 3,
+    "lanes_during_test": [
+      3,
+      4
+    ],
+    "liveLoops_during_test": 3,
+    "results": {
+      "pw": {
+        "ok": false,
+        "action": "type",
+        "error": "目标是敏感字段（密码），AI 不代填——用户直接在该输入框里打字即可",
+        "pageSnapshot": {
+          "buttons": [
+            "立即支付",
+            "普通按钮"
+          ],
+          "inputs": [
+            "placeholder=账号 | name=u1",
+            "placeholder=密码 | name=pw1",
+            "placeholder=短信验证码 | name=otp1",
+            "placeholder=普通输入框 | name=q1"
+          ],
+          "links": [],
+          "loginLike": true,
+          "overlay": false,
+          "texts": [
+            "敏感闸复验页"
+          ],
+          "title": "敏感闸复验页",
+          "url": "http://127.0.0.1:8898/form",
+          "inputFields": [
+            {
+              "label": "placeholder=账号 | name=u1 | label=账号",
+              "kind": "normal",
+              "reason": "normal"
+            },
+            {
+              "label": "[敏感·密码] placeholder=密码 | name=pw1 | label=密码",
+              "kind": "sensitive",
+              "reason": "password"
+            },
+            {
+              "label": "[敏感·验证码/动态口令] placeholder=短信验证码 | name=otp1 | label=短信验证码",
+              "kind": "sensitive",
+              "reason": "otp_guess"
+            },
+            {
+              "label": "placeholder=普通输入框 | name=q1 | label=普通框",
+              "kind": "normal",
+              "reason": "normal"
+            }
+          ]
+        }
+      },
+      "otp": {
+        "ok": false,
+        "action": "type",
+        "error": "目标是敏感字段（验证码/动态口令），AI 不代填——用户直接在该输入框里打字即可",
+        "pageSnapshot": {
+          "buttons": [
+            "立即支付",
+            "普通按钮"
+          ],
+          "inputs": [
+            "placeholder=账号 | name=u1",
+            "placeholder=密码 | name=pw1",
+            "placeholder=短信验证码 | name=otp1",
+            "placeholder=普通输入框 | name=q1"
+          ],
+          "links": [],
+          "loginLike": true,
+          "overlay": false,
+          "texts": [
+            "敏感闸复验页"
+          ],
+          "title": "敏感闸复验页",
+          "url": "http://127.0.0.1:8898/form",
+          "inputFields": [
+            {
+              "label": "placeholder=账号 | name=u1 | label=账号",
+              "kind": "normal",
+              "reason": "normal"
+            },
+            {
+              "label": "[敏感·密码] placeholder=密码 | name=pw1 | label=密码",
+              "kind": "sensitive",
+              "reason": "password"
+            },
+            {
+              "label": "[敏感·验证码/动态口令] placeholder=短信验证码 | name=otp1 | label=短信验证码",
+              "kind": "sensitive",
+              "reason": "otp_guess"
+            },
+            {
+              "label": "placeholder=普通输入框 | name=q1 | label=普通框",
+              "kind": "normal",
+              "reason": "normal"
+            }
+          ]
+        }
+      },
+      "normal": {
+        "ok": true,
+        "action": "type",
+        "detail": "已向 INPUT「普通输入框」 写入「hello-subA」（方式：cdp-insertText）",
+        "pageSnapshot": {
+          "buttons": [
+            "立即支付",
+            "普通按钮"
+          ],
+          "inputs": [
+            "placeholder=账号 | name=u1",
+            "placeholder=密码 | name=pw1",
+            "placeholder=短信验证码 | name=otp1",
+            "placeholder=普通输入框 | name=q1 | value=hello-subA"
+          ],
+          "links": [],
+          "loginLike": true,
+          "overlay": false,
+          "texts": [
+            "敏感闸复验页"
+          ],
+          "title": "敏感闸复验页",
+          "url": "http://127.0.0.1:8898/form",
+          "inputFields": [
+            {
+              "label": "placeholder=账号 | name=u1 | label=账号",
+              "kind": "normal",
+              "reason": "normal"
+            },
+            {
+              "label": "[敏感·密码] placeholder=密码 | name=pw1 | label=密码",
+              "kind": "sensitive",
+              "reason": "password"
+            },
+            {
+              "label": "[敏感·验证码/动态口令] placeholder=短信验证码 | name=otp1 | label=短信验证码",
+              "kind": "sensitive",
+              "reason": "otp_guess"
+            },
+            {
+              "label": "placeholder=普通输入框 | name=q1 | label=普通框",
+              "kind": "normal",
+              "reason": "normal"
+            }
+          ]
+        }
+      },
+      "pay": {
+        "ok": false,
+        "action": "click",
+        "error": "支付/收银的最终确认必须由用户自己点（按钮「立即支付」），AI 不代点",
+        "pageSnapshot": {
+          "buttons": [
+            "立即支付",
+            "普通按钮"
+          ],
+          "inputs": [
+            "placeholder=账号 | name=u1",
+            "placeholder=密码 | name=pw1",
+            "placeholder=短信验证码 | name=otp1",
+            "placeholder=普通输入框 | name=q1 | value=hello-subA"
+          ],
+          "links": [],
+          "loginLike": true,
+          "overlay": false,
+          "texts": [
+            "敏感闸复验页"
+          ],
+          "title": "敏感闸复验页",
+          "url": "http://127.0.0.1:8898/form",
+          "inputFields": [
+            {
+              "label": "placeholder=账号 | name=u1 | label=账号",
+              "kind": "normal",
+              "reason": "normal"
+            },
+            {
+              "label": "[敏感·密码] placeholder=密码 | name=pw1 | label=密码",
+              "kind": "sensitive",
+              "reason": "password"
+            },
+            {
+              "label": "[敏感·验证码/动态口令] placeholder=短信验证码 | name=otp1 | label=短信验证码",
+              "kind": "sensitive",
+              "reason": "otp_guess"
+            },
+            {
+              "label": "placeholder=普通输入框 | name=q1 | label=普通框",
+              "kind": "normal",
+              "reason": "normal"
+            }
+          ]
+        }
+      }
+    },
+    "guest_values": {
+      "pw": "",
+      "otp": "",
+      "q1": "hello-subA"
+    }
+  },
+  "resources": {
+    "settings": {
+      "maxConcurrentAgentTasks": 20,
+      "maxBrowserInstances": 8
+    },
+    "pages_before": 3,
+    "samples": [
+      {
+        "label": "3 张页（本次实验的起点）",
+        "procCount": 8,
+        "memMB": 653.1,
+        "procs": [
+          {
+            "pid": 64052,
+            "type": "browser",
+            "memMB": 117.3
+          },
+          {
+            "pid": 42040,
+            "type": "renderer",
+            "memMB": 60.8
+          },
+          {
+            "pid": 36792,
+            "type": "renderer",
+            "memMB": 58.7
+          },
+          {
+            "pid": 39756,
+            "type": "renderer",
+            "memMB": 117.6
+          },
+          {
+            "pid": 13624,
+            "type": "renderer",
+            "memMB": 72.3
+          },
+          {
+            "pid": 38920,
+            "type": "renderer",
+            "memMB": 104.1
+          },
+          {
+            "pid": 49828,
+            "type": "GPU",
+            "memMB": 86.4
+          },
+          {
+            "pid": 32364,
+            "type": "network.mojom.NetworkService",
+            "memMB": 35.9
+          }
+        ]
+      },
+      {
+        "label": "3 张页",
+        "procCount": 8,
+        "memMB": 654.1,
+        "procs": [
+          {
+            "pid": 64052,
+            "type": "browser",
+            "memMB": 117.5
+          },
+          {
+            "pid": 42040,
+            "type": "renderer",
+            "memMB": 60.8
+          },
+          {
+            "pid": 36792,
+            "type": "renderer",
+            "memMB": 58.8
+          },
+          {
+            "pid": 39756,
+            "type": "renderer",
+            "memMB": 117.6
+          },
+          {
+            "pid": 13624,
+            "type": "renderer",
+            "memMB": 72.3
+          },
+          {
+            "pid": 38920,
+            "type": "renderer",
+            "memMB": 104.7
+          },
+          {
+            "pid": 49828,
+            "type": "GPU",
+            "memMB": 86.4
+          },
+          {
+            "pid": 32364,
+            "type": "network.mojom.NetworkService",
+            "memMB": 36
+          }
+        ],
+        "wcIds": [
+          3,
+          4,
+          5
+        ]
+      },
+      {
+        "label": "3 张页",
+        "procCount": 8,
+        "memMB": 631,
+        "procs": [
+          {
+            "pid": 64052,
+            "type": "browser",
+            "memMB": 104.5
+          },
+          {
+            "pid": 42040,
+            "type": "renderer",
+            "memMB": 60.8
+          },
+          {
+            "pid": 36792,
+            "type": "renderer",
+            "memMB": 58.8
+          },
+          {
+            "pid": 39756,
+            "type": "renderer",
+            "memMB": 114.4
+          },
+          {
+            "pid": 13624,
+            "type": "renderer",
+            "memMB": 73.4
+          },
+          {
+            "pid": 38920,
+            "type": "renderer",
+            "memMB": 104.6
+          },
+          {
+            "pid": 49828,
+            "type": "GPU",
+            "memMB": 78.5
+          },
+          {
+            "pid": 32364,
+            "type": "network.mojom.NetworkService",
+            "memMB": 36
+          }
+        ],
+        "wcIds": [
+          3,
+          4,
+          5
+        ]
+      },
+      {
+        "label": "3 张页",
+        "procCount": 8,
+        "memMB": 631.2,
+        "procs": [
+          {
+            "pid": 64052,
+            "type": "browser",
+            "memMB": 105.6
+          },
+          {
+            "pid": 42040,
+            "type": "renderer",
+            "memMB": 60.7
+          },
+          {
+            "pid": 36792,
+            "type": "renderer",
+            "memMB": 58.3
+          },
+          {
+            "pid": 39756,
+            "type": "renderer",
+            "memMB": 114.6
+          },
+          {
+            "pid": 13624,
+            "type": "renderer",
+            "memMB": 73.7
+          },
+          {
+            "pid": 38920,
+            "type": "renderer",
+            "memMB": 104.8
+          },
+          {
+            "pid": 49828,
+            "type": "GPU",
+            "memMB": 77.6
+          },
+          {
+            "pid": 32364,
+            "type": "network.mojom.NetworkService",
+            "memMB": 35.9
+          }
+        ],
+        "wcIds": [
+          3,
+          4,
+          5
+        ]
+      },
+      {
+        "label": "4 张页",
+        "procCount": 10,
+        "memMB": 732.3,
+        "procs": [
+          {
+            "pid": 64052,
+            "type": "browser",
+            "memMB": 106.5
+          },
+          {
+            "pid": 49068,
+            "type": "renderer",
+            "memMB": 0
+          },
+          {
+            "pid": 42040,
+            "type": "renderer",
+            "memMB": 60.7
+          },
+          {
+            "pid": 36792,
+            "type": "renderer",
+            "memMB": 57.7
+          },
+          {
+            "pid": 39756,
+            "type": "renderer",
+            "memMB": 116.9
+          },
+          {
+            "pid": 13624,
+            "type": "renderer",
+            "memMB": 73.7
+          },
+          {
+            "pid": 71296,
+            "type": "renderer",
+            "memMB": 97.5
+          },
+          {
+            "pid": 38920,
+            "type": "renderer",
+            "memMB": 105.2
+          },
+          {
+            "pid": 49828,
+            "type": "GPU",
+            "memMB": 78.1
+          },
+          {
+            "pid": 32364,
+            "type": "network.mojom.NetworkService",
+            "memMB": 36
+          }
+        ],
+        "wcIds": [
+          3,
+          4,
+          5,
+          6
+        ]
+      },
+      {
+        "label": "5 张页",
+        "procCount": 9,
+        "memMB": 734.5,
+        "procs": [
+          {
+            "pid": 64052,
+            "type": "browser",
+            "memMB": 106.8
+          },
+          {
+            "pid": 42040,
+            "type": "renderer",
+            "memMB": 60.7
+          },
+          {
+            "pid": 36792,
+            "type": "renderer",
+            "memMB": 57.7
+          },
+          {
+            "pid": 39756,
+            "type": "renderer",
+            "memMB": 116.8
+          },
+          {
+            "pid": 13624,
+            "type": "renderer",
+            "memMB": 72.7
+          },
+          {
+            "pid": 71296,
+            "type": "renderer",
+            "memMB": 98.7
+          },
+          {
+            "pid": 38920,
+            "type": "renderer",
+            "memMB": 105.8
+          },
+          {
+            "pid": 49828,
+            "type": "GPU",
+            "memMB": 79.2
+          },
+          {
+            "pid": 32364,
+            "type": "network.mojom.NetworkService",
+            "memMB": 36.1
+          }
+        ],
+        "wcIds": [
+          3,
+          4,
+          5,
+          6,
+          7
+        ]
+      },
+      {
+        "label": "6 张页",
+        "procCount": 9,
+        "memMB": 701.6,
+        "procs": [
+          {
+            "pid": 64052,
+            "type": "browser",
+            "memMB": 107.3
+          },
+          {
+            "pid": 42040,
+            "type": "renderer",
+            "memMB": 60.1
+          },
+          {
+            "pid": 36792,
+            "type": "renderer",
+            "memMB": 57.7
+          },
+          {
+            "pid": 39756,
+            "type": "renderer",
+            "memMB": 118.4
+          },
+          {
+            "pid": 13624,
+            "type": "renderer",
+            "memMB": 72.7
+          },
+          {
+            "pid": 71296,
+            "type": "renderer",
+            "memMB": 63.1
+          },
+          {
+            "pid": 38920,
+            "type": "renderer",
+            "memMB": 105.2
+          },
+          {
+            "pid": 49828,
+            "type": "GPU",
+            "memMB": 81
+          },
+          {
+            "pid": 32364,
+            "type": "network.mojom.NetworkService",
+            "memMB": 36.1
+          }
+        ],
+        "wcIds": [
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ]
+      },
+      {
+        "label": "7 张页",
+        "procCount": 9,
+        "memMB": 669.7,
+        "procs": [
+          {
+            "pid": 64052,
+            "type": "browser",
+            "memMB": 91.4
+          },
+          {
+            "pid": 42040,
+            "type": "renderer",
+            "memMB": 60
+          },
+          {
+            "pid": 36792,
+            "type": "renderer",
+            "memMB": 57.6
+          },
+          {
+            "pid": 39756,
+            "type": "renderer",
+            "memMB": 102.4
+          },
+          {
+            "pid": 13624,
+            "type": "renderer",
+            "memMB": 72.6
+          },
+          {
+            "pid": 71296,
+            "type": "renderer",
+            "memMB": 65.5
+          },
+          {
+            "pid": 38920,
+            "type": "renderer",
+            "memMB": 105.3
+          },
+          {
+            "pid": 49828,
+            "type": "GPU",
+            "memMB": 78.8
+          },
+          {
+            "pid": 32364,
+            "type": "network.mojom.NetworkService",
+            "memMB": 36.1
+          }
+        ],
+        "wcIds": [
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9
+        ]
+      },
+      {
+        "label": "8 张页",
+        "procCount": 9,
+        "memMB": 671.5,
+        "procs": [
+          {
+            "pid": 64052,
+            "type": "browser",
+            "memMB": 92.1
+          },
+          {
+            "pid": 42040,
+            "type": "renderer",
+            "memMB": 59.8
+          },
+          {
+            "pid": 36792,
+            "type": "renderer",
+            "memMB": 57.5
+          },
+          {
+            "pid": 39756,
+            "type": "renderer",
+            "memMB": 102.2
+          },
+          {
+            "pid": 13624,
+            "type": "renderer",
+            "memMB": 72.4
+          },
+          {
+            "pid": 71296,
+            "type": "renderer",
+            "memMB": 65.9
+          },
+          {
+            "pid": 38920,
+            "type": "renderer",
+            "memMB": 105.2
+          },
+          {
+            "pid": 49828,
+            "type": "GPU",
+            "memMB": 80.3
+          },
+          {
+            "pid": 32364,
+            "type": "network.mojom.NetworkService",
+            "memMB": 36.1
+          }
+        ],
+        "wcIds": [
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10
+        ]
+      }
+    ],
+    "pages_final": 8,
+    "webviews": [
+      {
+        "partition": "persist:workbench-browser-agent-1",
+        "src": "http://127.0.0.1:8899/page-a",
+        "wcId": 3,
+        "x": 220,
+        "y": 70,
+        "w": 944,
+        "h": 404,
+        "cls": "browserPanel__view",
+        "url": "http://127.0.0.1:8899/page-a",
+        "title": "验收页 PAGE-A"
+      },
+      {
+        "partition": "persist:workbench-browser-agent-1",
+        "src": "http://127.0.0.1:8898/page-b",
+        "wcId": 4,
+        "x": 220,
+        "y": 70,
+        "w": 944,
+        "h": 404,
+        "cls": "browserPanel__view",
+        "url": "http://127.0.0.1:8898/page-b",
+        "title": "验收页 PAGE-B"
+      },
+      {
+        "partition": "persist:workbench-browser-agent-1",
+        "src": "http://127.0.0.1:8897/page-c",
+        "wcId": 5,
+        "x": 220,
+        "y": 70,
+        "w": 944,
+        "h": 404,
+        "cls": "browserPanel__view",
+        "url": "http://127.0.0.1:8897/page-c",
+        "title": "验收页 PAGE-C"
+      },
+      {
+        "partition": "persist:workbench-browser-agent-1",
+        "src": "http://127.0.0.1:8896/page-d",
+        "wcId": 6,
+        "x": 220,
+        "y": 70,
+        "w": 944,
+        "h": 404,
+        "cls": "browserPanel__view",
+        "url": "http://127.0.0.1:8896/page-d",
+        "title": "127.0.0.1:8896/page-d"
+      },
+      {
+        "partition": "persist:workbench-browser-agent-1",
+        "src": "http://127.0.0.1:8895/page-e",
+        "wcId": 7,
+        "x": 220,
+        "y": 70,
+        "w": 944,
+        "h": 404,
+        "cls": "browserPanel__view",
+        "url": "http://127.0.0.1:8895/page-e",
+        "title": "127.0.0.1:8895/page-e"
+      },
+      {
+        "partition": "persist:workbench-browser-agent-1",
+        "src": "http://127.0.0.1:8894/page-f",
+        "wcId": 8,
+        "x": 220,
+        "y": 70,
+        "w": 944,
+        "h": 404,
+        "cls": "browserPanel__view",
+        "url": "http://127.0.0.1:8894/page-f",
+        "title": "127.0.0.1:8894/page-f"
+      },
+      {
+        "partition": "persist:workbench-browser-agent-1",
+        "src": "http://127.0.0.1:8893/page-g",
+        "wcId": 9,
+        "x": 220,
+        "y": 70,
+        "w": 944,
+        "h": 404,
+        "cls": "browserPanel__view",
+        "url": "http://127.0.0.1:8893/page-g",
+        "title": "127.0.0.1:8893/page-g"
+      },
+      {
+        "partition": "persist:workbench-browser-agent-1",
+        "src": "http://127.0.0.1:8892/page-h",
+        "wcId": 10,
+        "x": 220,
+        "y": 70,
+        "w": 944,
+        "h": 404,
+        "cls": "browserPanel__view browserPanel__view--on",
+        "url": "http://127.0.0.1:8892/page-h",
+        "title": "127.0.0.1:8892/page-h"
+      }
+    ],
+    "processes": [
+      {
+        "pid": 64052,
+        "type": "browser",
+        "memMB": 91.9,
+        "cpu_pct_over_6s": 0.3,
+        "cpuTime_s": 6.4
+      },
+      {
+        "pid": 42040,
+        "type": "renderer",
+        "memMB": 59.8,
+        "cpu_pct_over_6s": 0,
+        "cpuTime_s": 0.4
+      },
+      {
+        "pid": 36792,
+        "type": "renderer",
+        "memMB": 57.5,
+        "cpu_pct_over_6s": 0,
+        "cpuTime_s": 0.5
+      },
+      {
+        "pid": 39756,
+        "type": "renderer",
+        "memMB": 102.1,
+        "cpu_pct_over_6s": 0,
+        "cpuTime_s": 2.5
+      },
+      {
+        "pid": 13624,
+        "type": "renderer",
+        "memMB": 72.4,
+        "cpu_pct_over_6s": 0,
+        "cpuTime_s": 0.5
+      },
+      {
+        "pid": 71296,
+        "type": "renderer",
+        "memMB": 65.7,
+        "cpu_pct_over_6s": 0,
+        "cpuTime_s": 0.4
+      },
+      {
+        "pid": 38920,
+        "type": "renderer",
+        "memMB": 104.9,
+        "cpu_pct_over_6s": 0,
+        "cpuTime_s": 2.6
+      },
+      {
+        "pid": 49828,
+        "type": "GPU",
+        "memMB": 80.3,
+        "cpu_pct_over_6s": 0.1,
+        "cpuTime_s": 2.4
+      },
+      {
+        "pid": 32364,
+        "type": "network.mojom.NetworkService",
+        "memMB": 36.1,
+        "cpu_pct_over_6s": 0,
+        "cpuTime_s": 0.5
+      }
+    ],
+    "total_memMB": 670.7,
+    "total_cpu_pct": 0.4,
+    "health": {
+      "ok": true,
+      "service": "ai-workbench-server",
+      "db": "up",
+      "sms": "mock",
+      "llm": "configured",
+      "llmCalls": 107,
+      "liveLoops": 1,
+      "loopMaxSteps": 10,
+      "pageStates": 3,
+      "time": "2026-09-16T23:49:00.443Z"
+    }
+  },
+  "gate": {
+    "limit1": {
+      "maxConcurrentAgentTasks": 1,
+      "maxBrowserInstances": 8
+    },
+    "lane2_ret": {
+      "phase": "running",
+      "detail": "AI 驾驶中 · 任务：闸门实验：第 1 路",
+      "step": 0,
+      "blocked": false,
+      "wcId": 3
+    },
+    "lanes": [
+      3
+    ],
+    "taskB": {
+      "phase": "idle",
+      "detail": "idle · 待命（任务：在百度搜索「AI 工作台」并进入结果页）",
+      "step": 0,
+      "blocked": false,
+      "wcId": 4
+    },
+    "liveLoops": 2
+  }
+}

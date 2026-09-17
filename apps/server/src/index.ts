@@ -30,6 +30,7 @@ import { registerKnowledgeRoutes, KNOWLEDGE_MAX_UPLOAD_BYTES } from './routes/kn
 import { registerMultiAgentRoutes } from './routes/agents';
 import { registerLoopRoutes } from './routes/loop';
 import { liveLoopCount } from './toolLoop';
+import { pageStateCount } from './pageState';
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -67,6 +68,8 @@ async function main(): Promise<void> {
       // loopMaxSteps = 每轮步数上限（配置项 AGENT_LOOP_MAX_STEPS，默认 10，8~12）。
       liveLoops: liveLoopCount(),
       loopMaxSteps: env.agentLoopMaxSteps,
+      // 子阶段 A：按页（wcId）分片的实时状态现在在册几张页（证明分片真的按页建起来了）
+      pageStates: pageStateCount(),
       time: new Date().toISOString(),
     };
   });

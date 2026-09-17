@@ -23,8 +23,19 @@ import type { ServerEnv } from '../env';
 import type { JsonCipher } from '../crypto';
 import { bearerFrom, verifyToken } from '../crypto';
 import { isDbUnreachable } from '../db';
+import { listPageStates, loadPageState } from '../pageState';
 import { loadConversationState } from '../sessionState';
-import { advance, getLoop, liveLoopCount, startLoop, stopLoop, stopLoopsOfPage, stopLoopsOfUser, type LoopStateBrief } from '../toolLoop';
+import {
+  advance,
+  getLoop,
+  liveLoopCount,
+  LoopBusyError,
+  startLoop,
+  stopLoop,
+  stopLoopsOfPage,
+  stopLoopsOfUser,
+  type LoopStateBrief,
+} from '../toolLoop';
 
 export interface LoopDeps {
   pool: Pool;
@@ -167,6 +178,13 @@ export function registerLoopRoutes(app: FastifyInstance, { pool, env }: LoopDeps
       const decision: AgentLoopDecision = await advance(env, session, result);
       return { decision };
     } catch (err) {
+      /**
+       * 子阶段 A：同一条循环被并发推进 → **409**，把「被拒了、什么都没发生」说清楚。
+       * 这不是服务端故障，是调用方重试/双发，所以不能混进 500。
+       */
+      if (err instanceof LoopBusyError) {
+        return errJson(reply, 409, err.message, { code: err.code, loopId: err.loopId });
+      }
       console.error('[loop] 推进失败：', (err as Error)?.message ?? String(err));
       return errJson(reply, 500, `推进循环失败：${(err as Error)?.message ?? String(err)}`);
     }
@@ -199,5 +217,29 @@ export function registerLoopRoutes(app: FastifyInstance, { pool, env }: LoopDeps
     const claims = authed(req, env);
     if (!claims) return errJson(reply, 401, '未登录或登录已过期');
     return { live: liveLoopCount() };
+  });
+
+  /**
+   * 子阶段 A · **按页（wcId）分片的状态读接口**（诊断 / 验收取证用）。
+   *
+   *   GET /agent/loop/state?wcId=123 → 这一张页自己的状态
+   *   GET /agent/loop/state          → 自己名下所有在册的页
+   *
+   * 只回**调用方自己的**页（条目里记着 userId；别人的页当不存在，回 404）。
+   * 为什么要有它：分片状态是不是真的按页分开，必须能**读出来对照**，
+   * 光看「两个循环都在跑」证明不了「状态没有互相覆盖」。
+   */
+  app.get('/agent/loop/state', async (req: FastifyRequest, reply: FastifyReply) => {
+    const claims = authed(req, env);
+    if (!claims) return errJson(reply, 401, '未登录或登录已过期');
+    const q = req.query as { wcId?: unknown } | null;
+    const wcIdRaw = Number(q?.wcId);
+    if (Number.isInteger(wcIdRaw)) {
+      const st = loadPageState(wcIdRaw);
+      if (!st || st.userId !== claims.sub) return errJson(reply, 404, '这张页没有在册的分片状态（或不是你的）');
+      return { wcId: wcIdRaw, state: st };
+    }
+    const mine = listPageStates().filter((x) => x.userId === claims.sub);
+    return { count: mine.length, pages: mine };
   });
 }

@@ -36,10 +36,17 @@ const bridge: WorkbenchBridge = {
   // 第 22 步：启动任务必须点名要驾驶哪张页（主进程不再盲选第一个 webview）
   startTask: (targetWebContentsId?: number) =>
     ipcRenderer.invoke('workbench:task:start', targetWebContentsId),
-  pauseTask: () => ipcRenderer.invoke('workbench:task:pause'),
-  resumeTask: () => ipcRenderer.invoke('workbench:task:resume'),
+  // 子阶段 A：暂停 / 继续也支持点名某一张页 —— 多路真并行时「暂停这一路」必须能指定目标，
+  // 否则只能按「此刻在跑的那张」猜，验不出「暂停 1 号、2 号照跑」。不传 = 沿用旧行为。
+  pauseTask: (targetWebContentsId?: number) =>
+    ipcRenderer.invoke('workbench:task:pause', targetWebContentsId),
+  resumeTask: (targetWebContentsId?: number) =>
+    ipcRenderer.invoke('workbench:task:resume', targetWebContentsId),
   resetTask: () => ipcRenderer.invoke('workbench:task:reset'),
-  getTaskState: () => ipcRenderer.invoke('workbench:task:state'),
+  // 子阶段 A：可点名读**某一张页**的状态（driver 侧本来就是 per-target 的，只是这个读口
+  // 一直只回聚合视图）。不传 = 聚合视图（左栏横幅用的那条路），老调用点不受影响。
+  getTaskState: (targetWebContentsId?: number) =>
+    ipcRenderer.invoke('workbench:task:state', targetWebContentsId),
 
   // ---- 第 7 步：云端驾驶员循环（编排就在主进程；token 只递给主进程用，不打印）----
   // 第 17 步：多带一个 targetWebContentsId —— 这次驾驶**哪一张**内嵌页（两路并行必须点名）

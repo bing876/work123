@@ -1,7 +1,8 @@
 # 浏览器多实例 + 会话隔离 + 统一代理空间：融合分析与开发报告
 
 > 状态：**已获总控批复（2026-09-17，见 §10）**；Phase 0/1/2 + 配置层 + A1.5 已完成并通过真机验收
-> （见 §13 与 `docs/acceptance/step-22-验收报告.md`）。
+> （见 §13 与 `docs/acceptance/step-22-验收报告.md`）；**子阶段 A（并发闸默认 20 / 状态按页分片 / advance 重入保护）
+> 已完成并通过真机验收（见 §14 与 `docs/acceptance/substage-a-验收报告.md`）**。
 > ⚠️ **Phase 3（多实例 UI）按总控补充指示暂缓**：曾实现并通过验收，后按要求回退，**等新 UI 设计稿到位后再一起做**（见 §13.6）。
 > ⚠️ §1 现状审计已过期，勘误见 §11（相对 HEAD `e222f20`）
 > 范围：仅 `apps/desktop`（Electron 渲染层 + 主进程）+ `packages/shared` 类型声明。`apps/server` 一行未改。
@@ -299,5 +300,33 @@ readPage(999999) → 指定的内嵌页已经不在了（webContents 999999 已�
 | 类型检查 | `npm run typecheck` 三包全绿 |
 
 截图：`docs/acceptance/step-22b-reverted-tab-paradigm.png`。
+
+---
+
+## 14. 子阶段 A：并发闸默认 20 / 状态按页分片 / advance 重入保护（2026-09-17）
+
+> 完整取证见 **`docs/acceptance/substage-a-验收报告.md`** 与 `docs/acceptance/substage-a-evidence.json`。
+
+A1.5 说「调大并发数就解锁真并行，数据结构不用动」。子阶段 A 就是把这句话**在真机上兑现并验证**，
+同时补掉真并行暴露出来的两个洞。
+
+| # | 改了什么 | 关键落点 |
+|---|---|---|
+| 1 | 并发闸默认 **1 → 20**（开关本身保留） | `shared` 的 `DEFAULT_SETTINGS` + `SETTINGS_RANGE`（区间必须一起放宽到 20，否则会被 `normalizeSettings` 夹回 8） |
+| 2 | 8 个字段从「一智能体一条会话」拆出**按 wcId 分片** | **新增 `apps/server/src/pageState.ts`**（内存注册表，与 `LoopSession` 同生命周期、同 id 体系）；任务轮不再覆写 `conversations` 的任务态列；`conversations` 只留 agent 级 `browser_confirmed` 与 `keepalive` |
+| 3 | `advance()` 重入保护 | `LoopSession.advancing` 锁；并发推进 → `LoopBusyError` → 路由 **409 `loop_busy`** |
+
+**A1.5 的最后一公里（本阶段才发现）**：`driver.ts` 虽然早已 per-target，但
+`workbench:task:pause` / `workbench:task:state` 两个 IPC 一直不接 target，
+多路并行时**停不了指定那一路、也读不出单路状态**。已补成可选 target（向后兼容）。
+
+**真机结论**（8 条验收标准全过）：同一智能体两路任务的执行区间重叠 **12.24s / 12.24s**（≈100% 重叠，
+`liveLoops` 全程 =2）；暂停 1 号后它 0 次模型请求、2 号照跑 6 次；跨智能体（agent-1 / agent-8）同样全程重叠；
+两路各自的 `current_task` / `last_page_summary` 互不串位；fail-fast、敏感闸在并发窗口内复验通过；
+8 张页时本实例 9 个进程 / 671 MB / CPU ≈0.4%（**子阶段 B 的地板基线**）。
+
+**留给后续阶段**（详见验收报告 §5）：渲染层三处旧值（兜底常量 1 / 输入框 `max=8` / 提示文案「默认 1」）；
+已落盘的旧配置会盖住新默认值（要不要迁移由总控定）；本机磁盘水位会静默杀死 Electron 实例，建议纳入子阶段 B 的监控面。
+
 
 

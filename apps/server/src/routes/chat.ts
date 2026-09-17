@@ -237,8 +237,16 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
        * 规则见 sessionState.applyUserMessage：最新一句覆盖 current_task；「继续 / 按我上一条」
        * 或本轮带了 browserOpened（桌面已直接出卡片）→ browser_confirmed = true，
        * 于是同一会话后续的普通点击/搜索/滚动/读页都不再问。
+       *
+       * 子阶段 A：**任务轮**（带 taskMode + wcId）额外传 `page` —— 任务态落进**按 wcId 分片**的
+       * 存储，不再覆写 conversations 那几列（同一智能体两路并发时互相覆盖的根因就在那几列）。
        */
-      const state = await applyUserMessage(pool, convId, message, { browserOpened: openedUrl });
+      const taskWcIdRaw = Number(body?.wcId);
+      const taskWcId = Number.isInteger(taskWcIdRaw) && taskWcIdRaw > 0 ? taskWcIdRaw : null;
+      const state = await applyUserMessage(pool, convId, message, {
+        browserOpened: openedUrl,
+        page: body?.taskMode === true && taskWcId !== null ? { wcId: taskWcId, userId: claims.sub, agentId } : null,
+      });
 
       // 1) 先读历史（不含本句），再落用户消息
       const hist = await pool.query<{ role: string; content_enc: string }>(
@@ -285,8 +293,8 @@ export function registerChatRoutes(app: FastifyInstance, { pool, env, cipher }: 
        */
       if (body?.taskMode === true) {
         const pageUrl = typeof body?.pageUrl === 'string' ? body.pageUrl.trim().slice(0, 500) : '';
-        const wcIdRaw = Number(body?.wcId);
-        const wcId = Number.isInteger(wcIdRaw) && wcIdRaw > 0 ? wcIdRaw : null;
+        // 子阶段 A：wcId 在上一段已经解析过（taskWcId），这里直接复用，别再解析第二遍
+        const wcId = taskWcId;
         // 循环记的智能体以**会话自己的 agent_id** 为准（比请求里的 agentId 更权威）
         const convAgent = await pool.query<{ agent_id: string | null }>('SELECT agent_id FROM conversations WHERE id = $1', [convId]);
         const convAgentId = Number(convAgent.rows[0]?.agent_id);

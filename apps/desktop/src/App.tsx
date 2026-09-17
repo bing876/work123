@@ -185,6 +185,9 @@ const TOKEN_KEY = 'workbench.token';
  * 之所以不复用 shared 的运行时值：渲染层至今只从 shared 取类型，不引入打包期依赖更稳。
  */
 const SETTINGS_FALLBACK: WorkbenchSettings = {
+  // 注意：这份兜底只在「主进程还没把配置同步过来」的首帧生效，**并发闸的实际判定在主进程**
+  // （main.ts 的 startAgentLoop 读的是 settings.ts 的权威副本），所以它不影响子阶段 A 的默认值。
+  // 子阶段 A 明确「不改动前端 UI 代码」，所以这里**保持原值不动**，只在验收报告里记为待办。
   maxConcurrentAgentTasks: 1,
   maxBrowserInstances: 4,
 };

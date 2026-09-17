@@ -37,6 +37,14 @@ import type {
 } from '@ai-workbench/shared';
 import type { ServerEnv } from './env';
 import { llmFetch, type LlmMessage, type LlmToolCall } from './llm';
+import { mentionsLogin } from './promptPolicy';
+import {
+  bindPageLoop,
+  pageStateOf,
+  patchPageState,
+  summaryFromSnapshot,
+  type PageStatePatch,
+} from './pageState';
 
 /** 会话状态里要喂给循环的几行（字段名与 conversations 表一致，取自 sessionState） */
 export interface LoopStateBrief {
@@ -199,6 +207,16 @@ export interface LoopSession {
   pendingCallId: string | null;
   /** 已经用过的工具名（诊断用，也用来证明「闲聊轮没有开页工具」） */
   usedTools: LoopToolName[];
+  /**
+   * 子阶段 A · **推进锁**（重入保护）。
+   *
+   * 同一条循环同一时刻只允许一次 `advance()` 在跑。没有这道锁时，桌面把同一次 `next`
+   * 发了两次（重试 / 双击 / 两路都带上了同一个 loopId）就会两条 `advance` 交错往
+   * `session.messages` 里追加 assistant/tool 消息、各自读同一个 `pendingCallId` 与 `step`，
+   * 结果是历史里出现对不上的 tool_call_id、步数被记两次 —— 模型从此看到一段自相矛盾的对话。
+   * 现在第二次调用**当场抛 LoopBusyError**（路由映射成 409），不排队、不静默。
+   */
+  advancing: boolean;
   createdAt: number;
   touchedAt: number;
 }
@@ -261,6 +279,12 @@ export interface StartLoopInput {
 /** 建一个循环（只有 /chat/stream 的任务轮与主进程兜底会调它） */
 export function startLoop(env: ServerEnv, input: StartLoopInput): LoopSession {
   sweep();
+  /**
+   * 子阶段 A：循环要用的「本会话状态」**按 wcId 分片取**，不再直接读 conversations
+   * （调用方传进来的 `state` 只当**首次**用到这张页时的种子）。
+   * 这样同一个智能体的两路任务各读各的，谁也覆盖不了谁。
+   */
+  const brief = resolveLoopBrief(input);
   const session: LoopSession = {
     id: nextLoopId(),
     userId: input.userId,
@@ -270,7 +294,7 @@ export function startLoop(env: ServerEnv, input: StartLoopInput): LoopSession {
     goal: input.goal.slice(0, 500),
     messages: [
       { role: 'system', content: LOOP_SYSTEM_PROMPT },
-      { role: 'user', content: firstUserMessage(input, env.agentLoopMaxSteps) },
+      { role: 'user', content: firstUserMessage(input, env.agentLoopMaxSteps, brief) },
     ],
     step: 0,
     maxSteps: env.agentLoopMaxSteps,
@@ -278,16 +302,47 @@ export function startLoop(env: ServerEnv, input: StartLoopInput): LoopSession {
     lastSnapshot: null,
     pendingCallId: null,
     usedTools: [],
+    advancing: false,
     createdAt: Date.now(),
     touchedAt: Date.now(),
   };
+  // 把「这一路在服务端的循环号」记在页上（同一套 id，方便诊断与将来做「按页停」）
+  const wcId = Number(input.wcId);
+  if (Number.isInteger(wcId)) bindPageLoop(wcId, session.id, input.userId, input.agentId);
   loops.set(session.id, session);
   return session;
 }
 
+/**
+ * 这一路要用的状态：**页级优先，会话级只当种子**。
+ *
+ * 没有 wcId（老的单步路径 / 没有页的循环）时退回原来的会话级 brief，行为不变。
+ */
+function resolveLoopBrief(input: StartLoopInput): LoopStateBrief | null {
+  const wcId = Number(input.wcId);
+  if (!Number.isInteger(wcId)) return input.state ?? null;
+  const seed: PageStatePatch | null = input.state
+    ? {
+        current_task: input.state.current_task,
+        browser_confirmed: input.state.browser_confirmed,
+        login_required: input.state.login_required,
+        already_told_user_login_themselves: input.state.already_told_user_login_themselves,
+        last_page_summary: input.state.last_page_summary,
+      }
+    : null;
+  const st = pageStateOf(wcId, { userId: input.userId, agentId: input.agentId, seed });
+  return {
+    current_task: st.current_task,
+    browser_confirmed: st.browser_confirmed,
+    login_required: st.login_required,
+    already_told_user_login_themselves: st.already_told_user_login_themselves,
+    last_page_summary: st.last_page_summary,
+  };
+}
+
 /** 第一轮的用户消息：目标 + 当前这张页 + 会话状态要点 + 步数上限 */
-function firstUserMessage(input: StartLoopInput, maxSteps: number): string {
-  const s = input.state;
+function firstUserMessage(input: StartLoopInput, maxSteps: number, brief: LoopStateBrief | null): string {
+  const s = brief ?? undefined;
   const lines = [
     `任务目标：${input.goal}`,
     `当前这张页：${input.pageUrl || '（还没打开，需要时用 open_url）'}`,
@@ -533,13 +588,90 @@ async function askModel(env: ServerEnv, session: LoopSession, tag: string): Prom
 }
 
 /**
- * 推进一格：
+ * 子阶段 A · 同一条循环被**并发推进**时抛这个。
+ *
+ * 路由层把它映射成 **409**（不是 500）：这是调用方用错了（同一次 next 发了两次），
+ * 不是服务端故障。错误话术要能让人立刻知道「被拒了、什么都没发生、下一步怎么办」。
+ */
+export class LoopBusyError extends Error {
+  readonly code = 'loop_busy';
+  readonly loopId: string;
+  constructor(loopId: string) {
+    super(
+      `循环 ${loopId} 正在推进中（上一次 /agent/loop/next 还没返回），本次调用被拒绝：` +
+        '没有执行任何动作，也没有改动它的状态。等它返回后再调。',
+    );
+    this.name = 'LoopBusyError';
+    this.loopId = loopId;
+  }
+}
+
+/**
+ * 推进一格：**带重入保护**。
+ *
+ *   - 同一条循环已经有一次 advance 在跑 → 当场抛 `LoopBusyError`（明确拒绝，不排队、不静默）；
+ *   - 否则置锁 → 跑真正的推进（advanceInner）→ **把结果写回按 wcId 分片的状态** → 放锁。
+ *
+ * 锁放在 `session` 上（`advancing`），所以粒度天然就是**一个 loopId 一把**：
+ * 两条不同的循环（两张页）互不影响，各自可以同时在推进。
+ */
+export async function advance(env: ServerEnv, session: LoopSession, result?: LoopToolResult | null): Promise<AgentLoopDecision> {
+  if (session.advancing) throw new LoopBusyError(session.id);
+  session.advancing = true;
+  try {
+    const decision = await advanceInner(env, session, result);
+    // 子阶段 A：每一步的推进结果落回**这张页自己**的状态（原来循环根本不写，last_page_summary
+    // 永远是会话级那一个值，两个任务共用）。写失败不能影响决策本身。
+    try {
+      syncPageState(session, result ?? null, decision);
+    } catch (err) {
+      console.error('[loop] 写分片状态失败（不影响这一步的决策）：', (err as Error)?.message ?? String(err));
+    }
+    return decision;
+  } finally {
+    session.advancing = false;
+  }
+}
+
+/**
+ * 把这一步的推进结果写进**这张页**的分片状态（子阶段 A 改造点 2 的写入口）。
+ *
+ * 只写「任务态」：current_task / latest_user_intent / last_page_summary / login_required /
+ * sensitive_action / browser_confirmed / already_told_user_login_themselves。
+ * **不写 keepalive**（那是智能体级的，见 pageState.ts 的说明）。
+ */
+function syncPageState(session: LoopSession, result: LoopToolResult | null, decision: AgentLoopDecision): void {
+  const wcId = Number(session.wcId);
+  if (!Number.isInteger(wcId)) return; // 没有页维度的循环（老的单步适配器）不写分片
+  const snap = session.lastSnapshot;
+  const patch: PageStatePatch = {
+    // 这一路的任务目标就是这张页的 current_task（两路并行时各是各的，不再互相覆盖）
+    current_task: session.goal,
+    browser_confirmed: true, // 循环真的在动手了 → 这张页确实在用浏览器
+    // 敏感/不可逆按**本轮**算，不粘住：这一步没触发就写 false（与 applyUserMessage 同一套语义）
+    sensitive_action: decision.kind === 'ask' && decision.reason === 'sensitive_field',
+    step: session.step,
+  };
+  const summary = summaryFromSnapshot(snap);
+  if (summary) patch.last_page_summary = summary;
+  if (snap) patch.login_required = Boolean(snap.loginLike);
+  if (result?.userAnswer) patch.latest_user_intent = result.userAnswer;
+  // 循环在让用户自己去登录（need_user + 话里提到登录）→ 记「已提醒过」，避免每轮重复长篇安全说明
+  if (decision.kind === 'ask' && decision.reason === 'need_user' && mentionsLogin(decision.question)) {
+    patch.already_told_user_login_themselves = true;
+  }
+  patchPageState(wcId, patch, { userId: session.userId, agentId: session.agentId, loopId: session.id });
+}
+
+/**
+ * 推进一格（**内部实现**，外部一律走上面的 `advance`）。
+ *
  *   - 传了 result（上一个工具的回执）→ 先追加 tool 消息，再问模型下一步；
  *   - 没传 result（第一步 / 用户补了一句答复）→ 直接问模型下一步。
  *
  * 返回的一定是「桌面能执行的东西」：一个工具、或一句提问 / 结论 / 说明。
  */
-export async function advance(env: ServerEnv, session: LoopSession, result?: LoopToolResult | null): Promise<AgentLoopDecision> {
+async function advanceInner(env: ServerEnv, session: LoopSession, result?: LoopToolResult | null): Promise<AgentLoopDecision> {
   session.touchedAt = Date.now();
 
   if (session.status === 'stopped') return { kind: 'stopped', reason: 'user_stop', step: session.step };
@@ -722,6 +854,7 @@ export async function decideOnce(env: ServerEnv, input: DecideOnceInput): Promis
     lastSnapshot: input.snapshot,
     pendingCallId: null,
     usedTools: [],
+    advancing: false,
     createdAt: Date.now(),
     touchedAt: Date.now(),
   };

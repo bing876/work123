@@ -306,11 +306,38 @@ setTaskListener((state) => {
 ipcMain.handle('workbench:task:start', (_event, targetWebContentsId?: number) =>
   startTask(targetWebContentsId),
 );
-ipcMain.handle('workbench:task:pause', () => pauseTask());
+/**
+ * 子阶段 A：暂停 / 继续也支持**点名某一张页**。
+ *
+ * 为什么必须加：driver 侧早就是 per-target（`pauseTask(wcId)` / `applyPaused(wcId)`），
+ * 但这两个 IPC 一直不接 target，落到 `activeTaskWcId()` 上 —— 多路真并行时那等于
+ * 「按 Map 里第一条在跑的猜」，**验不出「暂停 1 号、2 号照跑」**，也做不到用户想停哪路停哪路。
+ * 不传 target 时行为与以前**完全一致**（沿用「此刻在跑 / 最近碰过的那张」），所以老调用点不用改。
+ */
+ipcMain.handle('workbench:task:pause', (_event, targetWebContentsId?: unknown) => {
+  const wcId = Number(targetWebContentsId);
+  return pauseTask(Number.isInteger(wcId) ? wcId : undefined);
+});
 // 第 7 步：有挂起的驾驶员任务时，「继续」= 重启 AI 循环（第一步仍是 read_page，按当前页决策，
 // 不重放旧动作）；没有则维持第 4 步 demo 语义。
 // 第 17 步：两路并行时「继续」= 把**所有**挂起的那几路一起重新发车（每路各读自己那张页）。
-ipcMain.handle('workbench:task:resume', () => {
+ipcMain.handle('workbench:task:resume', (_event, targetWebContentsId?: unknown) => {
+  const wcIdRaw = Number(targetWebContentsId);
+  const only = Number.isInteger(wcIdRaw) ? wcIdRaw : null;
+  // 点名了某一页：只动这一路，别路绝不碰
+  if (only !== null) {
+    const lane = lanes.get(only);
+    if (lane && lane.waiters.length > 0) {
+      notifyResume(lane);
+      return getTaskState(only);
+    }
+    const goal = pendingGoals.get(only) ?? lane?.goal;
+    if (goal) {
+      startAgentLoop(only, goal, false, { agentId: lane?.agentId ?? lastAgentByWc.get(only) ?? null });
+      return getTaskState(only);
+    }
+    return resumeTask(only);
+  }
   // 第 9 步：敏感等待中点「继续」= 手动兜底唤醒（和自动信号走同一条路）
   if (anyLaneWaiting()) {
     notifyAllResume();
@@ -333,7 +360,17 @@ ipcMain.handle('workbench:task:reset', () => {
   pendingAnswers.clear();
   return resetTask();
 });
-ipcMain.handle('workbench:task:state', () => getTaskState());
+/**
+ * 子阶段 A：状态读口也支持**点名某一张页**。
+ *
+ * A1.5 已经把状态改成 per-target，但 `getTaskState()` 不接 target 时回的是**聚合视图**
+ * （左栏横幅需要的那条）。多路真并行时这就读不出「1 号已暂停、2 号还在跑」——
+ * 聚合视图按「running > paused」挑，只会回 2 号。不传 target 时行为不变。
+ */
+ipcMain.handle('workbench:task:state', (_event, targetWebContentsId?: unknown) => {
+  const wcId = Number(targetWebContentsId);
+  return getTaskState(Number.isInteger(wcId) ? wcId : undefined);
+});
 
 // ---------------------------------------------------------------------------
 // 第 22 步：可调配置（A1.5 的并发数 / D 的多实例上限）

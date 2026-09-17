@@ -204,9 +204,9 @@ export interface WorkbenchBridge {
    */
   startTask: (targetWebContentsId?: number) => Promise<TaskState>;
   /** 暂停：立即停止自动 click/type，内嵌页交还用户手点（running 时中断任务循环） */
-  pauseTask: () => Promise<TaskState>;
+  pauseTask: (targetWebContentsId?: number) => Promise<TaskState>;
   /** 继续：先 read_page 读用户当前真实页面再决定下一步，禁止重放暂停前的步骤 */
-  resumeTask: () => Promise<TaskState>;
+  resumeTask: (targetWebContentsId?: number) => Promise<TaskState>;
   /** 复位：任意状态回到 idle，用于从 done / failed 重新开始 */
   resetTask: () => Promise<TaskState>;
 
@@ -263,7 +263,7 @@ export interface WorkbenchBridge {
   ) => Promise<{ saved: boolean; path?: string; canceled?: boolean; error?: string }>;
 
   /** 读取主进程权威状态（渲染进程挂载时初始同步用） */
-  getTaskState: () => Promise<TaskState>;
+  getTaskState: (targetWebContentsId?: number) => Promise<TaskState>;
 
   /**
    * 第 22 步：读可调配置。权威副本在主进程（userData 下的 JSON），
@@ -629,16 +629,18 @@ export interface AgentLoopNextResult {
 // 第 22 步（浏览器多实例融合）：可调配置
 //
 // 两条都是**设置里可调**的，绝不写死在代码里：
-//   - maxConcurrentAgentTasks —— A1.5 的「一期只允许 1 路 active agent task」。
-//     数据结构按 target 独立设计（见 electron/driver.ts），所以以后把这个数调大就能
+//   - maxConcurrentAgentTasks —— A1.5 的「同时几路 active agent task」。
+//     数据结构按 target 独立设计（见 electron/driver.ts），所以调大这个数就能
 //     解锁真并行，**不需要重新设计数据结构**；
+//     **子阶段 A 起默认值 = 20**（原来 1）：本阶段要验证的是「技术上真并发没问题」，
+//     动态资源限制是后面的子阶段 B。这个开关**本身保留**（继续用它做压力测试 / 临时限流）。
 //   - maxBrowserInstances —— D 的多实例上限（默认 4，不是 6）。每张内嵌页 = 一个独立
 //     渲染进程 + 一块 session 存储，所以必须有上限防内存失控。
 // ---------------------------------------------------------------------------
 
 /** 主进程持久化的可调配置（权威副本在主进程 userData 下的 JSON 里） */
 export interface WorkbenchSettings {
-  /** 同时最多几路 agent 任务在跑（默认 1；调大即解锁多实例真并行） */
+  /** 同时最多几路 agent 任务在跑（子阶段 A 起默认 20；调小即临时限流，调大即解锁更多并行） */
   maxConcurrentAgentTasks: number;
   /** 最多同时开几张内嵌页（默认 4；**只拒绝新开，绝不偷偷关掉已有页**） */
   maxBrowserInstances: number;
@@ -649,12 +651,16 @@ export interface WorkbenchSettings {
  * 防止有人手改 JSON 改出负数或 0（那会让功能直接不可用）。
  */
 export const SETTINGS_RANGE = {
-  maxConcurrentAgentTasks: { min: 1, max: 8 },
+  /**
+   * 子阶段 A：上限从 8 放宽到 20 —— 默认值 20 必须落在合法区间里，
+   * 否则「夹到区间」这一步会把默认值本身改回 8。
+   */
+  maxConcurrentAgentTasks: { min: 1, max: 20 },
   maxBrowserInstances: { min: 1, max: 20 },
 } as const;
 
-/** 默认值（D：多实例上限默认 **4**） */
+/** 默认值（子阶段 A：并发默认 **20**；D：多实例上限默认 **4**） */
 export const DEFAULT_SETTINGS: WorkbenchSettings = {
-  maxConcurrentAgentTasks: 1,
+  maxConcurrentAgentTasks: 20,
   maxBrowserInstances: 4,
 };
