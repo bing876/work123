@@ -1,8 +1,8 @@
 {
   "generatedAt": "2026-09-16T23:56:29.279Z",
-  "note": "子阶段 A 真机验收原始取证（由 desk-tests.py / server-tests.mjs / fake-llm.mjs 产出）",
+  "note": "子阶段 A 真机验收原始取证（由 scripts/verify 下的 desk-tests.py / server-tests.mjs / fake-llm.mjs 产出）。本包为**复验后的最终版本**：全部用例在「改造点 1/2/3 + 读侧兜底」的最终代码树上重跑过一遍（见 reverifiedAt），各节即最后一次真机运行的原始输出。",
   "server-tests": {
-    "startedAt": "2026-09-16T23:28:28.424Z",
+    "startedAt": "2026-09-17T01:30:35.551Z",
     "checks": [
       {
         "name": "7.1 并发两次 next：恰好一次成功",
@@ -19,7 +19,7 @@
         "ok": true,
         "detail": {
           "code": "loop_busy",
-          "error": "循环 loop_mu4qev68_1 正在推进中（上一次 /agent/loop/next 还没返回），本次调用被拒绝：没有执行任何动作，也没有改动它的状态。等它返回后再调。"
+          "error": "循环 loop_mu4urwsq_6 正在推进中（上一次 /agent/loop/next 还没返回），本次调用被拒绝：没有执行任何动作，也没有改动它的状态。等它返回后再调。"
         }
       },
       {
@@ -70,11 +70,13 @@
         "name": "4.4 分片表里确实有这两条（诊断接口可读）",
         "ok": true,
         "detail": {
-          "count": 3,
+          "count": 5,
           "pages": [
             70001,
             70011,
-            70012
+            70012,
+            70481,
+            70031
           ]
         }
       },
@@ -98,12 +100,119 @@
         "name": "4.7 /health 暴露 pageStates 计数",
         "ok": true,
         "detail": {
-          "pageStates": 3
+          "pageStates": 5
+        }
+      },
+      {
+        "name": "2.0 建一个临时智能体（会话全新、状态为空）",
+        "ok": true,
+        "detail": {
+          "agentId": 26,
+          "convId": 67
+        }
+      },
+      {
+        "name": "2.0b 新会话的任务态列确实是空的",
+        "ok": true,
+        "detail": {
+          "raw_before": {
+            "current_task": null,
+            "latest_user_intent": null,
+            "last_page_summary": null,
+            "browser_confirmed": false,
+            "keepalive": false
+          }
+        }
+      },
+      {
+        "name": "2.1 任务轮返回 200 且带 loopId",
+        "ok": true,
+        "detail": {
+          "status": 200,
+          "hasLoopId": true
+        }
+      },
+      {
+        "name": "2.2 任务态写进了**按 wcId 分片**的存储",
+        "ok": true,
+        "detail": {
+          "status": 200,
+          "current_task": "任务轮分片断言：去 A 页把报价抄下来",
+          "latest_user_intent": "任务轮分片断言：去 A 页把报价抄下来",
+          "last_page_summary": "已打开 http://127.0.0.1:8899/page-a"
+        }
+      },
+      {
+        "name": "2.3 【直连数据库】conversations 的任务态列一行都没被覆写（仍是空）",
+        "ok": true,
+        "detail": {
+          "before": {
+            "current_task": null,
+            "latest_user_intent": null,
+            "last_page_summary": null
+          },
+          "after": {
+            "current_task": null,
+            "latest_user_intent": null,
+            "last_page_summary": null
+          }
+        }
+      },
+      {
+        "name": "2.4 conversations 上仍保留了 agent 级聚合标志 browser_confirmed",
+        "ok": true,
+        "detail": {
+          "raw_browser_confirmed": true,
+          "keepalive": false
+        }
+      },
+      {
+        "name": "2.5 【读侧兜底】GET /chat/state 会话级为空时用页级补上当前任务（桌面那一行不断档）",
+        "ok": true,
+        "detail": {
+          "raw_conversations_current_task": null,
+          "api_chat_state_current_task": "任务轮分片断言：去 A 页把报价抄下来",
+          "api_last_page_summary": "已打开 http://127.0.0.1:8899/page-a"
+        }
+      },
+      {
+        "name": "2.6 临时智能体已删除（不留垃圾数据）",
+        "ok": true,
+        "detail": {
+          "status": 200
+        }
+      },
+      {
+        "name": "2.7 任务轮建的服务端循环已停止（不留 running 记账）",
+        "ok": true,
+        "detail": {
+          "loopId": "loop_mu4us0ku_9",
+          "stopped": 1
+        }
+      },
+      {
+        "name": "8.1 带别的智能体号推进 → 409 agent_mismatch",
+        "ok": true,
+        "detail": {
+          "status": 409,
+          "code": "agent_mismatch",
+          "error": "这个循环属于智能体 1，不是 8——没有执行任何动作。"
+        }
+      },
+      {
+        "name": "8.2 带别的页号推进 → 409 page_mismatch",
+        "ok": true,
+        "detail": {
+          "status": 409,
+          "code": "page_mismatch",
+          "error": "这个循环只操作它自己那张页，别的页我不碰——没有执行任何动作。"
         }
       }
     ],
-    "finishedAt": "2026-09-16T23:28:33.421Z",
-    "pass": true
+    "finishedAt": "2026-09-17T01:30:40.519Z",
+    "dbUp": true,
+    "pass": true,
+    "skipped": []
   },
   "concurrency": {
     "wcA": 3,
@@ -124,10 +233,10 @@
     },
     "timeline": [
       {
-        "t": 1.2,
+        "t": 1.1,
         "liveLoops": 2,
-        "llmCalls": 42,
-        "pageStates": 5,
+        "llmCalls": 2,
+        "pageStates": 2,
         "lanes": [
           3,
           4
@@ -148,10 +257,10 @@
         }
       },
       {
-        "t": 2.3,
+        "t": 2.2,
         "liveLoops": 2,
-        "llmCalls": 44,
-        "pageStates": 5,
+        "llmCalls": 4,
+        "pageStates": 2,
         "lanes": [
           3,
           4
@@ -172,10 +281,10 @@
         }
       },
       {
-        "t": 3.5,
+        "t": 3.4,
         "liveLoops": 2,
-        "llmCalls": 46,
-        "pageStates": 5,
+        "llmCalls": 6,
+        "pageStates": 2,
         "lanes": [
           3,
           4
@@ -196,10 +305,10 @@
         }
       },
       {
-        "t": 4.7,
+        "t": 4.5,
         "liveLoops": 2,
-        "llmCalls": 48,
-        "pageStates": 5,
+        "llmCalls": 8,
+        "pageStates": 2,
         "lanes": [
           3,
           4
@@ -220,10 +329,10 @@
         }
       },
       {
-        "t": 5.8,
+        "t": 5.7,
         "liveLoops": 2,
-        "llmCalls": 50,
-        "pageStates": 5,
+        "llmCalls": 10,
+        "pageStates": 2,
         "lanes": [
           3,
           4
@@ -244,10 +353,10 @@
         }
       },
       {
-        "t": 7,
+        "t": 6.8,
         "liveLoops": 2,
-        "llmCalls": 52,
-        "pageStates": 5,
+        "llmCalls": 12,
+        "pageStates": 2,
         "lanes": [
           3,
           4
@@ -268,10 +377,10 @@
         }
       },
       {
-        "t": 8.1,
+        "t": 8,
         "liveLoops": 2,
-        "llmCalls": 54,
-        "pageStates": 5,
+        "llmCalls": 14,
+        "pageStates": 2,
         "lanes": [
           3,
           4
@@ -292,10 +401,10 @@
         }
       },
       {
-        "t": 9.2,
+        "t": 9.1,
         "liveLoops": 2,
-        "llmCalls": 56,
-        "pageStates": 5,
+        "llmCalls": 16,
+        "pageStates": 2,
         "lanes": [
           3,
           4
@@ -316,10 +425,10 @@
         }
       },
       {
-        "t": 10.4,
+        "t": 10.3,
         "liveLoops": 2,
-        "llmCalls": 58,
-        "pageStates": 5,
+        "llmCalls": 18,
+        "pageStates": 2,
         "lanes": [
           3,
           4
@@ -340,10 +449,10 @@
         }
       },
       {
-        "t": 11.5,
+        "t": 11.4,
         "liveLoops": 2,
-        "llmCalls": 60,
-        "pageStates": 5,
+        "llmCalls": 20,
+        "pageStates": 2,
         "lanes": [
           3,
           4
@@ -364,10 +473,10 @@
         }
       },
       {
-        "t": 12.6,
+        "t": 12.5,
         "liveLoops": 0,
-        "llmCalls": 60,
-        "pageStates": 5,
+        "llmCalls": 20,
+        "pageStates": 2,
         "lanes": [],
         "taskA": {
           "phase": "paused",
@@ -387,23 +496,23 @@
     ],
     "llm_spans_ms": {
       "并发任务甲：整理 A 页要点": {
-        "from": 1789601860364,
-        "to": 1789601872600,
-        "dur_s": 12.24
+        "from": 1789608676846,
+        "to": 1789608689015,
+        "dur_s": 12.17
       },
       "并发任务乙：整理 B 页要点": {
-        "from": 1789601860390,
-        "to": 1789601872601,
-        "dur_s": 12.21
+        "from": 1789608676858,
+        "to": 1789608689016,
+        "dur_s": 12.16
       }
     },
-    "overlap_s": 12.21,
+    "overlap_s": 12.16,
     "llm_request_count": 20,
     "stateA": {
       "wcId": 3,
       "userId": 1,
       "agentId": 1,
-      "loopId": "loop_mu4qqozc_8",
+      "loopId": "loop_mu4ussls_1",
       "current_task": "并发任务甲：整理 A 页要点",
       "latest_user_intent": "",
       "browser_confirmed": true,
@@ -412,14 +521,14 @@
       "last_page_summary": "已读 http://127.0.0.1:8899/page-a · 验收页 PAGE-A",
       "already_told_user_login_themselves": false,
       "step": 10,
-      "createdAt": 1789601604655,
-      "touchedAt": 1789601872610
+      "createdAt": 1789608676816,
+      "touchedAt": 1789608689023
     },
     "stateB": {
       "wcId": 4,
       "userId": 1,
       "agentId": 1,
-      "loopId": "loop_mu4qqp0a_9",
+      "loopId": "loop_mu4ussmn_2",
       "current_task": "并发任务乙：整理 B 页要点",
       "latest_user_intent": "",
       "browser_confirmed": true,
@@ -428,8 +537,8 @@
       "last_page_summary": "已读 http://127.0.0.1:8898/page-b · 验收页 PAGE-B",
       "already_told_user_login_themselves": false,
       "step": 10,
-      "createdAt": 1789601604691,
-      "touchedAt": 1789601872610
+      "createdAt": 1789608676847,
+      "touchedAt": 1789608689024
     }
   },
   "pause": {
@@ -557,7 +666,7 @@
           "wcId": 4
         },
         "stateA_step": 3,
-        "stateB_step": 6,
+        "stateB_step": 7,
         "liveLoops": 1
       },
       {
@@ -621,7 +730,7 @@
         "liveLoops": 0
       },
       {
-        "t": 10.3,
+        "t": 10.2,
         "taskA": {
           "phase": "paused",
           "detail": "等你的下一步：暂停实验甲：整理 A 页",
@@ -721,7 +830,7 @@
         "liveLoops": 0
       },
       {
-        "t": 16.1,
+        "t": 16,
         "taskA": {
           "phase": "paused",
           "detail": "等你的下一步：暂停实验甲：整理 A 页",
@@ -741,7 +850,7 @@
         "liveLoops": 0
       },
       {
-        "t": 17.3,
+        "t": 17.2,
         "taskA": {
           "phase": "paused",
           "detail": "等你的下一步：暂停实验甲：整理 A 页",
@@ -801,7 +910,7 @@
         "liveLoops": 0
       },
       {
-        "t": 20.7,
+        "t": 20.6,
         "taskA": {
           "phase": "paused",
           "detail": "等你的下一步：暂停实验甲：整理 A 页",
@@ -821,7 +930,7 @@
         "liveLoops": 0
       },
       {
-        "t": 21.9,
+        "t": 21.8,
         "taskA": {
           "phase": "paused",
           "detail": "等你的下一步：暂停实验甲：整理 A 页",
@@ -841,7 +950,7 @@
         "liveLoops": 0
       },
       {
-        "t": 23,
+        "t": 22.9,
         "taskA": {
           "phase": "paused",
           "detail": "等你的下一步：暂停实验甲：整理 A 页",
@@ -861,7 +970,7 @@
         "liveLoops": 0
       },
       {
-        "t": 24.2,
+        "t": 24,
         "taskA": {
           "phase": "paused",
           "detail": "等你的下一步：暂停实验甲：整理 A 页",
@@ -881,7 +990,7 @@
         "liveLoops": 0
       },
       {
-        "t": 25.3,
+        "t": 25.2,
         "taskA": {
           "phase": "paused",
           "detail": "等你的下一步：暂停实验甲：整理 A 页",
@@ -901,7 +1010,7 @@
         "liveLoops": 0
       },
       {
-        "t": 26.5,
+        "t": 26.3,
         "taskA": {
           "phase": "paused",
           "detail": "等你的下一步：暂停实验甲：整理 A 页",
@@ -921,7 +1030,7 @@
         "liveLoops": 0
       },
       {
-        "t": 27.6,
+        "t": 27.5,
         "taskA": {
           "phase": "paused",
           "detail": "等你的下一步：暂停实验甲：整理 A 页",
@@ -941,7 +1050,7 @@
         "liveLoops": 0
       },
       {
-        "t": 28.8,
+        "t": 28.6,
         "taskA": {
           "phase": "paused",
           "detail": "等你的下一步：暂停实验甲：整理 A 页",
@@ -961,7 +1070,7 @@
         "liveLoops": 0
       },
       {
-        "t": 29.9,
+        "t": 29.8,
         "taskA": {
           "phase": "paused",
           "detail": "等你的下一步：暂停实验甲：整理 A 页",
@@ -981,7 +1090,7 @@
         "liveLoops": 0
       },
       {
-        "t": 31.2,
+        "t": 30.9,
         "taskA": {
           "phase": "paused",
           "detail": "等你的下一步：暂停实验甲：整理 A 页",
@@ -1001,7 +1110,7 @@
         "liveLoops": 0
       },
       {
-        "t": 32.4,
+        "t": 32,
         "taskA": {
           "phase": "paused",
           "detail": "等你的下一步：暂停实验甲：整理 A 页",
@@ -1021,7 +1130,7 @@
         "liveLoops": 0
       },
       {
-        "t": 33.7,
+        "t": 33.2,
         "taskA": {
           "phase": "paused",
           "detail": "等你的下一步：暂停实验甲：整理 A 页",
@@ -1041,7 +1150,7 @@
         "liveLoops": 0
       },
       {
-        "t": 34.8,
+        "t": 34.3,
         "taskA": {
           "phase": "paused",
           "detail": "等你的下一步：暂停实验甲：整理 A 页",
@@ -1140,7 +1249,7 @@
         "liveLoops": 2
       },
       {
-        "t": 4.3,
+        "t": 4.4,
         "taskA": {
           "phase": "running",
           "detail": "AI 驾驶中 · 任务：跨智能体甲：小助的 A 页",
@@ -1176,7 +1285,7 @@
         "liveLoops": 2
       },
       {
-        "t": 6.5,
+        "t": 6.6,
         "taskA": {
           "phase": "running",
           "detail": "AI 驾驶中 · 任务：跨智能体甲：小助的 A 页",
@@ -1194,7 +1303,7 @@
         "liveLoops": 2
       },
       {
-        "t": 8.2,
+        "t": 7.7,
         "taskA": {
           "phase": "running",
           "detail": "AI 驾驶中 · 任务：跨智能体甲：小助的 A 页",
@@ -1212,7 +1321,7 @@
         "liveLoops": 2
       },
       {
-        "t": 9.4,
+        "t": 8.7,
         "taskA": {
           "phase": "running",
           "detail": "AI 驾驶中 · 任务：跨智能体甲：小助的 A 页",
@@ -1230,7 +1339,7 @@
         "liveLoops": 2
       },
       {
-        "t": 10.5,
+        "t": 9.8,
         "taskA": {
           "phase": "running",
           "detail": "AI 驾驶中 · 任务：跨智能体甲：小助的 A 页",
@@ -1248,7 +1357,7 @@
         "liveLoops": 2
       },
       {
-        "t": 11.6,
+        "t": 10.9,
         "taskA": {
           "phase": "running",
           "detail": "AI 驾驶中 · 任务：跨智能体甲：小助的 A 页",
@@ -1266,7 +1375,25 @@
         "liveLoops": 2
       },
       {
-        "t": 12.7,
+        "t": 12,
+        "taskA": {
+          "phase": "running",
+          "detail": "AI 驾驶中 · 任务：跨智能体甲：小助的 A 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 3
+        },
+        "taskB": {
+          "phase": "running",
+          "detail": "2 路驾驶中 · 本路任务：跨智能体乙：卡布的 C 页",
+          "step": 0,
+          "blocked": false,
+          "wcId": 5
+        },
+        "liveLoops": 2
+      },
+      {
+        "t": 13.1,
         "taskA": {
           "phase": "paused",
           "detail": "等你的下一步：跨智能体甲：小助的 A 页",
@@ -1302,7 +1429,7 @@
       "wcId": 3,
       "userId": 1,
       "agentId": 1,
-      "loopId": "loop_mu4qsb66_c",
+      "loopId": "loop_mu4ut7xd_3",
       "current_task": "跨智能体甲：小助的 A 页",
       "latest_user_intent": "",
       "browser_confirmed": true,
@@ -1311,14 +1438,14 @@
       "last_page_summary": "已读 http://127.0.0.1:8899/page-a · 验收页 PAGE-A",
       "already_told_user_login_themselves": false,
       "step": 10,
-      "createdAt": 1789601604655,
-      "touchedAt": 1789601947958
+      "createdAt": 1789608676816,
+      "touchedAt": 1789608708834
     },
     "stateB": {
       "wcId": 5,
       "userId": 1,
       "agentId": 8,
-      "loopId": "loop_mu4qsb7w_d",
+      "loopId": "loop_mu4ut7yp_4",
       "current_task": "跨智能体乙：卡布的 C 页",
       "latest_user_intent": "",
       "browser_confirmed": true,
@@ -1327,8 +1454,8 @@
       "last_page_summary": "已读 http://127.0.0.1:8897/page-c · 验收页 PAGE-C",
       "already_told_user_login_themselves": false,
       "step": 10,
-      "createdAt": 1789601935820,
-      "touchedAt": 1789601948052
+      "createdAt": 1789608696721,
+      "touchedAt": 1789608708879
     },
     "llm_reqs": 20
   },
@@ -1370,7 +1497,7 @@
       3,
       4
     ],
-    "liveLoops_during_test": 3,
+    "liveLoops_during_test": 2,
     "results": {
       "pw": {
         "ok": false,
@@ -1572,514 +1699,130 @@
       "maxConcurrentAgentTasks": 20,
       "maxBrowserInstances": 8
     },
-    "pages_before": 3,
+    "pages_before": 8,
     "samples": [
       {
-        "label": "3 张页（本次实验的起点）",
-        "procCount": 8,
-        "memMB": 653.1,
-        "procs": [
-          {
-            "pid": 64052,
-            "type": "browser",
-            "memMB": 117.3
-          },
-          {
-            "pid": 42040,
-            "type": "renderer",
-            "memMB": 60.8
-          },
-          {
-            "pid": 36792,
-            "type": "renderer",
-            "memMB": 58.7
-          },
-          {
-            "pid": 39756,
-            "type": "renderer",
-            "memMB": 117.6
-          },
-          {
-            "pid": 13624,
-            "type": "renderer",
-            "memMB": 72.3
-          },
-          {
-            "pid": 38920,
-            "type": "renderer",
-            "memMB": 104.1
-          },
-          {
-            "pid": 49828,
-            "type": "GPU",
-            "memMB": 86.4
-          },
-          {
-            "pid": 32364,
-            "type": "network.mojom.NetworkService",
-            "memMB": 35.9
-          }
-        ]
-      },
-      {
-        "label": "3 张页",
-        "procCount": 8,
-        "memMB": 654.1,
-        "procs": [
-          {
-            "pid": 64052,
-            "type": "browser",
-            "memMB": 117.5
-          },
-          {
-            "pid": 42040,
-            "type": "renderer",
-            "memMB": 60.8
-          },
-          {
-            "pid": 36792,
-            "type": "renderer",
-            "memMB": 58.8
-          },
-          {
-            "pid": 39756,
-            "type": "renderer",
-            "memMB": 117.6
-          },
-          {
-            "pid": 13624,
-            "type": "renderer",
-            "memMB": 72.3
-          },
-          {
-            "pid": 38920,
-            "type": "renderer",
-            "memMB": 104.7
-          },
-          {
-            "pid": 49828,
-            "type": "GPU",
-            "memMB": 86.4
-          },
-          {
-            "pid": 32364,
-            "type": "network.mojom.NetworkService",
-            "memMB": 36
-          }
-        ],
-        "wcIds": [
-          3,
-          4,
-          5
-        ]
-      },
-      {
-        "label": "3 张页",
-        "procCount": 8,
-        "memMB": 631,
-        "procs": [
-          {
-            "pid": 64052,
-            "type": "browser",
-            "memMB": 104.5
-          },
-          {
-            "pid": 42040,
-            "type": "renderer",
-            "memMB": 60.8
-          },
-          {
-            "pid": 36792,
-            "type": "renderer",
-            "memMB": 58.8
-          },
-          {
-            "pid": 39756,
-            "type": "renderer",
-            "memMB": 114.4
-          },
-          {
-            "pid": 13624,
-            "type": "renderer",
-            "memMB": 73.4
-          },
-          {
-            "pid": 38920,
-            "type": "renderer",
-            "memMB": 104.6
-          },
-          {
-            "pid": 49828,
-            "type": "GPU",
-            "memMB": 78.5
-          },
-          {
-            "pid": 32364,
-            "type": "network.mojom.NetworkService",
-            "memMB": 36
-          }
-        ],
-        "wcIds": [
-          3,
-          4,
-          5
-        ]
-      },
-      {
-        "label": "3 张页",
-        "procCount": 8,
-        "memMB": 631.2,
-        "procs": [
-          {
-            "pid": 64052,
-            "type": "browser",
-            "memMB": 105.6
-          },
-          {
-            "pid": 42040,
-            "type": "renderer",
-            "memMB": 60.7
-          },
-          {
-            "pid": 36792,
-            "type": "renderer",
-            "memMB": 58.3
-          },
-          {
-            "pid": 39756,
-            "type": "renderer",
-            "memMB": 114.6
-          },
-          {
-            "pid": 13624,
-            "type": "renderer",
-            "memMB": 73.7
-          },
-          {
-            "pid": 38920,
-            "type": "renderer",
-            "memMB": 104.8
-          },
-          {
-            "pid": 49828,
-            "type": "GPU",
-            "memMB": 77.6
-          },
-          {
-            "pid": 32364,
-            "type": "network.mojom.NetworkService",
-            "memMB": 35.9
-          }
-        ],
-        "wcIds": [
-          3,
-          4,
-          5
-        ]
-      },
-      {
-        "label": "4 张页",
+        "label": "8 张页（本次实验的起点）",
         "procCount": 10,
-        "memMB": 732.3,
+        "memMB": 1041.5,
         "procs": [
           {
-            "pid": 64052,
+            "pid": 18864,
             "type": "browser",
-            "memMB": 106.5
+            "memMB": 166.3
           },
           {
-            "pid": 49068,
+            "pid": 27932,
             "type": "renderer",
-            "memMB": 0
+            "memMB": 100.4
           },
           {
-            "pid": 42040,
+            "pid": 25388,
             "type": "renderer",
-            "memMB": 60.7
+            "memMB": 101.4
           },
           {
-            "pid": 36792,
+            "pid": 19072,
             "type": "renderer",
-            "memMB": 57.7
+            "memMB": 99.7
           },
           {
-            "pid": 39756,
+            "pid": 22412,
             "type": "renderer",
-            "memMB": 116.9
+            "memMB": 93
           },
           {
-            "pid": 13624,
+            "pid": 9372,
             "type": "renderer",
-            "memMB": 73.7
+            "memMB": 94.5
           },
           {
-            "pid": 71296,
+            "pid": 25244,
             "type": "renderer",
-            "memMB": 97.5
+            "memMB": 131.9
           },
           {
-            "pid": 38920,
+            "pid": 25940,
             "type": "renderer",
-            "memMB": 105.2
+            "memMB": 103.6
           },
           {
-            "pid": 49828,
+            "pid": 22144,
             "type": "GPU",
-            "memMB": 78.1
+            "memMB": 103.5
           },
           {
-            "pid": 32364,
+            "pid": 11252,
             "type": "network.mojom.NetworkService",
-            "memMB": 36
+            "memMB": 47.2
           }
-        ],
-        "wcIds": [
-          3,
-          4,
-          5,
-          6
-        ]
-      },
-      {
-        "label": "5 张页",
-        "procCount": 9,
-        "memMB": 734.5,
-        "procs": [
-          {
-            "pid": 64052,
-            "type": "browser",
-            "memMB": 106.8
-          },
-          {
-            "pid": 42040,
-            "type": "renderer",
-            "memMB": 60.7
-          },
-          {
-            "pid": 36792,
-            "type": "renderer",
-            "memMB": 57.7
-          },
-          {
-            "pid": 39756,
-            "type": "renderer",
-            "memMB": 116.8
-          },
-          {
-            "pid": 13624,
-            "type": "renderer",
-            "memMB": 72.7
-          },
-          {
-            "pid": 71296,
-            "type": "renderer",
-            "memMB": 98.7
-          },
-          {
-            "pid": 38920,
-            "type": "renderer",
-            "memMB": 105.8
-          },
-          {
-            "pid": 49828,
-            "type": "GPU",
-            "memMB": 79.2
-          },
-          {
-            "pid": 32364,
-            "type": "network.mojom.NetworkService",
-            "memMB": 36.1
-          }
-        ],
-        "wcIds": [
-          3,
-          4,
-          5,
-          6,
-          7
-        ]
-      },
-      {
-        "label": "6 张页",
-        "procCount": 9,
-        "memMB": 701.6,
-        "procs": [
-          {
-            "pid": 64052,
-            "type": "browser",
-            "memMB": 107.3
-          },
-          {
-            "pid": 42040,
-            "type": "renderer",
-            "memMB": 60.1
-          },
-          {
-            "pid": 36792,
-            "type": "renderer",
-            "memMB": 57.7
-          },
-          {
-            "pid": 39756,
-            "type": "renderer",
-            "memMB": 118.4
-          },
-          {
-            "pid": 13624,
-            "type": "renderer",
-            "memMB": 72.7
-          },
-          {
-            "pid": 71296,
-            "type": "renderer",
-            "memMB": 63.1
-          },
-          {
-            "pid": 38920,
-            "type": "renderer",
-            "memMB": 105.2
-          },
-          {
-            "pid": 49828,
-            "type": "GPU",
-            "memMB": 81
-          },
-          {
-            "pid": 32364,
-            "type": "network.mojom.NetworkService",
-            "memMB": 36.1
-          }
-        ],
-        "wcIds": [
-          3,
-          4,
-          5,
-          6,
-          7,
-          8
-        ]
-      },
-      {
-        "label": "7 张页",
-        "procCount": 9,
-        "memMB": 669.7,
-        "procs": [
-          {
-            "pid": 64052,
-            "type": "browser",
-            "memMB": 91.4
-          },
-          {
-            "pid": 42040,
-            "type": "renderer",
-            "memMB": 60
-          },
-          {
-            "pid": 36792,
-            "type": "renderer",
-            "memMB": 57.6
-          },
-          {
-            "pid": 39756,
-            "type": "renderer",
-            "memMB": 102.4
-          },
-          {
-            "pid": 13624,
-            "type": "renderer",
-            "memMB": 72.6
-          },
-          {
-            "pid": 71296,
-            "type": "renderer",
-            "memMB": 65.5
-          },
-          {
-            "pid": 38920,
-            "type": "renderer",
-            "memMB": 105.3
-          },
-          {
-            "pid": 49828,
-            "type": "GPU",
-            "memMB": 78.8
-          },
-          {
-            "pid": 32364,
-            "type": "network.mojom.NetworkService",
-            "memMB": 36.1
-          }
-        ],
-        "wcIds": [
-          3,
-          4,
-          5,
-          6,
-          7,
-          8,
-          9
         ]
       },
       {
         "label": "8 张页",
-        "procCount": 9,
-        "memMB": 671.5,
+        "procCount": 10,
+        "memMB": 1040.5,
         "procs": [
           {
-            "pid": 64052,
+            "pid": 18864,
             "type": "browser",
-            "memMB": 92.1
+            "memMB": 166.3
           },
           {
-            "pid": 42040,
+            "pid": 27932,
             "type": "renderer",
-            "memMB": 59.8
+            "memMB": 100.4
           },
           {
-            "pid": 36792,
+            "pid": 25388,
             "type": "renderer",
-            "memMB": 57.5
+            "memMB": 101.4
           },
           {
-            "pid": 39756,
+            "pid": 19072,
             "type": "renderer",
-            "memMB": 102.2
+            "memMB": 99.7
           },
           {
-            "pid": 13624,
+            "pid": 22412,
             "type": "renderer",
-            "memMB": 72.4
+            "memMB": 93
           },
           {
-            "pid": 71296,
+            "pid": 9372,
             "type": "renderer",
-            "memMB": 65.9
+            "memMB": 94.5
           },
           {
-            "pid": 38920,
+            "pid": 25244,
             "type": "renderer",
-            "memMB": 105.2
+            "memMB": 131.9
           },
           {
-            "pid": 49828,
+            "pid": 25940,
+            "type": "renderer",
+            "memMB": 102.6
+          },
+          {
+            "pid": 22144,
             "type": "GPU",
-            "memMB": 80.3
+            "memMB": 103.5
           },
           {
-            "pid": 32364,
+            "pid": 11252,
             "type": "network.mojom.NetworkService",
-            "memMB": 36.1
+            "memMB": 47.2
           }
         ],
         "wcIds": [
           3,
           4,
-          5,
           6,
           7,
           8,
           9,
-          10
+          10,
+          5
         ]
       }
     ],
@@ -2093,7 +1836,7 @@
         "y": 70,
         "w": 944,
         "h": 404,
-        "cls": "browserPanel__view",
+        "cls": "browserPanel__view browserPanel__view--on",
         "url": "http://127.0.0.1:8899/page-a",
         "title": "验收页 PAGE-A"
       },
@@ -2112,7 +1855,7 @@
       {
         "partition": "persist:workbench-browser-agent-1",
         "src": "http://127.0.0.1:8897/page-c",
-        "wcId": 5,
+        "wcId": 6,
         "x": 220,
         "y": 70,
         "w": 944,
@@ -2124,7 +1867,7 @@
       {
         "partition": "persist:workbench-browser-agent-1",
         "src": "http://127.0.0.1:8896/page-d",
-        "wcId": 6,
+        "wcId": 7,
         "x": 220,
         "y": 70,
         "w": 944,
@@ -2136,7 +1879,7 @@
       {
         "partition": "persist:workbench-browser-agent-1",
         "src": "http://127.0.0.1:8895/page-e",
-        "wcId": 7,
+        "wcId": 8,
         "x": 220,
         "y": 70,
         "w": 944,
@@ -2148,7 +1891,7 @@
       {
         "partition": "persist:workbench-browser-agent-1",
         "src": "http://127.0.0.1:8894/page-f",
-        "wcId": 8,
+        "wcId": 9,
         "x": 220,
         "y": 70,
         "w": 944,
@@ -2160,7 +1903,7 @@
       {
         "partition": "persist:workbench-browser-agent-1",
         "src": "http://127.0.0.1:8893/page-g",
-        "wcId": 9,
+        "wcId": 10,
         "x": 220,
         "y": 70,
         "w": 944,
@@ -2170,96 +1913,103 @@
         "title": "127.0.0.1:8893/page-g"
       },
       {
-        "partition": "persist:workbench-browser-agent-1",
-        "src": "http://127.0.0.1:8892/page-h",
-        "wcId": 10,
+        "partition": "persist:workbench-browser-agent-8",
+        "src": "http://127.0.0.1:8897/page-c",
+        "wcId": 5,
         "x": 220,
         "y": 70,
         "w": 944,
         "h": 404,
-        "cls": "browserPanel__view browserPanel__view--on",
-        "url": "http://127.0.0.1:8892/page-h",
-        "title": "127.0.0.1:8892/page-h"
+        "cls": "browserPanel__view browserPanel__view--off",
+        "url": "http://127.0.0.1:8897/page-c",
+        "title": "验收页 PAGE-C"
       }
     ],
     "processes": [
       {
-        "pid": 64052,
+        "pid": 18864,
         "type": "browser",
-        "memMB": 91.9,
-        "cpu_pct_over_6s": 0.3,
-        "cpuTime_s": 6.4
+        "memMB": 166.2,
+        "cpu_pct_over_6s": 1.5,
+        "cpuTime_s": 10.6
       },
       {
-        "pid": 42040,
+        "pid": 27932,
         "type": "renderer",
-        "memMB": 59.8,
-        "cpu_pct_over_6s": 0,
-        "cpuTime_s": 0.4
-      },
-      {
-        "pid": 36792,
-        "type": "renderer",
-        "memMB": 57.5,
-        "cpu_pct_over_6s": 0,
-        "cpuTime_s": 0.5
-      },
-      {
-        "pid": 39756,
-        "type": "renderer",
-        "memMB": 102.1,
-        "cpu_pct_over_6s": 0,
-        "cpuTime_s": 2.5
-      },
-      {
-        "pid": 13624,
-        "type": "renderer",
-        "memMB": 72.4,
-        "cpu_pct_over_6s": 0,
-        "cpuTime_s": 0.5
-      },
-      {
-        "pid": 71296,
-        "type": "renderer",
-        "memMB": 65.7,
-        "cpu_pct_over_6s": 0,
-        "cpuTime_s": 0.4
-      },
-      {
-        "pid": 38920,
-        "type": "renderer",
-        "memMB": 104.9,
-        "cpu_pct_over_6s": 0,
-        "cpuTime_s": 2.6
-      },
-      {
-        "pid": 49828,
-        "type": "GPU",
-        "memMB": 80.3,
+        "memMB": 100.4,
         "cpu_pct_over_6s": 0.1,
-        "cpuTime_s": 2.4
+        "cpuTime_s": 0.1
       },
       {
-        "pid": 32364,
-        "type": "network.mojom.NetworkService",
-        "memMB": 36.1,
+        "pid": 25388,
+        "type": "renderer",
+        "memMB": 101.5,
+        "cpu_pct_over_6s": 0.1,
+        "cpuTime_s": 0.1
+      },
+      {
+        "pid": 19072,
+        "type": "renderer",
+        "memMB": 99.8,
+        "cpu_pct_over_6s": 0.1,
+        "cpuTime_s": 0.1
+      },
+      {
+        "pid": 22412,
+        "type": "renderer",
+        "memMB": 93,
         "cpu_pct_over_6s": 0,
-        "cpuTime_s": 0.5
+        "cpuTime_s": 0.2
+      },
+      {
+        "pid": 9372,
+        "type": "renderer",
+        "memMB": 94.2,
+        "cpu_pct_over_6s": 0.1,
+        "cpuTime_s": 0.3
+      },
+      {
+        "pid": 25244,
+        "type": "renderer",
+        "memMB": 131.9,
+        "cpu_pct_over_6s": 0,
+        "cpuTime_s": 2.3
+      },
+      {
+        "pid": 25940,
+        "type": "renderer",
+        "memMB": 101.9,
+        "cpu_pct_over_6s": 0.2,
+        "cpuTime_s": 4.4
+      },
+      {
+        "pid": 22144,
+        "type": "GPU",
+        "memMB": 105.6,
+        "cpu_pct_over_6s": 0.7,
+        "cpuTime_s": 3
+      },
+      {
+        "pid": 11252,
+        "type": "network.mojom.NetworkService",
+        "memMB": 47.2,
+        "cpu_pct_over_6s": 0,
+        "cpuTime_s": 0.3
       }
     ],
-    "total_memMB": 670.7,
-    "total_cpu_pct": 0.4,
+    "total_memMB": 1041.7,
+    "total_cpu_pct": 2.8,
     "health": {
       "ok": true,
       "service": "ai-workbench-server",
       "db": "up",
       "sms": "mock",
       "llm": "configured",
-      "llmCalls": 107,
-      "liveLoops": 1,
+      "llmCalls": 64,
+      "liveLoops": 0,
       "loopMaxSteps": 10,
       "pageStates": 3,
-      "time": "2026-09-16T23:49:00.443Z"
+      "time": "2026-09-17T01:35:10.936Z"
     }
   },
   "gate": {
@@ -2285,5 +2035,7 @@
       "wcId": 4
     },
     "liveLoops": 2
-  }
+  },
+  "reverifiedAt": "2026-09-17T01:35:47.235Z",
+  "reverifiedNote": "复验环境：后端 127.0.0.1:8799（指向零依赖假模型 8899，固定延迟 1200ms/次）+ 自己的 Electron 实例（独立 profile / CDP 9333）+ vite 5273 + Postgres（docker compose 的 workbench-pg）。用户自己的 5173/8787 全程未动。"
 }

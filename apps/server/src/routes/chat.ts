@@ -51,6 +51,7 @@ import {
 import { buildMemoryBlock } from './memories';
 import { buildKnowledgeBlock } from './knowledge';
 import { buildAgentContext, buildUserMemoryBlock, ensureAgentConversation } from './agents';
+import { latestPageStateOfAgent } from '../pageState';
 import { startLoop } from '../toolLoop';
 
 export interface ChatDeps {
@@ -157,6 +158,41 @@ async function resolveConversation(
     [p.rows[0].id, null, seedTitle.slice(0, 24) || '小助会话'],
   );
   return { id: Number(ins.rows[0].id) };
+}
+
+/**
+ * 子阶段 A（读侧改动点）：会话级状态为空时，用该智能体名下**最近被碰过的那张页**补上。
+ *
+ * 为什么需要它：任务轮（`/chat/stream` + taskMode）**不再**把 `current_task` 等写进
+ * `conversations`（那是「同一智能体两路并发互相覆盖」的根因），于是桌面的
+ * 「当前任务 / 本会话已同意用浏览器」那一行会断档。这里**只填空**：
+ * 会话级有值就以会话级为准（闲聊轮写进去的东西照旧优先），没有才用页级兜底。
+ * 多路并行时给的是「最近动过的那一路」，与左栏横幅的聚合口径一致。
+ */
+async function mergeLatestPageState(
+  pool: Pool,
+  conversationId: number,
+  base: Awaited<ReturnType<typeof loadConversationState>>,
+): Promise<typeof base> {
+  try {
+    const r = await pool.query<{ agent_id: string | null }>('SELECT agent_id FROM conversations WHERE id = $1', [
+      conversationId,
+    ]);
+    const agentId = Number(r.rows[0]?.agent_id);
+    if (!Number.isInteger(agentId) || agentId <= 0) return base;
+    const ps = latestPageStateOfAgent(agentId);
+    if (!ps) return base;
+    return {
+      ...base,
+      current_task: base.current_task || ps.current_task,
+      last_page_summary: base.last_page_summary || ps.last_page_summary,
+      browser_confirmed: base.browser_confirmed || ps.browser_confirmed,
+      login_required: base.login_required || ps.login_required,
+    };
+  } catch {
+    // 补不上就照旧回会话级：这只是显示层的兜底，不该让读状态这个接口失败
+    return base;
+  }
 }
 
 /** 转发上游 SSE 时只回给桌面这三类事件；这里统一走 JSON.stringify 防换行截断 */
@@ -617,7 +653,14 @@ ${
         hasAgentId ? agentIdRaw : null,
       );
       if ('err' in conv) return errJson(reply, conv.status, conv.err);
-      const state = await loadConversationState(pool, conv.id);
+      const base = await loadConversationState(pool, conv.id);
+      /**
+       * 子阶段 A（读侧改动点）：桌面的「当前任务 / 最后一页」那一行读的就是这个接口。
+       * 任务轮不再把任务态写进 conversations 了，所以这里在**会话级为空**时，
+       * 用该智能体名下**最近被碰过的那张页**的分片状态补上 —— 显示不断档，
+       * 也**不会**用页级去盖会话级已有的值（闲聊轮写进去的东西照旧优先）。
+       */
+      const state = await mergeLatestPageState(pool, conv.id, base);
       return { conversationId: conv.id, state } satisfies ChatStateResult;
     } catch (err) {
       return dbErr(reply, err);

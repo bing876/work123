@@ -195,6 +195,24 @@ export function pageStateCount(): number {
   return pages.size;
 }
 
+/**
+ * 某个智能体名下**最近被碰过**的那张页的状态（没有就 null）。
+ *
+ * 谁用它：`GET /chat/state`（桌面「当前任务」那一行 + 进程重启后的恢复）。
+ * 子阶段 A 之后任务轮不再把任务态写进 `conversations`，所以那一行要能从**页级**取到值，
+ * 否则「用户刚下了一个网页任务，左栏却不显示当前任务」——功能上算退步。
+ * 多路并行时它给的是「最近动过的那一路」，与左栏横幅「N 路驾驶中」的聚合口径一致。
+ */
+export function latestPageStateOfAgent(agentId: number): PageState | null {
+  sweep();
+  let best: PageState | null = null;
+  for (const st of pages.values()) {
+    if (st.agentId !== agentId) continue;
+    if (!best || st.touchedAt > best.touchedAt) best = st;
+  }
+  return best ? { ...best } : null;
+}
+
 /** 清掉某张页的状态（页关了 / 用户明确要求重置时用） */
 export function clearPageState(wcId: number): boolean {
   return pages.delete(wcId);
