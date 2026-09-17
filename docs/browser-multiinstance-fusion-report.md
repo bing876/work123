@@ -5,7 +5,9 @@
 > 已完成并通过真机验收（见 §14 与 `docs/acceptance/substage-a-验收报告.md`）**。
 > ⚠️ **Phase 3（多实例 UI）按总控补充指示暂缓**：曾实现并通过验收，后按要求回退，**等新 UI 设计稿到位后再一起做**（见 §13.6）。
 > ⚠️ §1 现状审计已过期，勘误见 §11（相对 HEAD `e222f20`）
-> 范围：仅 `apps/desktop`（Electron 渲染层 + 主进程）+ `packages/shared` 类型声明。`apps/server` 一行未改。
+> 范围：**§1–§13**（Phase 0–3）仅 `apps/desktop`（Electron 渲染层 + 主进程）+ `packages/shared`，`apps/server` 一行未改；
+> **§14 子阶段 A 起范围扩到 `apps/server`**（新增 `pageState.ts`、改 `toolLoop.ts` / `sessionState.ts` / `routes/`），
+> 详见 §14 与 `docs/acceptance/substage-a-验收报告.md`。
 > 依据：已读 `browserCard.tsx` / `App.tsx` / `electron/main.ts` / `electron/preload.ts` / `electron/driver.ts` / `packages/shared/src/index.ts`。
 
 ---
@@ -315,18 +317,31 @@ A1.5 说「调大并发数就解锁真并行，数据结构不用动」。子阶
 | 1 | 并发闸默认 **1 → 20**（开关本身保留） | `shared` 的 `DEFAULT_SETTINGS` + `SETTINGS_RANGE`（区间必须一起放宽到 20，否则会被 `normalizeSettings` 夹回 8） |
 | 2 | 8 个字段从「一智能体一条会话」拆出**按 wcId 分片** | **新增 `apps/server/src/pageState.ts`**（内存注册表，与 `LoopSession` 同生命周期、同 id 体系）；任务轮不再覆写 `conversations` 的任务态列；`conversations` 只留 agent 级 `browser_confirmed` 与 `keepalive` |
 | 3 | `advance()` 重入保护 | `LoopSession.advancing` 锁；并发推进 → `LoopBusyError` → 路由 **409 `loop_busy`** |
+| 3b | **读侧兜底**（由 #2 直接引出，不是新增需求） | `GET /chat/state` 加 `mergeLatestPageState()`：会话级**优先**，为空时才用 `pageState.latestPageStateOfAgent(agentId)` 补 `current_task` / `last_page_summary` / `browser_confirmed` / `login_required`。**只填空不覆盖** —— 桌面 `.taskState` 那一行读的就是它，不补会出现「下完网页任务、左栏当前任务反而空了」。**修在服务端，前端一行未动** |
 
 **A1.5 的最后一公里（本阶段才发现）**：`driver.ts` 虽然早已 per-target，但
-`workbench:task:pause` / `workbench:task:state` 两个 IPC 一直不接 target，
-多路并行时**停不了指定那一路、也读不出单路状态**。已补成可选 target（向后兼容）。
+`workbench:task:pause` / `workbench:task:resume` / `workbench:task:state` 三个 IPC 一直不接 target，
+多路并行时**停不了指定那一路、也读不出单路状态**（`state` 只回聚合视图，按「running > paused」挑）。
+已补成可选 target（不传时行为与以前完全一致，渲染层调用点不用改）。
 
-**真机结论**（8 条验收标准全过）：同一智能体两路任务的执行区间重叠 **12.24s / 12.24s**（≈100% 重叠，
+**真机结论**（8 条验收标准全过）：同一智能体两路任务的执行区间重叠 **12.16~12.24s**（≈100% 重叠，
 `liveLoops` 全程 =2）；暂停 1 号后它 0 次模型请求、2 号照跑 6 次；跨智能体（agent-1 / agent-8）同样全程重叠；
-两路各自的 `current_task` / `last_page_summary` 互不串位；fail-fast、敏感闸在并发窗口内复验通过；
-8 张页时本实例 9 个进程 / 671 MB / CPU ≈0.4%（**子阶段 B 的地板基线**）。
+两路各自的 `current_task` / `last_page_summary` 互不串位；**直连数据库**证明 `conversations` 任务态列
+一行未被覆写；fail-fast、敏感闸在并发窗口内复验通过；重入 `[200,409]`；
+8 张页时本实例 9~10 个进程 / 0.67~1.04 GB / 空闲 CPU ≈0.4~2.8%（**子阶段 B 的地板基线**）。
+全部用例在最终代码树上复跑过一遍（验收报告 §4.9）。
 
-**留给后续阶段**（详见验收报告 §5）：渲染层三处旧值（兜底常量 1 / 输入框 `max=8` / 提示文案「默认 1」）；
-已落盘的旧配置会盖住新默认值（要不要迁移由总控定）；本机磁盘水位会静默杀死 Electron 实例，建议纳入子阶段 B 的监控面。
+**留给后续阶段**（详见验收报告 §5）：
+
+- 渲染层三处旧值（兜底常量 1 / 输入框 `max=8` / 提示文案「默认 1」）—— 按「不改前端 UI」边界没动，UI 阶段一起改；
+- 已落盘的 `workbench-settings.json` 会盖住新默认值（要不要一次性迁移由总控定）；
+- 本机磁盘水位会静默杀死 Electron 实例（验收报告 §5.5），建议纳入子阶段 B 的监控面；
+- **`liveLoops` 的记账口径**（§5.8）：循环只在 `advance()` 被调用时才离开 `running`，
+  所以「建了循环但没人驱动」的条目会以 `running` 挂到 10 分钟 TTL 到期（不烧模型、不吃 CPU，只是指标读歪）。
+  **子阶段 B 若拿 `liveLoops` 当资源依据，要先把它改成「最近 N 秒内有推进的循环数」。**
+
+提交：`3be2251` + `3384e88` + 补遗 `865c82a`（读侧兜底 / 验收脚本补强 / 报告与证据复验）、
+`69ac2fa`（记忆），基线 `76441a7`，**全部快进推送、无 force**。
 
 
 
