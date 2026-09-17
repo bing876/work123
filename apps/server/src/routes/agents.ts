@@ -37,14 +37,7 @@ import { isDbUnreachable, withTx } from '../db';
 import { llmFetch } from '../llm';
 import { REFERENCE_PREFIX, sanitizeReferenceLine } from '../promptPolicy';
 import { keepaliveOfAgent } from '../sessionState';
-import {
-  ASSISTANT_KIND,
-  HEN_KIND,
-  currentProjectId,
-  isProtectedKind,
-  loadOwnedProject,
-  resolveAgentCreator,
-} from '../projectScope';
+import { HEN_KIND, isProtectedKind, loadOwnedProject, resolveAgentCreator } from '../projectScope';
 
 export interface AgentDeps {
   pool: Pool;
@@ -515,24 +508,28 @@ export function registerMultiAgentRoutes(app: FastifyInstance, deps: AgentDeps):
   // -------------------------------------------- 点「添加」：建智能体 + 立刻建空会话
   // 前端一点就切到这个新会话（引导表摆在聊天里），这里不做任何“先填后台表”的前置。
   //
-  // 子阶段 2-A 加了两件事：
-  //   1. **权限校验**：调用者（body.asAgentId；不带则回落到自带小助）必须有
-  //      `can_create_agents = true`，否则 403。母鸡与自带小助为 true，普通智能体默认 false。
-  //   2. **项目归属**：新智能体进「当前使用中的项目」（没有当前项目则回落默认项目）。
+  // 子阶段 2-A 加了两件事（2-A 修正后已按总控拍板收紧）：
+  //   1. **权限校验**：调用者由 `body.asAgentId` **显式指定，必填** —— 不传/非法一律 400，
+  //      **没有任何回落**（回落到任何内置角色都等于「不传身份就能拿最高权限」的提权口子）。
+  //      指定到的那个智能体必须有 `can_create_agents = true`，否则 403。
+  //      母鸡与自带小助为 true，普通智能体默认 false。
+  //   2. **项目归属**：新智能体进**调用者自己所在的项目**（`caller.projectId`），
+  //      不是「当前使用中的项目」—— 用户切了项目视角也不会把新智能体塞进别的项目。
   app.post('/agents', async (req: FastifyRequest, reply: FastifyReply) => {
     const claims = authed(req, env);
     if (!claims) return errJson(reply, 401, '未登录或登录已过期');
     try {
-      const { caller, explicit } = await resolveAgentCreator(
+      const found = await resolveAgentCreator(
         pool,
         claims.sub,
         (req.body as { asAgentId?: unknown } | null)?.asAgentId,
       );
-      if (!caller) {
-        return explicit
-          ? errJson(reply, 404, '调用者智能体不存在或不是你的')
-          : errJson(reply, 500, '这个账号没有可用的调用者智能体（自带的「小助」缺失，请重新登录一次让建号流程补上）');
+      if (!found.ok) {
+        return found.reason === 'missing'
+          ? errJson(reply, 400, '缺少 asAgentId：建智能体必须显式指定调用者（不会替你挑身份）')
+          : errJson(reply, 404, '调用者智能体不存在或不是你的');
       }
+      const caller = found.caller;
       if (!caller.canCreateAgents) {
         return errJson(
           reply,
@@ -540,10 +537,9 @@ export function registerMultiAgentRoutes(app: FastifyInstance, deps: AgentDeps):
           `「${caller.name}」没有创建智能体的权限 —— 只有项目里的母鸡和自带的「小助」可以建智能体。`,
         );
       }
-      const projectId = await currentProjectId(pool, claims.sub);
-      if (projectId === null) {
-        return errJson(reply, 500, '当前账号还没有项目（请重新登录一次让建号流程补上）');
-      }
+      // 落点 = 调用者自己所在的项目（loadCallerPermission 已经 JOIN projects 校验过归属，
+      // 所以这里一定是个属于本账号的合法项目，不需要再回落）。
+      const projectId = caller.projectId;
       const created = await withTx(pool, async (client) => {
         const a = await client.query<{ id: string; name: string }>(
           "INSERT INTO agents (project_id, name, kind, persona_status) VALUES ($1, $2, 'custom', 'pending') RETURNING id, name",

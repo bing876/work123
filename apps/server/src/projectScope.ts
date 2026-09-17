@@ -12,6 +12,10 @@
  *   2. **母鸡** = `agents.kind = 'hen'`，随项目一起创建、**不可删除**、`can_create_agents = true`。
  *      默认项目里没有母鸡（建号时就有的是「小助」），所以「不可删除且能建智能体」这个角色
  *      在默认项目里由小助承担 —— 这样**老账号不需要补数据**，前端也不需要改。
+ *   3. **调用者身份不允许回落**（2-A 修正）：`POST /agents` 的 `asAgentId` 必填，
+ *      不传/非法一律 400，**绝不替你挑一个内置角色**（那是提权）。见 `resolveAgentCreator`。
+ *   4. **新建智能体的项目归属 = 调用者自己所在的项目**，与「当前查看中的项目」无关 ——
+ *      用户切了项目视角，也不会把新智能体塞进别的项目。
  */
 import type { Pool, PoolClient } from 'pg';
 import type { ProjectSummary } from '@ai-workbench/shared';
@@ -179,29 +183,31 @@ export async function loadCallerPermission(
   };
 }
 
+/** 调用者解析结果：要么拿到一个**真实的、属于本账号的**智能体，要么明确说清为什么没拿到。 */
+export type AgentCreatorLookup =
+  | { ok: true; caller: NonNullable<Awaited<ReturnType<typeof loadCallerPermission>>> }
+  | { ok: false; reason: 'missing' | 'not_found' };
+
 /**
- * `POST /agents` 的**调用者**是谁。
+ * `POST /agents` 的**调用者**是谁 —— 2-A 修正后：`asAgentId` **必填，没有任何回落**。
  *
- * 规则（这是本阶段的一个明确取舍，写在报告里了）：
- *   - 请求带了 `asAgentId` → 就用它，权限必须为 true，否则 403；
- *   - 没带 → 回落到**这个账号的自带「小助」**（它 `can_create_agents = true`）。
- *     这样**改造前的前端**（点「＋ 添加」时不带任何 body）行为一行不变，
- *     而校验本身**一次都不会被跳过** —— 校验的永远是某个真实智能体的权限位。
+ * 为什么不留回落（这是被总控拍板堵掉的**提权口子**）：
+ * 调用者身上带的是**权限位**（`can_create_agents`）。任何「不传就替你挑一个」的兜底，
+ * 挑中的必然是内置角色（自带小助 / 母鸡，两者都是 `true`）——
+ * 于是**不传身份的请求反而拿到了最高权限**，闸门形同不存在。
+ * 所以这里只做「参数是否给了」与「这个智能体是不是你的」两件事，
+ * **一次都不替调用方挑身份**；权限位放不放行由调用方判断（403 的文案要说得出是谁被拒了）。
+ *
+ * 归属口径也要一起钉住：调用者的 **`projectId`** 就是新智能体的落点
+ * （不是「当前查看中的项目」）—— 见 `routes/agents.ts` 的 `POST /agents`。
  */
 export async function resolveAgentCreator(
   pool: Pool,
   userId: number,
   rawAsAgentId: unknown,
-): Promise<{ caller: Awaited<ReturnType<typeof loadCallerPermission>>; explicit: boolean }> {
+): Promise<AgentCreatorLookup> {
   const asId = Number(rawAsAgentId);
-  if (Number.isInteger(asId) && asId > 0) {
-    return { caller: await loadCallerPermission(pool, userId, asId), explicit: true };
-  }
-  const r = await pool.query<{ id: string }>(
-    `SELECT a.id FROM agents a JOIN projects p ON p.id = a.project_id
-      WHERE p.user_id = $1 AND a.kind = $2 ORDER BY a.id ASC LIMIT 1`,
-    [userId, ASSISTANT_KIND],
-  );
-  if (r.rowCount !== 1) return { caller: null, explicit: false };
-  return { caller: await loadCallerPermission(pool, userId, Number(r.rows[0].id)), explicit: false };
+  if (!Number.isSafeInteger(asId) || asId <= 0) return { ok: false, reason: 'missing' };
+  const caller = await loadCallerPermission(pool, userId, asId);
+  return caller ? { ok: true, caller } : { ok: false, reason: 'not_found' };
 }

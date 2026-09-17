@@ -3,10 +3,17 @@
  *
  * 覆盖要求里的四条硬指标：
  *   ① 母鸡不可删除（后端 400 + 前端拿到的 deletable=false + 删完数据库里那行还在）
- *   ② 权限校验生效（普通智能体 403；把小助/母鸡的开关关掉也 403；把普通智能体的开关打开就能建）
+ *   ② 权限校验生效（**asAgentId 必填，不传/非法 400，无任何回落**；普通智能体 403；
+ *      把普通智能体的开关打开就能建 —— 证明闸门认字段不认 kind）
  *   ③ 知识库按项目隔离（切项目看不到别的项目的资料；显式传别人的项目 404）
  *   ④ GET /agents 按 projectId 过滤正确（含 404 / 400 / 不带参数 = 改造前行为）
  * 外加 /projects 的增 / 列 / 改名 / 设为当前。
+ *
+ * 2-A 修正（总控拍板）新增两块取证：
+ *   · 调用者身份**必填**：{} / 无 body / 0 / 'abc' / null 一律 400，且一行数据都不许建；
+ *   · 新智能体归属 = **调用者自己所在的项目**：做成一对**对称对照**
+ *     （当前项目=默认 + 调用者=新项目里的母鸡 → 落新项目；当前项目=新项目 + 调用者=默认里的小助 → 落默认项目），
+ *     光验一个方向分不清「跟调用者走」还是「跟当前项目走」。
  *
  * 数据策略（重要）：
  *   - 全程用**一个本次新建的测试账号**（手机号在脚本里挑一个库里没有的），
@@ -286,18 +293,48 @@ async function main() {
   const delAssistant = await api(`/agents/${login.json.agents[0].id}`, { method: 'DELETE', token });
   check('自带小助仍然不可删（老行为回归）', delAssistant.status === 400, `status=${delAssistant.status} ${delAssistant.text.slice(0, 80)}`);
 
-  // 当前项目切回默认项目：在默认项目里用「小助」建一个普通智能体
-  const createByAssistant = await api('/agents', { method: 'POST', token });
+  const assistantId = login.json.agents[0].id;
+
+  // ------------------------------------------------ 3.1 调用者身份必填（2-A 修正）
+  const noCaller = await api('/agents', { method: 'POST', token, body: {} });
   check(
-    '不带 asAgentId 建智能体（改造前的前端行为）仍然成功 —— 回落到自带小助',
-    createByAssistant.status === 200 && !!createByAssistant.json?.agent?.id,
-    `status=${createByAssistant.status} ${createByAssistant.text.slice(0, 160)}`,
+    '**不传 asAgentId → 400 直接拒**（修正前会回落成自带小助 —— 那等于不传身份就能拿到内置角色的权限）',
+    noCaller.status === 400 && /asAgentId/.test(noCaller.text),
+    `status=${noCaller.status} body=${noCaller.text.slice(0, 160)}`,
   );
-  const plain = createByAssistant.json.agent;
+  const noBodyAtAll = await api('/agents', { method: 'POST', token });
   check(
-    '新建智能体落到了「当前使用中的项目」（默认项目）',
+    '连 body 都不带 → 400（老前端那句 body:"{}" 的调法不再被接受）',
+    noBodyAtAll.status === 400,
+    `status=${noBodyAtAll.status} ${noBodyAtAll.text.slice(0, 120)}`,
+  );
+  const zeroCaller = await api('/agents', { method: 'POST', token, body: { asAgentId: 0 } });
+  const strCaller = await api('/agents', { method: 'POST', token, body: { asAgentId: 'abc' } });
+  const nullCaller = await api('/agents', { method: 'POST', token, body: { asAgentId: null } });
+  check(
+    'asAgentId 非法（0 / 字符串 / null）一律 400，不会被当成「没传」混过去',
+    zeroCaller.status === 400 && strCaller.status === 400 && nullCaller.status === 400,
+    `0→${zeroCaller.status}  'abc'→${strCaller.status}  null→${nullCaller.status}`,
+  );
+  const projDefaultAgents = Number((await live.query('SELECT count(*)::int AS n FROM agents WHERE project_id = $1', [projDefault.id])).rows[0].n);
+  check(
+    '被拒的这几次**一行数据都没建**（400 挡在写之前；默认项目里此刻只该有小助一只）',
+    projDefaultAgents === 1,
+    `agents in project ${projDefault.id} = ${projDefaultAgents}（期望 1）`,
+  );
+
+  // --------------------------------------- 3.2 小助显式作调用者，建一个普通智能体
+  const byAssistant = await api('/agents', { method: 'POST', token, body: { asAgentId: assistantId } });
+  check(
+    '自带小助**显式**作调用者 → 建成功',
+    byAssistant.status === 200 && !!byAssistant.json?.agent?.id,
+    `status=${byAssistant.status} ${byAssistant.text.slice(0, 160)}`,
+  );
+  const plain = byAssistant.json.agent;
+  check(
+    '新建智能体落在**调用者自己所在的项目**（小助 → 默认项目）',
     plain.projectId === projDefault.id,
-    `agent.projectId=${plain.projectId} current=${projDefault.id}`,
+    `agent.projectId=${plain.projectId} 调用者项目=${projDefault.id} 当前项目=${projDefault.id}`,
   );
   check('普通智能体默认没有建智能体的权限', plain.canCreateAgents === false, `canCreateAgents=${plain.canCreateAgents}`);
   check('普通智能体可删（deletable=true，回归）', plain.deletable === true, `deletable=${plain.deletable}`);
@@ -324,13 +361,40 @@ async function main() {
   const deniedAgain = await api('/agents', { method: 'POST', token, body: { asAgentId: plain.id } });
   check('开关改回 false → 又 403（可逆）', deniedAgain.status === 403, `status=${deniedAgain.status}`);
 
-  const byHen = await api('/agents', { method: 'POST', token, body: { asAgentId: hen.id } });
-  check('母鸡作为调用者可以建智能体', byHen.status === 200, `status=${byHen.status} 新智能体 projectId=${byHen.json?.agent?.projectId}（当前项目=${projDefault.id}）`);
-  evidence.newAgentByHen = byHen.json?.agent ?? null;
   const ghost = await api('/agents', { method: 'POST', token, body: { asAgentId: 987654321 } });
   check('调用者不存在 → 404', ghost.status === 404, `status=${ghost.status}`);
   const otherUserAgent = await api('/agents', { method: 'POST', token, body: { asAgentId: 1 } });
   check('拿**别人的**智能体当调用者 → 404（归属校验）', otherUserAgent.status === 404, `status=${otherUserAgent.status} ${otherUserAgent.text.slice(0, 80)}`);
+
+  // --------------------- 3.3 归属口径：跟**调用者**走，不跟「当前项目」走（对称对照）
+  const currentBefore = await api('/projects', { token });
+  check(
+    '对照前提：「当前项目」此刻是默认项目',
+    currentBefore.json.currentProjectId === projDefault.id,
+    `current=${currentBefore.json.currentProjectId} default=${projDefault.id}`,
+  );
+  const byHen = await api('/agents', { method: 'POST', token, body: { asAgentId: hen.id } });
+  check('母鸡作为调用者可以建智能体', byHen.status === 200, `status=${byHen.status} ${byHen.text.slice(0, 140)}`);
+  check(
+    '**归属跟调用者走（正向）**：当前项目=默认项目，调用者=「2A 验收项目」里的母鸡 → 新智能体落**母鸡那个项目**',
+    byHen.json?.agent?.projectId === projNew.id,
+    `新智能体 projectId=${byHen.json?.agent?.projectId} 调用者(母鸡)项目=${projNew.id} 当前项目=${projDefault.id}`,
+  );
+  evidence.newAgentByHen = byHen.json?.agent ?? null;
+
+  await api(`/projects/${projNew.id}/activate`, { method: 'POST', token });
+  const currentAfter = await api('/projects', { token });
+  const byAssistantOtherSide = await api('/agents', { method: 'POST', token, body: { asAgentId: assistantId } });
+  check(
+    '**归属跟调用者走（反向）**：当前项目=「2A 验收项目」，调用者=默认项目里的小助 → 新智能体落**默认项目**',
+    currentAfter.json.currentProjectId === projNew.id && byAssistantOtherSide.json?.agent?.projectId === projDefault.id,
+    `当前项目=${currentAfter.json.currentProjectId} 新智能体 projectId=${byAssistantOtherSide.json?.agent?.projectId}（期望 ${projDefault.id}）`,
+  );
+  evidence.newAgentByAssistant = byAssistantOtherSide.json?.agent ?? null;
+  // 复原成默认项目（后面用例的基线）
+  await api(`/projects/${projDefault.id}/activate`, { method: 'POST', token });
+  const restored = await api('/projects', { token });
+  check('项目视角已复原成默认项目（后续用例基线）', restored.json.currentProjectId === projDefault.id, `current=${restored.json.currentProjectId}`);
 
   // 正对照：不是「一律拒删」，普通智能体照删不误
   const delPlain = await api(`/agents/${plain.id}`, { method: 'DELETE', token });

@@ -1,13 +1,81 @@
 {
-  "startedAt": "2026-09-17T02:48:16.683Z",
+  "startedAt": "2026-09-17T09:51:07.053Z",
   "checkDb": "workbench_2a_check",
-  "checks": [],
+  "checks": [
+    {
+      "name": "迁移前结构里确实没有 2-A 的新列（基线取自 3c4f27b，≠ HEAD）",
+      "ok": true,
+      "detail": "{\"users\":{\"current_project_id\":false},\"agents\":{\"can_create_agents\":false},\"knowledge_documents\":{\"project_id\":false},\"knowledge_chunks\":{\"project_id\":false}}"
+    },
+    {
+      "name": "搬运完整：验收库行数 = 活库（知识库另加合成放大样本），迁移前基线可信",
+      "ok": true,
+      "detail": "live={\"users\":3,\"projects\":4,\"agents\":7,\"conversations\":7,\"messages\":519,\"tasks\":212,\"memories\":39,\"user_memories\":3,\"agent_memories\":1,\"knowledge_documents\":2,\"knowledge_chunks\":2} + synth(90/720) => check={\"users\":3,\"projects\":4,\"agents\":7,\"conversations\":7,\"messages\":519,\"tasks\":212,\"memories\":39,\"user_memories\":3,\"agent_memories\":1,\"knowledge_documents\":92,\"knowledge_chunks\":722}"
+    },
+    {
+      "name": "条数零丢失：迁移前后 11 张表行数逐表一致",
+      "ok": true,
+      "detail": "users=3 / projects=4 / agents=7 / conversations=7 / messages=519 / tasks=212 / memories=39 / user_memories=3 / agent_memories=1 / knowledge_documents=92 / knowledge_chunks=722"
+    },
+    {
+      "name": "按 owner 逐账号核对：每个人的资料/片段条数迁移前后不变（多账号不串）",
+      "ok": true,
+      "detail": "{\"documents\":[{\"ownerId\":\"1\",\"n\":32},{\"ownerId\":\"2\",\"n\":30},{\"ownerId\":\"3\",\"n\":30}],\"chunks\":[{\"ownerId\":\"1\",\"n\":242},{\"ownerId\":\"2\",\"n\":240},{\"ownerId\":\"3\",\"n\":240}]}"
+    },
+    {
+      "name": "正文零改动：知识库内容摘要（sha256）逐表一致（内容指纹不含写入时刻，因此跨轮也可复现）",
+      "ok": true,
+      "detail": "docs 866e3ad1ef86aac3 -> 866e3ad1ef86aac3 / chunks c2309dc426755f5e -> c2309dc426755f5e"
+    },
+    {
+      "name": "迁移是「原地加列」：每一行的 created_at 都没被动过（同轮内 id+时间戳指纹一致）",
+      "ok": true,
+      "detail": "docs f146e7284f7ae127 -> f146e7284f7ae127 / chunks 23e8cc5144d0e055 -> 23e8cc5144d0e055"
+    },
+    {
+      "name": "每条资料/片段都拿到了项目归属（按 owner 的默认项目，逐条核对）",
+      "ok": true,
+      "detail": "资料 92 条 / 片段 722 条，不符 0 条"
+    },
+    {
+      "name": "迁移后 project_id 无空值",
+      "ok": true,
+      "detail": "documents=0 chunks=0"
+    },
+    {
+      "name": "project_id 已收紧为 NOT NULL",
+      "ok": true,
+      "detail": "{\"knowledge_documents.project_id\":\"NO\",\"knowledge_chunks.project_id\":\"NO\"}"
+    },
+    {
+      "name": "用户当前项目已补上（老账号 0 行为不变：= 自己的默认项目）",
+      "ok": true,
+      "detail": "空值 0 行"
+    },
+    {
+      "name": "幂等：第二次执行迁移是空操作（行数与摘要不变）",
+      "ok": true,
+      "detail": "[db] 项目层迁移完成：当前项目补 0 行、权限开关补 0 行、知识库归属回填 资料 0 条 / 片段 0 条"
+    },
+    {
+      "name": "幂等：第二次执行上报 0 行改动",
+      "ok": true,
+      "detail": "[db] 项目层迁移完成：当前项目补 0 行、权限开关补 0 行、知识库归属回填 资料 0 条 / 片段 0 条"
+    },
+    {
+      "name": "用户已选过的当前项目不被迁移改写（只补空值）",
+      "ok": true,
+      "detail": "user 1.current_project_id = 10（期望 10）"
+    }
+  ],
   "failures": [],
   "step1": {
     "note": "已新建验收库 workbench_2a_check（活库只 SELECT）"
   },
   "step2": {
-    "headCommit": "3c4f27b",
+    "baseCommit": "3c4f27b",
+    "baseCommitFull": "3c4f27bdd0d777e3218997f42ba4966e5c0fe103",
+    "headCommit": "e47132e",
     "oldDdlLength": 8406,
     "oldDdlSha256": "1567da7ae8c4ac0303a029a4d2dcae7cd98d5495739258f81e7aa80764e85ba0"
   },
@@ -53,9 +121,9 @@
     "beforeDigest": {
       "documents": 92,
       "chunks": 722,
-      "documentDigest": "3d2ad04eb1437bc475c84a5d9651edeafa52566f532fb935980a43e99b80ba4b",
-      "chunkDigest": "6f5526a66f3bc0c37b62b9f2bc344c197556300dca3a0f8e1dd57ac709fd2091",
-      "contentBytesEnc": 105671
+      "documentDigest": "866e3ad1ef86aac35f798634fc461edfe46cbdaa0f7e4f81d083db2f9109283f",
+      "chunkDigest": "c2309dc426755f5e10e6b15ba36f1a94ec658938f1b40fe5de470a77c787e8c7",
+      "contentBytesEnc": 76791
     },
     "beforeByOwner": {
       "documents": [
@@ -158,9 +226,13 @@
     "digest": {
       "documents": 92,
       "chunks": 722,
-      "documentDigest": "3d2ad04eb1437bc475c84a5d9651edeafa52566f532fb935980a43e99b80ba4b",
-      "chunkDigest": "6f5526a66f3bc0c37b62b9f2bc344c197556300dca3a0f8e1dd57ac709fd2091",
-      "contentBytesEnc": 105671
+      "documentDigest": "866e3ad1ef86aac35f798634fc461edfe46cbdaa0f7e4f81d083db2f9109283f",
+      "chunkDigest": "c2309dc426755f5e10e6b15ba36f1a94ec658938f1b40fe5de470a77c787e8c7",
+      "contentBytesEnc": 76791
+    },
+    "rowStamp": {
+      "documents": "f146e7284f7ae1275e11a66b7655c006d85c80f638bf0b2aef16f97cd6cefbe9",
+      "chunks": "23e8cc5144d0e055ebcb69937836ebb039eae9119118d0199c7e86a24ab745ff"
     }
   },
   "migrateLogs": [
@@ -239,9 +311,13 @@
     "digest": {
       "documents": 92,
       "chunks": 722,
-      "documentDigest": "3d2ad04eb1437bc475c84a5d9651edeafa52566f532fb935980a43e99b80ba4b",
-      "chunkDigest": "6f5526a66f3bc0c37b62b9f2bc344c197556300dca3a0f8e1dd57ac709fd2091",
-      "contentBytesEnc": 105671
+      "documentDigest": "866e3ad1ef86aac35f798634fc461edfe46cbdaa0f7e4f81d083db2f9109283f",
+      "chunkDigest": "c2309dc426755f5e10e6b15ba36f1a94ec658938f1b40fe5de470a77c787e8c7",
+      "contentBytesEnc": 76791
+    },
+    "rowStamp": {
+      "documents": "f146e7284f7ae1275e11a66b7655c006d85c80f638bf0b2aef16f97cd6cefbe9",
+      "chunks": "23e8cc5144d0e055ebcb69937836ebb039eae9119118d0199c7e86a24ab745ff"
     },
     "assignment": {
       "documents": 92,
@@ -277,9 +353,9 @@
     "digest": {
       "documents": 92,
       "chunks": 722,
-      "documentDigest": "3d2ad04eb1437bc475c84a5d9651edeafa52566f532fb935980a43e99b80ba4b",
-      "chunkDigest": "6f5526a66f3bc0c37b62b9f2bc344c197556300dca3a0f8e1dd57ac709fd2091",
-      "contentBytesEnc": 105671
+      "documentDigest": "866e3ad1ef86aac35f798634fc461edfe46cbdaa0f7e4f81d083db2f9109283f",
+      "chunkDigest": "c2309dc426755f5e10e6b15ba36f1a94ec658938f1b40fe5de470a77c787e8c7",
+      "contentBytesEnc": 76791
     },
     "migrateLine": "[db] 项目层迁移完成：当前项目补 0 行、权限开关补 0 行、知识库归属回填 资料 0 条 / 片段 0 条"
   },
@@ -294,5 +370,5 @@
       ]
     ]
   },
-  "endedAt": "2026-09-17T02:48:19.516Z"
+  "endedAt": "2026-09-17T09:51:10.120Z"
 }

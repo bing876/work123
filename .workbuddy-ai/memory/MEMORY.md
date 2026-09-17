@@ -4,7 +4,11 @@
 本文件只留**本项目特有的契约与坑**；实现细节见 git log / docs / 当天日志。
 
 > **开工前先读**：`TOOLING.md`（同目录：本机命令 / 环境坑 / CDP 硬约束 / 取证习惯）
-> 与技能 `electron-ui-verify`、`llm-prompt-capture-verify`、`db-race-verify`。
+> 与技能 `workbench-project-phase-verify`（**真机取证套路，唯一已落盘的验收技能**）。
+>
+> ⚠️ **历史笔记里的三个技能名从未落盘**：`electron-ui-verify`、`llm-prompt-capture-verify`、
+> `db-race-verify`（`~/.workbuddy/skills/` 下核实过，**暂未实现**）。见到它们不用去 `skills/` 找，
+> 相关知识目前只散在 `TOOLING.md` 与当天日志里（2026-09-17 已核实并标注）。
 
 ## 一、git（本机有坑，每次都会复发）
 - 分支固定 `arena/01a09b16-work123`；`main` 只作基线，不合并/不推送/不 force。
@@ -25,7 +29,8 @@
 - **会话唯一性**：一个智能体只能有一条会话，建会话一律走 `ensureAgentConversation(pool, ownerId, agentId)`；
   全仓 `INSERT INTO conversations` 只应有三处；约束 `uniq_conversations_agent` 在 `db.ts migrate()`。
   Postgres 并发「找或建」：`FOR UPDATE` 等锁期间仍是旧快照 → 存在性检查塞进子查询必重复插入；
-  正解是拿到锁后**另起一条语句**再查再 INSERT（详见技能 `db-race-verify`）。
+  正解是拿到锁后**另起一条语句**再查再 INSERT（历史笔记记在技能 `db-race-verify` 里，
+  该技能**未落盘**，结论就是本行这句）。
 - **提示词/聊天**：`chats: Record<agentId,...>` 按发起时捕获的 agentId 落桶；`promptPolicy.ts` 优先级
   「本轮最新消息 > 已确认事项 > current_task > 长期记忆」；`llm.ts` 是模型调用唯一出口。
   **系统提示词的否定约束打不过上下文旧话复读 —— 先清历史再改措辞。**
@@ -124,7 +129,8 @@
 
 ## 七、子阶段 2-A 契约：项目层 / 母鸡 / 知识库归属（易踩坏）
 
-- 报告 `docs/acceptance/substage-2a/验收报告.md` 是**本步唯一出处**（含四条硬指标真机取证 + 迁移对照）；
+- 报告 `docs/acceptance/substage-2a/验收报告.md` 是**本步唯一出处**（含四条硬指标真机取证 + 迁移对照；
+  **§12 = 总控批复后当天的修正轮**，覆盖 §4②/§4④ 与 §9 第 1、2 条）；
   现状排查在 `docs/project-layer-audit.md`。**前端一行未改**，浏览器分区仍是按智能体。
 - **口径**：当前项目 = `users.current_project_id`，为空/失效回落 `is_default` 那条；
   服务端唯一出口是 `projectScope.ts`（`currentProjectId` / `listProjects` / `createProjectWithHen` /
@@ -135,9 +141,12 @@
 - **前端两条删除入口**：`App.tsx:1641` 按 `curAgent.deletable` 判（后端给内置角色 false 即可）；
   `App.tsx:1900` 的 `AgentGuide onDelete` **没有 deletable 守卫**，只在 `personaStatus==='pending'` 时渲染 →
   所以 `toAgentView()` 对内置角色**一律返回 `'ready'`**，那条入口结构性不可达。**改这两处前先读验收报告 §8。**
-- **权限闸**：`POST /agents` 的调用者 = `body.asAgentId`，不带则**回落自带小助**（老前端不传 body 行为不变，
-  但校验不被跳过）。闸门只认 `can_create_agents` 字段，**不按 kind 隐式放行** —— 因此**任何新建内置角色的
-  插入点都必须显式写 true**（`auth.ts` 建号那句漏过，见报告 §8 bug #1）。新智能体落在**当前项目**。
+- **权限闸**：`POST /agents` 的调用者 = `body.asAgentId`，**必填**（2026-09-17 总控拍板修正：
+  不传 / `0` / `'abc'` / `null` 一律 **400**，**绝不回落到任何身份** —— 回落到内置角色 = 提权口子）。
+  闸门只认 `can_create_agents` 字段，**不按 kind 隐式放行** —— 因此**任何新建内置角色的
+  插入点都必须显式写 true**（`auth.ts` 建号那句漏过，见报告 §8 bug #1）。
+  **新智能体落在调用者自己所在的项目**（`caller.projectId`，不是「当前查看中的项目」）。
+  ⚠️ 桌面端「＋ 添加」发的是 `body:'{}'` → 在 2-B 接上调用者之前会 400，**这是故意的不兼容改动**。
 - **知识库按项目隔离**：`knowledge_documents` / `knowledge_chunks` 都有 `project_id`（**NOT NULL**，
   由 `migrateProjectScope()` 幂等回填：按 owner 各自挂到自己的默认项目）；列表/上传/检索一律按项目过滤，
   检索用的是**会话所属项目**（`chat.ts` 把 `convProjectId` 传给 `buildKnowledgeBlock`）。

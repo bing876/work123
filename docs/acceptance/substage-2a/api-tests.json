@@ -1,5 +1,5 @@
 {
-  "startedAt": "2026-09-17T02:48:02.171Z",
+  "startedAt": "2026-09-17T09:51:27.774Z",
   "base": "http://127.0.0.1:8799",
   "results": [
     {
@@ -15,42 +15,42 @@
     {
       "name": "建号时自动建了「默认项目」并把它标成当前项目",
       "ok": true,
-      "detail": "{\"id\":18,\"name\":\"默认项目\",\"isCurrent\":true,\"isDefault\":true,\"henAgentId\":null,\"createdAt\":\"2026-09-17T02:48:05.112Z\"}"
+      "detail": "{\"id\":22,\"name\":\"默认项目\",\"isCurrent\":true,\"isDefault\":true,\"henAgentId\":null,\"createdAt\":\"2026-09-17T09:51:29.907Z\"}"
     },
     {
       "name": "默认项目里自带「小助」",
       "ok": true,
-      "detail": "[{\"id\":48,\"name\":\"小助\"}]"
+      "detail": "[{\"id\":59,\"name\":\"小助\"}]"
     },
     {
       "name": "GET /projects 回当前用户的全部项目",
       "ok": true,
-      "detail": "[{\"id\":18,\"name\":\"默认项目\",\"isCurrent\":true,\"isDefault\":true,\"henAgentId\":null,\"createdAt\":\"2026-09-17T02:48:05.112Z\"}]"
+      "detail": "[{\"id\":22,\"name\":\"默认项目\",\"isCurrent\":true,\"isDefault\":true,\"henAgentId\":null,\"createdAt\":\"2026-09-17T09:51:29.907Z\"}]"
     },
     {
       "name": "列表里标出了「当前使用中」",
       "ok": true,
-      "detail": "current=18"
+      "detail": "current=22"
     },
     {
       "name": "POST /projects 建项目成功",
       "ok": true,
-      "detail": "status=200 {\"project\":{\"id\":19,\"name\":\"2A 验收项目\",\"isCurrent\":true,\"isDefault\":false,\"henAgentId\":49,\"createdAt\":\"2026-09-17T02:48:05.131Z\"}}"
+      "detail": "status=200 {\"project\":{\"id\":23,\"name\":\"2A 验收项目\",\"isCurrent\":true,\"isDefault\":false,\"henAgentId\":60,\"createdAt\":\"2026-09-17T09:51:29.927Z\"}}"
     },
     {
       "name": "新建项目自动成为「当前使用中的项目」",
       "ok": true,
-      "detail": "{\"id\":19,\"name\":\"2A 验收项目\",\"isCurrent\":true,\"isDefault\":false,\"henAgentId\":49,\"createdAt\":\"2026-09-17T02:48:05.131Z\"}"
+      "detail": "{\"id\":23,\"name\":\"2A 验收项目\",\"isCurrent\":true,\"isDefault\":false,\"henAgentId\":60,\"createdAt\":\"2026-09-17T09:51:29.927Z\"}"
     },
     {
       "name": "建项目时**自动生成了一只母鸡**",
       "ok": true,
-      "detail": "[{\"id\":49,\"name\":\"项目管家\",\"kind\":\"hen\",\"deletable\":false,\"projectId\":19,\"canCreateAgents\":true,\"personaStatus\":\"ready\",\"persona\":null,\"conversationId\":86,\"listening\":false}]"
+      "detail": "[{\"id\":60,\"name\":\"项目管家\",\"kind\":\"hen\",\"deletable\":false,\"projectId\":23,\"canCreateAgents\":true,\"personaStatus\":\"ready\",\"persona\":null,\"conversationId\":95,\"listening\":false}]"
     },
     {
       "name": "母鸡在库里 kind=hen 且 can_create_agents=true（直连库核对）",
       "ok": true,
-      "detail": "{\"id\":\"49\",\"project_id\":\"19\",\"name\":\"项目管家\",\"kind\":\"hen\",\"can_create_agents\":true}"
+      "detail": "{\"id\":\"60\",\"project_id\":\"23\",\"name\":\"项目管家\",\"kind\":\"hen\",\"can_create_agents\":true}"
     },
     {
       "name": "母鸡建好就带一条自己的会话（可立即开聊）",
@@ -60,7 +60,7 @@
     {
       "name": "PATCH /projects/:id 重命名成功",
       "ok": true,
-      "detail": "{\"id\":19,\"name\":\"2A 验收项目（改名后）\",\"isCurrent\":true,\"isDefault\":false,\"henAgentId\":49,\"createdAt\":\"2026-09-17T02:48:05.131Z\"}"
+      "detail": "{\"id\":23,\"name\":\"2A 验收项目（改名后）\",\"isCurrent\":true,\"isDefault\":false,\"henAgentId\":60,\"createdAt\":\"2026-09-17T09:51:29.927Z\"}"
     },
     {
       "name": "改**别人的**项目 → 404（不区分不存在/不是你的）",
@@ -80,7 +80,7 @@
     {
       "name": "POST /projects/:id/activate 切回默认项目生效",
       "ok": true,
-      "detail": "current=18"
+      "detail": "current=22"
     },
     {
       "name": "切到**别人的**项目 → 404",
@@ -95,7 +95,7 @@
     {
       "name": "母鸡被拒删后**数据库里那行仍在**（不只是回了个错误码）",
       "ok": true,
-      "detail": "agents(id=49) 命中 1 行"
+      "detail": "agents(id=60) 命中 1 行"
     },
     {
       "name": "**前端也拦得住**：接口给母鸡的 deletable=false（App.tsx 只按这个字段决定画不画「删掉」按钮）",
@@ -113,14 +113,34 @@
       "detail": "status=400 {\"error\":\"「小助」是自带的，不能删\"}"
     },
     {
-      "name": "不带 asAgentId 建智能体（改造前的前端行为）仍然成功 —— 回落到自带小助",
+      "name": "**不传 asAgentId → 400 直接拒**（修正前会回落成自带小助 —— 那等于不传身份就能拿到内置角色的权限）",
       "ok": true,
-      "detail": "status=200 {\"agent\":{\"id\":50,\"name\":\"新智能体\",\"kind\":\"custom\",\"deletable\":true,\"projectId\":18,\"canCreateAgents\":false,\"personaStatus\":\"pending\",\"persona\":null,\"conversationId"
+      "detail": "status=400 body={\"error\":\"缺少 asAgentId：建智能体必须显式指定调用者（不会替你挑身份）\"}"
     },
     {
-      "name": "新建智能体落到了「当前使用中的项目」（默认项目）",
+      "name": "连 body 都不带 → 400（老前端那句 body:\"{}\" 的调法不再被接受）",
       "ok": true,
-      "detail": "agent.projectId=18 current=18"
+      "detail": "status=400 {\"error\":\"缺少 asAgentId：建智能体必须显式指定调用者（不会替你挑身份）\"}"
+    },
+    {
+      "name": "asAgentId 非法（0 / 字符串 / null）一律 400，不会被当成「没传」混过去",
+      "ok": true,
+      "detail": "0→400  'abc'→400  null→400"
+    },
+    {
+      "name": "被拒的这几次**一行数据都没建**（400 挡在写之前；默认项目里此刻只该有小助一只）",
+      "ok": true,
+      "detail": "agents in project 22 = 1（期望 1）"
+    },
+    {
+      "name": "自带小助**显式**作调用者 → 建成功",
+      "ok": true,
+      "detail": "status=200 {\"agent\":{\"id\":61,\"name\":\"新智能体\",\"kind\":\"custom\",\"deletable\":true,\"projectId\":22,\"canCreateAgents\":false,\"personaStatus\":\"pending\",\"persona\":null,\"conversationId"
+    },
+    {
+      "name": "新建智能体落在**调用者自己所在的项目**（小助 → 默认项目）",
+      "ok": true,
+      "detail": "agent.projectId=22 调用者项目=22 当前项目=22"
     },
     {
       "name": "普通智能体默认没有建智能体的权限",
@@ -140,22 +160,17 @@
     {
       "name": "403 时**没有产生半成品数据**",
       "ok": true,
-      "detail": "agents in project 18: 2 -> 2"
+      "detail": "agents in project 22: 2 -> 2"
     },
     {
       "name": "把同一个智能体的开关改成 true → 立刻能建（闸门认字段，不是认 kind）",
       "ok": true,
-      "detail": "status=200 {\"agent\":{\"id\":51,\"name\":\"新智能体\",\"kind\":\"custom\",\"deletable\":true,\"projectId\":18,\"canCreateAgents\":false,\"personaStatus\":\"pending\",\"persona\":"
+      "detail": "status=200 {\"agent\":{\"id\":62,\"name\":\"新智能体\",\"kind\":\"custom\",\"deletable\":true,\"projectId\":22,\"canCreateAgents\":false,\"personaStatus\":\"pending\",\"persona\":"
     },
     {
       "name": "开关改回 false → 又 403（可逆）",
       "ok": true,
       "detail": "status=403"
-    },
-    {
-      "name": "母鸡作为调用者可以建智能体",
-      "ok": true,
-      "detail": "status=200 新智能体 projectId=18（当前项目=18）"
     },
     {
       "name": "调用者不存在 → 404",
@@ -168,6 +183,31 @@
       "detail": "status=404 {\"error\":\"调用者智能体不存在或不是你的\"}"
     },
     {
+      "name": "对照前提：「当前项目」此刻是默认项目",
+      "ok": true,
+      "detail": "current=22 default=22"
+    },
+    {
+      "name": "母鸡作为调用者可以建智能体",
+      "ok": true,
+      "detail": "status=200 {\"agent\":{\"id\":63,\"name\":\"新智能体\",\"kind\":\"custom\",\"deletable\":true,\"projectId\":23,\"canCreateAgents\":false,\"personaStatus\":\"pending\",\"persona\":"
+    },
+    {
+      "name": "**归属跟调用者走（正向）**：当前项目=默认项目，调用者=「2A 验收项目」里的母鸡 → 新智能体落**母鸡那个项目**",
+      "ok": true,
+      "detail": "新智能体 projectId=23 调用者(母鸡)项目=23 当前项目=22"
+    },
+    {
+      "name": "**归属跟调用者走（反向）**：当前项目=「2A 验收项目」，调用者=默认项目里的小助 → 新智能体落**默认项目**",
+      "ok": true,
+      "detail": "当前项目=23 新智能体 projectId=22（期望 22）"
+    },
+    {
+      "name": "项目视角已复原成默认项目（后续用例基线）",
+      "ok": true,
+      "detail": "current=22"
+    },
+    {
       "name": "正对照：普通智能体删得掉（DELETE 200 + 库里那行没了）—— 闸门只挡内置角色",
       "ok": true,
       "detail": "status=200 剩余行=0"
@@ -175,32 +215,32 @@
     {
       "name": "母鸡在整轮测试跑完后依然在（从头到尾没被删掉过）",
       "ok": true,
-      "detail": "agents(id=49) 命中 1 行"
+      "detail": "agents(id=60) 命中 1 行"
     },
     {
       "name": "带 projectId 只回该项目里的智能体（默认项目）",
       "ok": true,
-      "detail": "default项目=[48,51,52] 母鸡id=49"
+      "detail": "default项目=[59,62,64] 母鸡id=60"
     },
     {
       "name": "带 projectId 只回该项目里的智能体（新建项目）",
       "ok": true,
-      "detail": "新项目=[49]，默认项目=[48,51,52]（两边的 id 集合没有交集）"
+      "detail": "新项目=[60,63]，默认项目=[59,62,64]（两边的 id 集合没有交集）"
     },
     {
       "name": "两个项目的结果集互补且都在「不带参数」的全集里（过滤没漏也没多）",
       "ok": true,
-      "detail": "all=[48,49,51,52] default=[48,51,52] new=[49]"
+      "detail": "all=[59,60,62,63,64] default=[59,62,64] new=[60,63]"
     },
     {
       "name": "不带参数 = 改造前行为（该账号全部智能体），前端不会被悄悄改掉",
       "ok": true,
-      "detail": "count=4"
+      "detail": "count=5"
     },
     {
       "name": "排序：小助 → 母鸡 → 普通（同一账号内小助仍排最前）",
       "ok": true,
-      "detail": "48:assistant 49:hen 51:custom 52:custom"
+      "detail": "59:assistant 60:hen 62:custom 63:custom 64:custom"
     },
     {
       "name": "查**别人的**项目 → 404",
@@ -220,22 +260,22 @@
     {
       "name": "在默认项目下上传资料成功，且回落了 projectId",
       "ok": true,
-      "detail": "{\"id\":15,\"filename\":\"默认项目的资料.md\",\"kind\":\"md\",\"byteSize\":58,\"chunkCount\":1,\"createdAt\":\"2026-09-17T02:48:05.238Z\",\"projectId\":18}"
+      "detail": "{\"id\":19,\"filename\":\"默认项目的资料.md\",\"kind\":\"md\",\"byteSize\":58,\"chunkCount\":1,\"createdAt\":\"2026-09-17T09:51:30.061Z\",\"projectId\":22}"
     },
     {
       "name": "切到新项目后上传的资料归属新项目",
       "ok": true,
-      "detail": "{\"id\":16,\"filename\":\"新项目的资料.md\",\"kind\":\"md\",\"byteSize\":52,\"chunkCount\":1,\"createdAt\":\"2026-09-17T02:48:05.248Z\",\"projectId\":19}"
+      "detail": "{\"id\":20,\"filename\":\"新项目的资料.md\",\"kind\":\"md\",\"byteSize\":52,\"chunkCount\":1,\"createdAt\":\"2026-09-17T09:51:30.072Z\",\"projectId\":23}"
     },
     {
       "name": "GET /knowledge（不带参数）只看**当前项目**：现在只看到新项目那 1 份",
       "ok": true,
-      "detail": "[{\"id\":16,\"filename\":\"新项目的资料.md\",\"kind\":\"md\",\"byteSize\":52,\"chunkCount\":1,\"createdAt\":\"2026-09-17T02:48:05.248Z\",\"projectId\":19}]"
+      "detail": "[{\"id\":20,\"filename\":\"新项目的资料.md\",\"kind\":\"md\",\"byteSize\":52,\"chunkCount\":1,\"createdAt\":\"2026-09-17T09:51:30.072Z\",\"projectId\":23}]"
     },
     {
       "name": "GET /knowledge?projectId=<默认项目> 只看得到默认项目那 1 份（**不跨项目串**）",
       "ok": true,
-      "detail": "[{\"id\":15,\"filename\":\"默认项目的资料.md\",\"kind\":\"md\",\"byteSize\":58,\"chunkCount\":1,\"createdAt\":\"2026-09-17T02:48:05.238Z\",\"projectId\":18}]"
+      "detail": "[{\"id\":19,\"filename\":\"默认项目的资料.md\",\"kind\":\"md\",\"byteSize\":58,\"chunkCount\":1,\"createdAt\":\"2026-09-17T09:51:30.061Z\",\"projectId\":22}]"
     },
     {
       "name": "查**别人的**项目的知识库 → 404",
@@ -250,7 +290,7 @@
     {
       "name": "直连库核对：本账号两份资料的 project_id 与它上传时所在项目一致",
       "ok": true,
-      "detail": "[{\"id\":\"15\",\"owner_id\":\"12\",\"project_id\":\"18\"},{\"id\":\"16\",\"owner_id\":\"12\",\"project_id\":\"19\"}]"
+      "detail": "[{\"id\":\"19\",\"owner_id\":\"14\",\"project_id\":\"22\"},{\"id\":\"20\",\"owner_id\":\"14\",\"project_id\":\"23\"}]"
     },
     {
       "name": "直连库核对：每个片段的 project_id 都等于它所属资料的 project_id",
@@ -311,50 +351,63 @@
     "liveLoops": 0,
     "loopMaxSteps": 10,
     "pageStates": 0,
-    "time": "2026-09-17T02:48:05.082Z"
+    "time": "2026-09-17T09:51:29.877Z"
   },
   "testPhone": "186****1234",
-  "testUserId": 12,
+  "testUserId": 14,
   "hen": {
-    "id": 49,
+    "id": 60,
     "name": "项目管家",
     "kind": "hen",
     "deletable": false,
-    "projectId": 19,
+    "projectId": 23,
     "canCreateAgents": true,
     "personaStatus": "ready",
     "persona": null,
-    "conversationId": 86,
+    "conversationId": 95,
     "listening": false
   },
   "newAgentByHen": {
-    "id": 52,
+    "id": 63,
     "name": "新智能体",
     "kind": "custom",
     "deletable": true,
-    "projectId": 18,
+    "projectId": 23,
     "canCreateAgents": false,
     "personaStatus": "pending",
     "persona": null,
-    "conversationId": 89
+    "conversationId": 98
+  },
+  "newAgentByAssistant": {
+    "id": 64,
+    "name": "新智能体",
+    "kind": "custom",
+    "deletable": true,
+    "projectId": 22,
+    "canCreateAgents": false,
+    "personaStatus": "pending",
+    "persona": null,
+    "conversationId": 99
   },
   "agentFilter": {
     "allIds": [
-      48,
-      49,
-      51,
-      52
+      59,
+      60,
+      62,
+      63,
+      64
     ],
     "defIds": [
-      48,
-      51,
-      52
+      59,
+      62,
+      64
     ],
     "newIds": [
-      49
+      60,
+      63
     ],
-    "defProject": 18,
-    "newProject": 19
+    "defProject": 22,
+    "newProject": 23
   },
   "liveAfter": {
     "counts": {
@@ -384,6 +437,6 @@
       "knowledge_chunks": "7,9"
     }
   },
-  "endedAt": "2026-09-17T02:48:05.275Z",
+  "endedAt": "2026-09-17T09:51:30.100Z",
   "failures": []
 }

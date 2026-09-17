@@ -2,7 +2,10 @@
 
 > 为什么拆出来：MEMORY.md 每次会话都会整份注入，超限就被截断。
 > 这里是「本机怎么跑、怎么取证」的工具类细节，**开工前读一次**即可；项目契约在 `MEMORY.md`。
-> 更细的操作手册在技能里：`electron-ui-verify`、`llm-prompt-capture-verify`、`db-race-verify`。
+> 更细的操作手册：技能 `workbench-project-phase-verify`（真机取证套路，**唯一已落盘**的验收技能）。
+>
+> ⚠️ 历史笔记里出现过的 `electron-ui-verify`、`llm-prompt-capture-verify`、`db-race-verify`
+> **从未落盘到 `~/.workbuddy/skills/`（暂未实现）**，别去那儿找；它们的内容散落在本文件与当天日志里。
 
 ## 一、常用命令
 - `npm run dev:server`（Fastify 8787，tsx watch 重载）、`npm run db:up`、`npm run dev`、`npm run typecheck`。
@@ -46,7 +49,9 @@
   + `liveLoops`（只算 running）+ `pageStates`（按页分片条数）。采样要用**一个长驻进程每秒一次**；
   bash + curl + 内联 python 每次 ~0.5s 开销，几秒就结束的循环根本采不到。采样前先读基线（重启后端会归零）。
 - **验并发一律用假模型 + 毫秒时间戳**，别用真 LLM（真模型延迟抖动会把「有没有真重叠」掩盖掉）——
-  见技能 `llm-prompt-capture-verify` 第七节，工具在 `scripts/verify/`（含复跑 README）。
+  工具 `scripts/verify/fake-llm.mjs`（固定延迟 `FAKE_DELAY_MS`），复跑说明在
+  `scripts/verify/README.md`；技能 `workbench-project-phase-verify` 的「可复用的四个积木」一节有入口
+  （历史笔记写的 `llm-prompt-capture-verify` 那个技能名**未落盘**）。
 - **`liveLoops` 会被「建了循环但没人驱动」的条目读歪**：循环只在 `advance()` 被调用时才离开 `running`，
   所以任务轮建了循环而桌面没驱动、或某一路放下时没来得及 `/agent/loop/stop`，都会以 `running`
   挂到 10 分钟 TTL 到期（不烧模型、不吃 CPU，只是指标读歪）。**取证前先重启后端拿 `liveLoops=0` 的干净基线**。
@@ -72,5 +77,11 @@
 - **迁移对照要用「上一个提交的真实 DDL」建迁移前结构**（`git show HEAD:apps/server/src/db.ts` 里抠 DDL，
   脚本已断言新列都不存在），**绝不能用活库对比** —— 活库开发中已跑过一次迁移，直接比是「迁移后 vs 迁移后」。
   活库只有 1 个 owner 有知识库资料，样本不够就**按 owner 加合成放大样本**（只进验收库，跑完连库删）。
+- **迁移对照的基线别写死 `HEAD`**：`HEAD` 在**改动未提交时**恰好 = 改动前，脚本「碰巧正确」；
+  一提交进历史就变成改动后 → 验收库的「迁移前」结构自带新列，**其余 11 条断言照样全绿**，
+  只有那条「新列不存在」的断言在报警。现在脚本从 HEAD **自动回溯**找第一个不含新列的提交
+  （`MIGRATE_BASE_COMMIT` 可覆盖），并把选中的 sha 写进证据 JSON。
+- **内容摘要别把 `created_at` 算进去**：那是「往一次性验收库里插入的时刻」，每轮都变，
+  带上它摘要跨轮不可复现；内容指纹只放内容列，写入时刻另用 `id+created_at` 做同轮内对比。
 - **活库零污染**的写法：基线拍「逐表行数 + 逐表 id 集合」，跑完复拍并断言一致；测试账号整体级联删除。
 - 老账号只读回归可以**自签 JWT**（`dist/crypto.js` 的 `signToken` + `.env` 的 `JWT_SECRET`），不必走短信。

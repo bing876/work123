@@ -5,8 +5,12 @@
  *   活库（workbench）在开发过程中**已经跑过一次**本迁移（列早就存在、也已经有项目归属了），
  *   直接拿活库对比等于「迁移后 vs 迁移后」，证明不了什么。所以这里：
  *     1) 新建一个**只在验收期存在**的库 `workbench_2a_check`；
- *     2) 用 **上一提交（HEAD）的真实 DDL** 建出「迁移前」的结构（没有 project_id / can_create_agents /
- *        current_project_id 这几列）—— 这是从 git 里取出来的原文，不是手写的近似版；
+ *     2) 用 **「加新列之前那个提交」的真实 DDL** 建出「迁移前」的结构（没有 can_create_agents /
+ *        current_project_id 这几列）—— 这是从 git 里取出来的原文，不是手写的近似版。
+ *        ⚠️ 不能再写死 `HEAD`：2-A 一旦提交进历史，`HEAD` 就变成「改动后」了，
+ *        「迁移前」结构会天然带着新列 → 对照退化成「迁移后 vs 迁移后」。
+ *        现在是**自动回溯**（从 HEAD 往回找第一个 db.ts 里不含新列的提交），可用
+ *        `MIGRATE_BASE_COMMIT=<sha>` 覆盖；脚本会把选中的提交写进证据 JSON；
  *     3) 把**活库的真实数据**按旧结构整表搬进去（列清单里天然不含新列 = 迁移前的真实状态）；
  *     4) 记录「迁移前」行数与内容摘要 → 调**构建产物 dist/db.js 里真正的 migrate()** → 记录「迁移后」；
  *     5) 对照：行数一致、内容摘要一致（正文一个字节没动）、每条都拿到归属、NOT NULL 收紧、二次执行零改动。
@@ -121,13 +125,18 @@ async function nullability(client, table, col) {
  * 知识库「内容摘要」：把两表里**除 project_id 之外**的全部内容按 id 排序拼起来做哈希。
  * 迁移前后哈希一致 = 正文/文件名/段序一条都没被动过（不只是行数没变）。
  */
+/**
+ * 内容指纹。**故意不含 `created_at`**：那是「往一次性验收库里插入的时刻」，每轮都不一样，
+ * 带上它摘要就跨轮不可复现（同一个库内容相同、摘要却变），没法当「内容没动」的跨轮证据。
+ * 写入时刻是否被迁移改动，另外用 `rowStampDigest()` 做**同一轮内**的前后对比。
+ */
 async function contentDigest(client) {
   const d = await client.query(
-    `SELECT id, owner_id, filename_enc, file_kind, byte_size, chunk_count, created_at
+    `SELECT id, owner_id, filename_enc, file_kind, byte_size, chunk_count
        FROM knowledge_documents ORDER BY id`,
   );
   const c = await client.query(
-    `SELECT id, document_id, owner_id, chunk_index, content_enc, created_at
+    `SELECT id, document_id, owner_id, chunk_index, content_enc
        FROM knowledge_chunks ORDER BY id`,
   );
   const docText = d.rows.map((r) => JSON.stringify(r)).join('\n');
@@ -138,6 +147,16 @@ async function contentDigest(client) {
     documentDigest: sha256(docText),
     chunkDigest: sha256(chunkText),
     contentBytesEnc: chunkText.length,
+  };
+}
+
+/** 整数时间戳 + id 的「行戳」，只用于**同一轮内**前后对比（值本身每轮不同，别跨轮比）。 */
+async function rowStampDigest(client) {
+  const d = await client.query(`SELECT id, created_at::text AS ts FROM knowledge_documents ORDER BY id`);
+  const c = await client.query(`SELECT id, created_at::text AS ts FROM knowledge_chunks ORDER BY id`);
+  return {
+    documents: sha256(d.rows.map((r) => `${r.id}:${r.ts}`).join('\n')),
+    chunks: sha256(c.rows.map((r) => `${r.id}:${r.ts}`).join('\n')),
   };
 }
 
@@ -199,11 +218,38 @@ async function runMigrateWithLog(pool) {
 }
 
 const failures = [];
+/** 全部断言（含 PASS）—— 必须落进证据 JSON，否则报告里的 PASS 原文在证据里查不到。 */
+const allChecks = [];
 function check(name, ok, detail) {
   const line = { name, ok, detail };
+  allChecks.push(line);
   if (!ok) failures.push(line);
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name} :: ${detail}`);
   return line;
+}
+
+/** 「加新列之前」的提交里 db.ts 一定不含这两个标记（2-A 才引入的列名，别的表没有同名字段）。 */
+const PRE_MIGRATION_MARKERS = ['can_create_agents', 'current_project_id'];
+
+/**
+ * 从 HEAD 往回找**第一个** db.ts 里还没有 2-A 新列的提交 —— 那才是真正的「迁移前」。
+ *
+ * 为什么不能写死 `HEAD`：2-A 未提交时 HEAD 恰好 = 改动前，脚本于是「碰巧正确」；
+ * 一旦 2-A 提交进历史，HEAD 就变成改动后，`git show HEAD:db.ts` 里的 DDL 自带新列 →
+ * 验收库的「迁移前」结构其实已经是迁移后，整条对照静默失效。
+ */
+function findPreMigrationCommit() {
+  const shas = execSync('git log --format=%H', { cwd: repo, encoding: 'utf8' }).trim().split('\n').filter(Boolean);
+  for (const sha of shas) {
+    let src = '';
+    try {
+      src = execSync(`git show ${sha}:apps/server/src/db.ts`, { cwd: repo, encoding: 'utf8' });
+    } catch {
+      continue; // 这个提交里还没有这个文件
+    }
+    if (!PRE_MIGRATION_MARKERS.some((m) => src.includes(m))) return sha;
+  }
+  throw new Error('翻遍历史都没找到「加新列之前」的提交，请用 MIGRATE_BASE_COMMIT=<sha> 指定');
 }
 
 async function main() {
@@ -222,8 +268,9 @@ async function main() {
 
   const checkDb = await connect(CHECK_URL);
 
-  // --------------------------------------- 2. 用 HEAD 的真实 DDL 建「迁移前」结构
-  const oldSrc = execSync('git show HEAD:apps/server/src/db.ts', { cwd: repo, encoding: 'utf8' });
+  // ------------------------- 2. 用「加新列之前那个提交」的真实 DDL 建「迁移前」结构
+  const baseCommit = process.env.MIGRATE_BASE_COMMIT || findPreMigrationCommit();
+  const oldSrc = execSync(`git show ${baseCommit}:apps/server/src/db.ts`, { cwd: repo, encoding: 'utf8' });
   const from = oldSrc.indexOf('const DDL = `') + 'const DDL = `'.length;
   const to = oldSrc.indexOf('`;', from);
   const oldDdl = oldSrc.slice(from, to);
@@ -231,10 +278,16 @@ async function main() {
   await checkDb.query(oldDdl);
 
   const head = execSync('git rev-parse --short HEAD', { cwd: repo, encoding: 'utf8' }).trim();
-  evidence.step2 = { headCommit: head, oldDdlLength: oldDdl.length, oldDdlSha256: sha256(oldDdl) };
+  evidence.step2 = {
+    baseCommit: execSync(`git rev-parse --short ${baseCommit}`, { cwd: repo, encoding: 'utf8' }).trim(),
+    baseCommitFull: baseCommit,
+    headCommit: head,
+    oldDdlLength: oldDdl.length,
+    oldDdlSha256: sha256(oldDdl),
+  };
   const preCols = await columnPresence(checkDb);
   check(
-    '迁移前结构里确实没有 2-A 的新列（说明这套对照是「真的迁移前」）',
+    `迁移前结构里确实没有 2-A 的新列（基线取自 ${evidence.step2.baseCommit}，${baseCommit === head ? '⚠️ 就是 HEAD' : '≠ HEAD'}）`,
     Object.values(preCols).every((cols) => Object.values(cols).every((v) => v === false)),
     JSON.stringify(preCols),
   );
@@ -286,6 +339,7 @@ async function main() {
 
   const beforeCounts = await counts(checkDb);
   const beforeDigest = await contentDigest(checkDb);
+  const beforeStamp = await rowStampDigest(checkDb);
   const beforeByOwner = await byOwner(checkDb);
   // 「搬运是否完整」：除知识库两张表（多了合成样本）外，其余逐表必须与活库一致；
   // 知识库两张表则是「活库条数 + 合成条数」。
@@ -316,6 +370,7 @@ async function main() {
       'knowledge_chunks.project_id': await nullability(checkDb, 'knowledge_chunks', 'project_id'),
     },
     digest: beforeDigest,
+    rowStamp: beforeStamp,
   };
   evidence.before = before;
   console.log('\n===== 迁移前 =====');
@@ -331,6 +386,7 @@ async function main() {
 
   const afterCounts = await counts(checkDb);
   const afterDigest = await contentDigest(checkDb);
+  const afterStamp = await rowStampDigest(checkDb);
   const afterByOwner = await byOwner(checkDb);
   const afterCols = await columnPresence(checkDb);
   const assignment = await assignmentReport(checkDb, expected);
@@ -352,6 +408,7 @@ async function main() {
       'knowledge_chunks.project_id': await nullability(checkDb, 'knowledge_chunks', 'project_id'),
     },
     digest: afterDigest,
+    rowStamp: afterStamp,
     assignment,
     expectedAssignment: expected,
   };
@@ -375,10 +432,16 @@ async function main() {
     JSON.stringify(afterByOwner),
   );
   check(
-    '正文零改动：知识库内容摘要（sha256）逐表一致',
+    '正文零改动：知识库内容摘要（sha256）逐表一致（内容指纹不含写入时刻，因此跨轮也可复现）',
     beforeDigest.documentDigest === afterDigest.documentDigest && beforeDigest.chunkDigest === afterDigest.chunkDigest,
     `docs ${beforeDigest.documentDigest.slice(0, 16)} -> ${afterDigest.documentDigest.slice(0, 16)} / ` +
       `chunks ${beforeDigest.chunkDigest.slice(0, 16)} -> ${afterDigest.chunkDigest.slice(0, 16)}`,
+  );
+  check(
+    '迁移是「原地加列」：每一行的 created_at 都没被动过（同轮内 id+时间戳指纹一致）',
+    beforeStamp.documents === afterStamp.documents && beforeStamp.chunks === afterStamp.chunks,
+    `docs ${beforeStamp.documents.slice(0, 16)} -> ${afterStamp.documents.slice(0, 16)} / ` +
+      `chunks ${beforeStamp.chunks.slice(0, 16)} -> ${afterStamp.chunks.slice(0, 16)}`,
   );
   check(
     '每条资料/片段都拿到了项目归属（按 owner 的默认项目，逐条核对）',
@@ -445,10 +508,13 @@ async function main() {
   await tail.end();
 
   evidence.endedAt = new Date().toISOString();
+  evidence.checks = allChecks;
   evidence.failures = failures;
   writeFileSync(outFile, JSON.stringify(evidence, null, 2) + '\n', 'utf8');
 
-  console.log(`\n===== 结果 =====\n${failures.length === 0 ? '全部通过' : `${failures.length} 条失败`}；证据：${outFile}`);
+  console.log(
+    `\n===== 结果 =====\n共 ${allChecks.length} 条，${failures.length === 0 ? '全部通过' : `${failures.length} 条失败`}；证据：${outFile}`,
+  );
   if (!keep) console.log(`[cleanup] 已删除验收库 ${CHECK_DB}（活库 workbench 全程只读）`);
   process.exit(failures.length === 0 ? 0 : 1);
 }
