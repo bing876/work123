@@ -185,10 +185,11 @@ const TOKEN_KEY = 'workbench.token';
  * 之所以不复用 shared 的运行时值：渲染层至今只从 shared 取类型，不引入打包期依赖更稳。
  */
 const SETTINGS_FALLBACK: WorkbenchSettings = {
-  // 注意：这份兜底只在「主进程还没把配置同步过来」的首帧生效，**并发闸的实际判定在主进程**
-  // （main.ts 的 startAgentLoop 读的是 settings.ts 的权威副本），所以它不影响子阶段 A 的默认值。
-  // 子阶段 A 明确「不改动前端 UI 代码」，所以这里**保持原值不动**，只在验收报告里记为待办。
-  maxConcurrentAgentTasks: 1,
+  // ⚠️ 这两个数必须与 packages/shared 的 DEFAULT_SETTINGS 保持一致（权威值在主进程 settings.ts，
+  // 这里只是首帧兜底）。之所以不复用 shared 的运行时值：渲染层至今只从 shared 取**类型**，
+  // 不引入打包期依赖更稳 —— 代价就是**改默认值时要记得同步这一处**。
+  // 当前：并发默认 20（子阶段 A 起）、开页上限默认 4。
+  maxConcurrentAgentTasks: 20,
   maxBrowserInstances: 4,
 };
 
@@ -1695,7 +1696,8 @@ export default function App() {
               className="authInput settingsRow__num"
               type="number"
               min={1}
-              max={8}
+              // 上限与 packages/shared 的 SETTINGS_RANGE.maxConcurrentAgentTasks 一致（改一处要改两处）
+              max={20}
               value={settings.maxConcurrentAgentTasks}
               onChange={(e) => void onSettingsChange({ maxConcurrentAgentTasks: Number(e.target.value) })}
             />
@@ -1709,13 +1711,15 @@ export default function App() {
               className="authInput settingsRow__num"
               type="number"
               min={1}
+              // 上限与 packages/shared 的 SETTINGS_RANGE.maxBrowserInstances 一致
               max={20}
               value={settings.maxBrowserInstances}
               onChange={(e) => void onSettingsChange({ maxBrowserInstances: Number(e.target.value) })}
             />
           </div>
           <div className="small">
-            并发默认 1：一期只跑一路（调大即解锁多实例并行，数据结构无需改）。开页上限默认 4：到顶只拒绝新开，绝不关掉已有页。
+            并发默认 20：调小可临时限流、调大即解锁更多并行（状态本就按页独立存储，改这个数不用动数据结构）。
+            开页上限默认 4：到顶只拒绝新开，绝不关掉已有页。
           </div>
           {/* 第 15 步：两层记忆分开展示——上面那份是「这个人」的，下面那份是当前智能体的 */}
           <div className="buttons-row">
