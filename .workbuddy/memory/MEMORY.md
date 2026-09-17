@@ -24,6 +24,9 @@
 - 证明没 force：push 输出无 `+` + `ls-remote`/本地 ref/HEAD 三者一致 + `merge-base --is-ancestor <基线> HEAD`。
 - 推 GitHub 走 Clash，**四个变量都要导出**（只导出小写会盖掉大写并 502）：
   `export http_proxy=http://127.0.0.1:7897 https_proxy=$http_proxy HTTP_PROXY=$http_proxy HTTPS_PROXY=$http_proxy`
+- **记忆写 `.workbuddy/memory/`** —— 客户端默认就是这个名字，仓库跟踪的也是它，**两边天然一致，
+  不需要任何联接/脚本**。2026-09-18 之前是 `.workbuddy-ai/memory/`（历史提交不改写）。
+  详见 `TOOLING.md` §六。
 
 ## 二、稳定契约（已实现，改动易踩坏）
 - **会话唯一性**：一个智能体只能有一条会话，建会话一律走 `ensureAgentConversation(pool, ownerId, agentId)`；
